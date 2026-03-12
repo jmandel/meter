@@ -556,12 +556,63 @@ function applyMarkdownHighlights(container: HTMLElement, previousLeafTexts: Set<
   const nextLeafTexts = new Set(getLeafNodes(container));
   const candidates = container.querySelectorAll("h1,h2,h3,h4,p,li,blockquote,pre,td");
   for (const element of candidates) {
+    element.classList.remove("diff-new");
     const text = element.textContent?.trim();
     if (text && !previousLeafTexts.has(text)) {
+      void (element as HTMLElement).offsetWidth;
       element.classList.add("diff-new");
     }
   }
   return nextLeafTexts;
+}
+
+function getMeaningfulChildNodes(parent: ParentNode): ChildNode[] {
+  return Array.from(parent.childNodes).filter((node) => node.nodeType !== Node.TEXT_NODE || Boolean(node.textContent?.trim()));
+}
+
+function nodeSignature(node: ChildNode): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return `text:${node.textContent ?? ""}`;
+  }
+  return `element:${(node as Element).outerHTML}`;
+}
+
+function reconcileRenderedMarkdown(container: HTMLElement, html: string): void {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const currentNodes = getMeaningfulChildNodes(container);
+  const nextNodes = getMeaningfulChildNodes(template.content);
+  const currentSignatures = currentNodes.map((node) => nodeSignature(node));
+  const nextSignatures = nextNodes.map((node) => nodeSignature(node));
+
+  let prefix = 0;
+  while (
+    prefix < currentSignatures.length
+    && prefix < nextSignatures.length
+    && currentSignatures[prefix] === nextSignatures[prefix]
+  ) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < currentSignatures.length - prefix
+    && suffix < nextSignatures.length - prefix
+    && currentSignatures[currentSignatures.length - 1 - suffix] === nextSignatures[nextSignatures.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  for (let index = prefix; index < currentNodes.length - suffix; index += 1) {
+    currentNodes[index]?.remove();
+  }
+
+  const anchor = currentNodes[currentNodes.length - suffix] ?? null;
+  const fragment = document.createDocumentFragment();
+  for (let index = prefix; index < nextNodes.length - suffix; index += 1) {
+    fragment.appendChild(nextNodes[index]);
+  }
+  container.insertBefore(fragment, anchor);
 }
 
 interface SelectionSnapshot {
@@ -661,10 +712,100 @@ function scoreSelectionMatch(fullText: string, start: number, snapshot: Selectio
   return score;
 }
 
-function findSelectionOffsets(fullText: string, snapshot: SelectionSnapshot): { start: number; end: number } | null {
-  if (snapshot.end <= fullText.length && fullText.slice(snapshot.start, snapshot.end) === snapshot.text) {
-    return { start: snapshot.start, end: snapshot.end };
+function commonPrefixLength(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  let index = 0;
+  while (index < limit && left[index] === right[index]) {
+    index += 1;
   }
+  return index;
+}
+
+function findAnchoredSelectionStart(fullText: string, snapshot: SelectionSnapshot): number | null {
+  const boundedStart = Math.min(snapshot.start, fullText.length);
+  const boundedEnd = Math.min(snapshot.end, fullText.length);
+  if (boundedEnd <= fullText.length && fullText.slice(boundedStart, boundedEnd) === snapshot.text) {
+    return boundedStart;
+  }
+  const boundedPrefixStart = Math.max(0, boundedStart - snapshot.prefixContext.length);
+  if (
+    snapshot.prefixContext
+    && fullText.slice(boundedPrefixStart, boundedStart) === snapshot.prefixContext
+  ) {
+    return boundedStart;
+  }
+  if (!snapshot.text) {
+    return boundedStart;
+  }
+
+  let bestStart = -1;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  if (snapshot.prefixContext) {
+    let searchFrom = 0;
+    while (searchFrom <= fullText.length) {
+      const matchIndex = fullText.indexOf(snapshot.prefixContext, searchFrom);
+      if (matchIndex === -1) {
+        break;
+      }
+      const candidateStart = matchIndex + snapshot.prefixContext.length;
+      let score = 8;
+      score -= Math.abs(candidateStart - snapshot.start) / 500;
+      if (candidateStart < snapshot.start) {
+        score -= 5;
+      }
+      const prefixLength = commonPrefixLength(snapshot.text, fullText.slice(candidateStart));
+      score += prefixLength / Math.max(1, snapshot.text.length);
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = candidateStart;
+      }
+      searchFrom = matchIndex + Math.max(1, snapshot.prefixContext.length);
+    }
+  }
+
+  if (bestStart === -1) {
+    let searchFrom = 0;
+    const probe = snapshot.text.slice(0, Math.min(snapshot.text.length, 24));
+    while (probe && searchFrom <= fullText.length) {
+      const matchIndex = fullText.indexOf(probe, searchFrom);
+      if (matchIndex === -1) {
+        break;
+      }
+      let score = 4;
+      score -= Math.abs(matchIndex - snapshot.start) / 500;
+      if (matchIndex < snapshot.start) {
+        score -= 5;
+      }
+      const prefixLength = commonPrefixLength(snapshot.text, fullText.slice(matchIndex));
+      score += prefixLength / Math.max(1, snapshot.text.length);
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = matchIndex;
+      }
+      searchFrom = matchIndex + Math.max(1, probe.length);
+    }
+  }
+
+  return bestStart === -1 ? null : bestStart;
+}
+
+function findSelectionOffsets(fullText: string, snapshot: SelectionSnapshot): { start: number; end: number } | null {
+  const anchoredStart = findAnchoredSelectionStart(fullText, snapshot);
+  if (anchoredStart !== null) {
+    if (!snapshot.text) {
+      return { start: anchoredStart, end: anchoredStart };
+    }
+    const exactSlice = fullText.slice(anchoredStart, anchoredStart + snapshot.text.length);
+    if (exactSlice === snapshot.text) {
+      return { start: anchoredStart, end: anchoredStart + snapshot.text.length };
+    }
+    const prefixLength = commonPrefixLength(snapshot.text, fullText.slice(anchoredStart));
+    if (prefixLength > 0) {
+      return { start: anchoredStart, end: anchoredStart + prefixLength };
+    }
+  }
+
   if (!snapshot.text) {
     const position = Math.min(snapshot.start, fullText.length);
     return { start: position, end: position };
@@ -678,7 +819,7 @@ function findSelectionOffsets(fullText: string, snapshot: SelectionSnapshot): { 
     if (matchIndex === -1) {
       break;
     }
-    const score = scoreSelectionMatch(fullText, matchIndex, snapshot);
+    const score = scoreSelectionMatch(fullText, matchIndex, snapshot) - (matchIndex < snapshot.start ? 5 : 0);
     if (score > bestScore) {
       bestScore = score;
       bestStart = matchIndex;
@@ -695,12 +836,24 @@ function findSelectionOffsets(fullText: string, snapshot: SelectionSnapshot): { 
 }
 
 function restoreSelectionSnapshot(container: HTMLElement, snapshot: SelectionSnapshot): void {
-  const offsets = findSelectionOffsets(container.textContent ?? "", snapshot);
-  if (!offsets) {
+  const fullText = container.textContent ?? "";
+  const offsets = findSelectionOffsets(fullText, snapshot);
+  const fallbackStart = findAnchoredSelectionStart(fullText, snapshot);
+  const targetOffsets = offsets ?? (
+    fallbackStart !== null
+      ? {
+          start: fallbackStart,
+          end: fallbackStart + commonPrefixLength(snapshot.text, fullText.slice(fallbackStart)),
+        }
+      : null
+  );
+  if (!targetOffsets) {
     return;
   }
-  const startPosition = resolveTextNodePosition(container, offsets.start);
-  const endPosition = resolveTextNodePosition(container, offsets.end);
+  const safeStart = Math.max(0, Math.min(targetOffsets.start, fullText.length));
+  const safeEnd = Math.max(safeStart, Math.min(targetOffsets.end, fullText.length));
+  const startPosition = resolveTextNodePosition(container, safeStart);
+  const endPosition = resolveTextNodePosition(container, safeEnd);
   if (!startPosition || !endPosition) {
     return;
   }
@@ -713,6 +866,21 @@ function restoreSelectionSnapshot(container: HTMLElement, snapshot: SelectionSna
   }
   selection.removeAllRanges();
   selection.addRange(range);
+}
+
+function selectionInsideContainer(container: HTMLElement): boolean {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return false;
+  }
+  const range = selection.getRangeAt(0);
+  const startContainer = range.startContainer.nodeType === Node.TEXT_NODE
+    ? range.startContainer.parentElement
+    : range.startContainer as Element | null;
+  const endContainer = range.endContainer.nodeType === Node.TEXT_NODE
+    ? range.endContainer.parentElement
+    : range.endContainer as Element | null;
+  return Boolean(startContainer && endContainer && container.contains(startContainer) && container.contains(endContainer));
 }
 
 function setStatusClass(root: HTMLElement | null, tone: "idle" | "live" | "reconnecting"): void {
@@ -776,7 +944,7 @@ function App() {
   const [updatedLabel, setUpdatedLabel] = useState("Waiting for first minute snapshot…");
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(true);
-  const contentRef = useRef<HTMLDivElement | null>(null);
+  const markdownRootRef = useRef<HTMLDivElement | null>(null);
   const previousLeafTextsRef = useRef(new Set<string>());
   const lastMarkdownRef = useRef("");
   const windowStickBottomRef = useRef(true);
@@ -802,7 +970,7 @@ function App() {
   const renderedContent = useMemo(() => renderMinutesMarkdown(content), [content]);
 
   const applyIncomingMarkdown = (markdown: string, updatedLabelText: string) => {
-    const container = contentRef.current;
+    const container = markdownRootRef.current;
     if (container) {
       pendingSelectionRef.current = captureSelectionSnapshot(container);
     }
@@ -878,14 +1046,17 @@ function App() {
   }, []);
 
   useLayoutEffect(() => {
-    const viewport = contentRef.current;
-    if (!viewport) {
+    const markdownRoot = markdownRootRef.current;
+    if (!markdownRoot) {
       return;
     }
-    const nextLeafTexts = applyMarkdownHighlights(viewport, previousLeafTextsRef.current);
+    reconcileRenderedMarkdown(markdownRoot, renderedContent);
+    const nextLeafTexts = applyMarkdownHighlights(markdownRoot, previousLeafTextsRef.current);
     previousLeafTextsRef.current = nextLeafTexts;
     if (pendingSelectionRef.current) {
-      restoreSelectionSnapshot(viewport, pendingSelectionRef.current);
+      if (!selectionInsideContainer(markdownRoot)) {
+        restoreSelectionSnapshot(markdownRoot, pendingSelectionRef.current);
+      }
       pendingSelectionRef.current = null;
     }
   }, [renderedContent]);
@@ -1121,14 +1292,18 @@ function App() {
               {requestState === "stopping" ? "Stopping…" : "Stop minutes"}
             </button>
           </div>
-          <div className="meta-row">
-            <span>{minuteJob?.claude_model ?? "default model"}</span>
-            <span>{minuteJob?.claude_effort ?? "default effort"}</span>
-          </div>
-          <div className="copy-row">
-            <span>TMUX: {minuteJob?.tmux_session_name ?? "--"}</span>
-            {copyNotice ? <span>{copyNotice}</span> : null}
-          </div>
+          {minuteJob ? (
+            <div className="meta-row">
+              <span>{minuteJob.claude_model ?? "server default model"}</span>
+              <span>{minuteJob.claude_effort ?? "server default effort"}</span>
+            </div>
+          ) : null}
+          {minuteJob?.tmux_session_name || copyNotice ? (
+            <div className="copy-row">
+              {minuteJob?.tmux_session_name ? <span>TMUX: {minuteJob.tmux_session_name}</span> : null}
+              {copyNotice ? <span>{copyNotice}</span> : null}
+            </div>
+          ) : null}
           {error ? <div className="inline-error">{error}</div> : null}
         </aside>
         ) : null}
@@ -1143,9 +1318,9 @@ function App() {
               <span>{updatedLabel}</span>
             </div>
           </div>
-          <div className="viewer" ref={contentRef}>
+          <div className="viewer">
             {content ? (
-              <div className="minutes-markdown" dangerouslySetInnerHTML={{ __html: renderedContent }} />
+              <div className="minutes-markdown" ref={markdownRootRef} />
             ) : (
               <div className="empty">Waiting for minutes…</div>
             )}
