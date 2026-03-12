@@ -765,9 +765,7 @@ export class CoordinatorApp {
     }
 
     const lines = [
-      `# Zoom ${heading}`,
-      "",
-      `Started: ${formatTimestamp(startedAt)}`,
+      `# ${heading} · ${formatTimestamp(startedAt)}`,
       `Meeting URL: ${meetingRun.normalized_join_url}`,
       "",
       "## Transcript",

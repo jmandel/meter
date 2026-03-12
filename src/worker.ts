@@ -936,7 +936,7 @@ export class WorkerProcess {
     await this.emitEvent("worker", "error.raised", errorPayload);
     await this.log(`error ${code}: ${message}`);
     if (fatal) {
-      await this.complete("failed", errorPayload);
+      void this.complete("failed", errorPayload);
     }
   }
 
@@ -969,9 +969,6 @@ export class WorkerProcess {
       case "dom.event":
         await this.handleDomEvent(message);
         break;
-      case "archive.flush":
-        await this.handleArchiveFlush(message);
-        break;
       default:
         await this.raiseError("unknown_browser_message", `Unsupported browser message type ${(message as { type?: string }).type ?? "unknown"}`, false);
         break;
@@ -1002,6 +999,7 @@ export class WorkerProcess {
       pcm_channels: message.pcm_channels,
     };
     await this.setState("capturing");
+    await this.ensureArchiveEncoder(message);
     await this.browserLog(`capture started archive=${message.archive_stream_id} live=${message.live_stream_id}`);
     await this.emitEvent("audio_capture", "audio.capture.started", payload, message, message.ts_unix_ms);
     await this.getTranscriptionAdapter().start(payload);
@@ -1014,7 +1012,7 @@ export class WorkerProcess {
     }, message, message.ts_unix_ms);
     await this.getTranscriptionAdapter().stop(message.reason);
     if (this.launch.options.auto_stop_when_meeting_ends) {
-      await this.complete("completed");
+      void this.complete("completed");
     }
   }
 
@@ -1042,106 +1040,237 @@ export class WorkerProcess {
     } satisfies TranscriptionSegmentPayload;
   }
 
-  private async handleArchiveFlush(message: BrowserUploadAckRequest): Promise<void> {
-    await this.browserLog(`archive flush stream=${message.archive_stream_id} seq=${message.highest_chunk_seq}`);
+  private ffmpegBinary(): string {
+    return process.env.FFMPEG_BIN || "ffmpeg";
   }
 
-  private async handleArchiveUpload(request: Request, archiveStreamId: string, chunkSeq: number): Promise<Response> {
-    if (!this.launch.options.persist_archive_audio) {
-      return errorResponse(409, "archive_disabled", "Archive audio persistence is disabled");
+  private async reportArchiveError(message: string, details?: Record<string, unknown>): Promise<void> {
+    if (this.archiveErrorReported) {
+      return;
     }
-
-    const contentType = getRequiredHeader(request, "content-type");
-    const startedAt = Number.parseInt(getRequiredHeader(request, "x-chunk-started-at"), 10);
-    const endedAt = Number.parseInt(getRequiredHeader(request, "x-chunk-ended-at"), 10);
-    const shaHeader = getRequiredHeader(request, "x-sha256");
-    const bytes = new Uint8Array(await request.arrayBuffer());
-    const computedSha = await sha256Hex(bytes);
-    if (computedSha !== shaHeader) {
-      return errorResponse(400, "sha_mismatch", "Archive chunk digest mismatch");
-    }
-
-    const filePath = path.join(this.paths.archive_audio_dir, `${String(chunkSeq).padStart(6, "0")}.webm`);
-    await Bun.write(filePath, bytes, { createPath: true });
-
-    const manifest = (await readJsonFile<{ chunks: Array<Record<string, unknown>> }>(this.paths.archive_manifest_path)) ?? { chunks: [] };
-    const audioObjectId = uuidv7(endedAt);
-    manifest.chunks.push({
-      audio_object_id: audioObjectId,
-      archive_stream_id: archiveStreamId,
-      chunk_seq: chunkSeq,
-      path: filePath,
-      byte_length: bytes.byteLength,
-      started_at_unix_ms: startedAt,
-      ended_at_unix_ms: endedAt,
-      sha256_hex: computedSha,
+    this.archiveErrorReported = true;
+    this.archiveEncoder.failed = true;
+    await this.raiseError("archive_encoder_failed", message, false, {
+      ffmpeg_bin: this.ffmpegBinary(),
+      ...details,
     });
-    await writeJsonFile(this.paths.archive_manifest_path, manifest);
+  }
+
+  private async ensureArchiveEncoder(message: BrowserCaptureStartedMessage): Promise<void> {
+    if (!this.launch.options.persist_archive_audio || this.archiveEncoder.process || this.archiveEncoder.failed) {
+      return;
+    }
+
+    this.archiveEncoder.streamId = message.archive_stream_id;
+    this.archiveEncoder.sampleRateHz = message.pcm_sample_rate_hz;
+    this.archiveEncoder.channels = message.pcm_channels;
+
+    const args = [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-y",
+      "-f",
+      "s16le",
+      "-ar",
+      String(message.pcm_sample_rate_hz),
+      "-ac",
+      String(message.pcm_channels),
+      "-i",
+      "pipe:0",
+      "-vn",
+      "-codec:a",
+      "libmp3lame",
+      "-q:a",
+      "2",
+      this.paths.archive_mp3_path,
+    ];
+
+    try {
+      const child = spawn(this.ffmpegBinary(), args, {
+        stdio: ["pipe", "ignore", "pipe"],
+      });
+      this.archiveEncoder.process = child;
+      this.archiveEncoder.closePromise = new Promise<number | null>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+      child.once("error", (error) => {
+        void this.reportArchiveError("Failed to start ffmpeg archive encoder", {
+          message: error.message,
+        });
+      });
+      child.stderr.on("data", (chunk) => {
+        const text = Buffer.from(chunk).toString("utf8").trim();
+        if (!text) {
+          return;
+        }
+        void this.log(`[ffmpeg] ${text}`);
+      });
+      await this.log(`archive encoder started path=${this.paths.archive_mp3_path}`);
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      await this.reportArchiveError("Failed to start ffmpeg archive encoder", {
+        message: messageText,
+      });
+    }
+  }
+
+  private async appendArchiveFrame(frame: ReturnType<typeof parsePcmFrame>): Promise<void> {
+    if (!this.launch.options.persist_archive_audio || !this.archiveEncoder.process || this.archiveEncoder.failed) {
+      return;
+    }
+
+    const sampleCount = frame.payload.byteLength / 2;
+    const endedAt = frame.ts_unix_ms + Math.round((sampleCount / frame.sample_rate_hz) * 1000);
+    if (this.archiveEncoder.startedAtUnixMs === null) {
+      this.archiveEncoder.startedAtUnixMs = frame.ts_unix_ms;
+    }
+    this.archiveEncoder.endedAtUnixMs = endedAt;
+
+    const chunk = Buffer.from(frame.payload.buffer, frame.payload.byteOffset, frame.payload.byteLength);
+    this.archiveEncoder.writeChain = this.archiveEncoder.writeChain
+      .then(async () => {
+        const child = this.archiveEncoder.process;
+        if (!child || this.archiveEncoder.failed) {
+          return;
+        }
+        await new Promise<void>((resolve, reject) => {
+          child.stdin.write(chunk, (error) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+            resolve();
+          });
+        });
+      })
+      .catch(async (error) => {
+        const messageText = error instanceof Error ? error.message : String(error);
+        await this.reportArchiveError("Failed to write PCM frame into ffmpeg", {
+          message: messageText,
+        });
+      });
+
+    await this.archiveEncoder.writeChain;
+  }
+
+  private async finalizeArchive(): Promise<void> {
+    if (!this.launch.options.persist_archive_audio || this.archiveEncoder.emitted || this.archiveEncoder.failed) {
+      return;
+    }
+
+    const child = this.archiveEncoder.process;
+    const closePromise = this.archiveEncoder.closePromise;
+    if (!child || !closePromise) {
+      return;
+    }
+
+    this.archiveEncoder.process = null;
+    await this.archiveEncoder.writeChain;
+    child.stdin.end();
+
+    let exitCode: number | null;
+    try {
+      exitCode = await closePromise;
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      await this.reportArchiveError("ffmpeg archive encoder exited with an error", {
+        message: messageText,
+      });
+      return;
+    }
+
+    if (exitCode !== 0) {
+      await this.reportArchiveError(`ffmpeg archive encoder exited with code ${exitCode}`, {
+        path: this.paths.archive_mp3_path,
+      });
+      return;
+    }
+
+    const file = Bun.file(this.paths.archive_mp3_path);
+    if (!(await file.exists()) || file.size <= 0) {
+      await this.reportArchiveError("ffmpeg did not produce an MP3 archive", {
+        path: this.paths.archive_mp3_path,
+      });
+      return;
+    }
+
+    const startedAt = this.archiveEncoder.startedAtUnixMs;
+    const endedAt = this.archiveEncoder.endedAtUnixMs ?? nowUnixMs();
+    const audioObjectId = uuidv7(endedAt);
+    await writeJsonFile(this.paths.archive_manifest_path, {
+      chunks: [
+        {
+          audio_object_id: audioObjectId,
+          archive_stream_id: this.archiveEncoder.streamId,
+          chunk_seq: 1,
+          path: this.paths.archive_mp3_path,
+          byte_length: file.size,
+          started_at_unix_ms: startedAt,
+          ended_at_unix_ms: endedAt,
+          sha256_hex: null,
+        },
+      ],
+    });
 
     const payload: AudioChunkWrittenPayload = {
       audio_object_id: audioObjectId,
       stream_kind: "archive",
-      stream_id: archiveStreamId,
-      path: filePath,
-      chunk_seq: chunkSeq,
-      byte_length: bytes.byteLength,
-      content_type: contentType,
-      codec: contentType.includes("codecs=") ? contentType.split("codecs=")[1] : null,
+      stream_id: this.archiveEncoder.streamId ?? "archive",
+      path: this.paths.archive_mp3_path,
+      chunk_seq: 1,
+      byte_length: file.size,
+      content_type: "audio/mpeg",
+      codec: "mp3",
       started_at_unix_ms: startedAt,
       ended_at_unix_ms: endedAt,
-      sha256_hex: computedSha,
+      sha256_hex: null,
     };
+    this.archiveEncoder.emitted = true;
     await this.emitEvent("audio_capture", "audio.archive.chunk_written", payload, undefined, endedAt);
-
-    const response: ArchiveChunkUploadResponse = {
-      accepted: true,
-      audio_object_id: audioObjectId,
-      path: filePath,
-      byte_length: bytes.byteLength,
-    };
-    return jsonResponse(response);
   }
 
   private async handlePcmFrame(bytes: Uint8Array): Promise<void> {
     const frame = parsePcmFrame(bytes);
-    if (!this.launch.options.persist_live_pcm || !this.paths.live_pcm_dir) {
-      await this.getTranscriptionAdapter().pushFrame(frame);
-      return;
-    }
+    await this.appendArchiveFrame(frame);
 
-    const filePath = path.join(this.paths.live_pcm_dir, `${String(frame.stream_seq).padStart(6, "0")}.pcm`);
-    await Bun.write(filePath, frame.payload, { createPath: true });
-    const sampleCount = frame.payload.byteLength / 2;
-    const endedAt = frame.ts_unix_ms + Math.round((sampleCount / frame.sample_rate_hz) * 1000);
-    const manifest = this.paths.live_pcm_manifest_path
-      ? (await readJsonFile<{ chunks: Array<Record<string, unknown>> }>(this.paths.live_pcm_manifest_path)) ?? { chunks: [] }
-      : null;
-    const audioObjectId = uuidv7(frame.ts_unix_ms);
-    if (manifest && this.paths.live_pcm_manifest_path) {
-      manifest.chunks.push({
+    if (this.launch.options.persist_live_pcm && this.paths.live_pcm_dir) {
+      const filePath = path.join(this.paths.live_pcm_dir, `${String(frame.stream_seq).padStart(6, "0")}.pcm`);
+      await Bun.write(filePath, frame.payload, { createPath: true });
+      const sampleCount = frame.payload.byteLength / 2;
+      const endedAt = frame.ts_unix_ms + Math.round((sampleCount / frame.sample_rate_hz) * 1000);
+      const manifest = this.paths.live_pcm_manifest_path
+        ? (await readJsonFile<{ chunks: Array<Record<string, unknown>> }>(this.paths.live_pcm_manifest_path)) ?? { chunks: [] }
+        : null;
+      const audioObjectId = uuidv7(frame.ts_unix_ms);
+      if (manifest && this.paths.live_pcm_manifest_path) {
+        manifest.chunks.push({
+          audio_object_id: audioObjectId,
+          chunk_seq: frame.stream_seq,
+          path: filePath,
+          byte_length: frame.payload.byteLength,
+          started_at_unix_ms: frame.ts_unix_ms,
+          ended_at_unix_ms: endedAt,
+        });
+        await writeJsonFile(this.paths.live_pcm_manifest_path, manifest);
+      }
+      const payload: AudioChunkWrittenPayload = {
         audio_object_id: audioObjectId,
-        chunk_seq: frame.stream_seq,
+        stream_kind: "live_pcm",
+        stream_id: "pcm",
         path: filePath,
+        chunk_seq: frame.stream_seq,
         byte_length: frame.payload.byteLength,
+        content_type: "audio/pcm",
+        codec: "pcm_s16le",
         started_at_unix_ms: frame.ts_unix_ms,
         ended_at_unix_ms: endedAt,
-      });
-      await writeJsonFile(this.paths.live_pcm_manifest_path, manifest);
+        sha256_hex: null,
+      };
+      await this.emitEvent("audio_capture", "audio.live_pcm.chunk_written", payload, undefined, endedAt);
     }
-    const payload: AudioChunkWrittenPayload = {
-      audio_object_id: audioObjectId,
-      stream_kind: "live_pcm",
-      stream_id: "pcm",
-      path: filePath,
-      chunk_seq: frame.stream_seq,
-      byte_length: frame.payload.byteLength,
-      content_type: "audio/pcm",
-      codec: "pcm_s16le",
-      started_at_unix_ms: frame.ts_unix_ms,
-      ended_at_unix_ms: endedAt,
-      sha256_hex: null,
-    };
-    await this.emitEvent("audio_capture", "audio.live_pcm.chunk_written", payload, undefined, endedAt);
+
     await this.getTranscriptionAdapter().pushFrame(frame);
   }
 
@@ -1151,10 +1280,18 @@ export class WorkerProcess {
     }
     this.completionSent = true;
     this.stopping = true;
-    await this.getTranscriptionAdapter().stop(finalState);
     if (!isTerminalState(this.state)) {
       await this.setState(finalState === "completed" ? "stopping" : finalState, error);
     }
+    await this.writeLifecycle(error ?? null);
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+    }
+    await this.attemptGracefulLeave();
+    await this.stopChrome();
+    await this.browserMessageQueue.catch(() => undefined);
+    await this.getTranscriptionAdapter().stop(finalState);
+    await this.finalizeArchive();
     await this.flushEvents();
     const endedAtUnixMs = nowUnixMs();
     this.endedAtUnixMs = endedAtUnixMs;
@@ -1177,14 +1314,9 @@ export class WorkerProcess {
     }
 
     this.state = finalState;
-    await this.writeLifecycle(error ?? null);
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-    }
-    await this.attemptGracefulLeave();
-    await this.log(`completed with state=${finalState}`);
-    await this.stopChrome();
     this.server?.stop();
+    await this.log(`completed with state=${finalState}`);
+    await this.writeLifecycle(error ?? null);
     this.doneResolve?.();
   }
 }

@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -393,8 +392,8 @@ test("worker streams realtime Mistral transcripts and persists raw plus derived 
       type: "capture.started",
       archive_stream_id: "archive-1",
       live_stream_id: "live-1",
-      archive_content_type: "audio/webm;codecs=opus",
-      archive_codec: "opus",
+      archive_content_type: "audio/mpeg",
+      archive_codec: "mp3",
       pcm_sample_rate_hz: 16_000,
       pcm_channels: 1,
       ts_unix_ms: baseTs + 5,
@@ -519,7 +518,7 @@ test("worker streams realtime Mistral transcripts and persists raw plus derived 
   }
 });
 
-test("worker archive endpoint accepts browser preflight and persists archive chunks", async () => {
+test("worker writes a single MP3 archive from backend-owned PCM capture", async () => {
   const dataRoot = await createTempDir("zoomer-archive-");
   const coordinatorToken = "coordinator-token-archive";
   const coordinator = await startFakeCoordinator(coordinatorToken);
@@ -527,10 +526,12 @@ test("worker archive endpoint accepts browser preflight and persists archive chu
   process.env.ZOOMER_DISABLE_BROWSER_AUTOMATION = "1";
 
   try {
-    const layout = await createMeetingRunLayout(dataRoot, "meeting-run-test", 1_710_000_000_000, true);
+    const layout = await createMeetingRunLayout(dataRoot, "meeting-run-test", 1_710_000_000_000, false);
     const launch = buildWorkerLaunchConfig(coordinator.baseUrl, coordinatorToken, dataRoot, layout);
     launch.app.transcription_provider = "none";
     launch.options.enable_transcription = false;
+    launch.app.persist_live_pcm = false;
+    launch.options.persist_live_pcm = false;
 
     const worker = new WorkerProcess(launch);
     const workerPromise = worker.start();
@@ -542,51 +543,77 @@ test("worker archive endpoint accepts browser preflight and persists archive chu
       }),
     ]);
 
-    const archiveUrl =
-      `http://127.0.0.1:${registration.ingest_port}/internal/browser/archive/archive-1/1?token=${launch.browser_token}`;
-    const preflight = await fetch(archiveUrl, {
-      method: "OPTIONS",
-      headers: {
-        origin: "https://app.zoom.us",
-        "access-control-request-method": "POST",
-        "access-control-request-headers": "content-type,x-chunk-started-at,x-chunk-ended-at,x-sha256",
-        "access-control-request-private-network": "true",
-      },
-    });
-    expect(preflight.status).toBe(204);
-    expect(preflight.headers.get("access-control-allow-origin")).toBe("https://app.zoom.us");
-    expect(preflight.headers.get("access-control-allow-methods")).toContain("POST");
-    expect(preflight.headers.get("access-control-allow-private-network")).toBe("true");
+    const browserWs = await openWebSocket(
+      `ws://127.0.0.1:${registration.ingest_port}/internal/browser/session?token=${launch.browser_token}`,
+    );
 
-    const bytes = new Uint8Array([1, 2, 3, 4, 5]);
-    const sha = createHash("sha256").update(bytes).digest("hex");
-    const upload = await fetch(archiveUrl, {
-      method: "POST",
-      headers: {
-        origin: "https://app.zoom.us",
-        "content-type": "audio/webm;codecs=opus",
-        "x-chunk-started-at": "1710000000000",
-        "x-chunk-ended-at": "1710000005000",
-        "x-sha256": sha,
-      },
-      body: bytes,
-    });
-    expect(upload.ok).toBe(true);
-    expect(upload.headers.get("access-control-allow-origin")).toBe("https://app.zoom.us");
+    const baseTs = 1_710_000_200_000;
+    const hello: BrowserHelloMessage = {
+      type: "hello",
+      page_url: "https://zoom.us/j/123456789",
+      user_agent: "bun-test",
+      ts_unix_ms: baseTs,
+    };
+    const captureStarted: BrowserCaptureStartedMessage = {
+      type: "capture.started",
+      archive_stream_id: "archive-1",
+      live_stream_id: "live-1",
+      archive_content_type: "audio/mpeg",
+      archive_codec: "mp3",
+      pcm_sample_rate_hz: 16_000,
+      pcm_channels: 1,
+      ts_unix_ms: baseTs + 5,
+    };
+    const captureStopped: BrowserCaptureStoppedMessage = {
+      type: "capture.stopped",
+      reason: "ended",
+      ts_unix_ms: baseTs + 2_000,
+    };
+
+    browserWs.send(JSON.stringify(hello));
+    browserWs.send(JSON.stringify(captureStarted));
+    for (let index = 0; index < 8; index += 1) {
+      browserWs.send(buildPcmFrame(index + 1, baseTs + 10 + index * 200, 16_000, 3_200));
+    }
+    browserWs.send(JSON.stringify(captureStopped));
+
+    await Promise.race([
+      coordinator.state.completion.promise,
+      sleep(4_000).then(() => {
+        throw new Error("Worker did not complete");
+      }),
+    ]);
+    await workerPromise;
 
     const manifest = JSON.parse(await readFile(layout.archive_manifest_path, "utf8")) as {
-      chunks: Array<{ chunk_seq: number; byte_length: number; sha256_hex: string }>;
+      chunks: Array<{
+        chunk_seq: number;
+        byte_length: number;
+        sha256_hex: string | null;
+        path: string;
+      }>;
     };
     expect(manifest.chunks).toHaveLength(1);
     expect(manifest.chunks[0]).toMatchObject({
       chunk_seq: 1,
-      byte_length: bytes.byteLength,
-      sha256_hex: sha,
+      path: path.join(layout.archive_audio_dir, "meeting.mp3"),
+      sha256_hex: null,
     });
-    expect(coordinator.state.events.map((event) => event.kind)).toContain("audio.archive.chunk_written");
+    expect(manifest.chunks[0].byte_length).toBeGreaterThan(0);
 
-    await worker.complete("completed");
-    await workerPromise;
+    const archiveFile = Bun.file(path.join(layout.archive_audio_dir, "meeting.mp3"));
+    expect(await archiveFile.exists()).toBe(true);
+    expect(archiveFile.size).toBeGreaterThan(0);
+
+    const archiveEvent = coordinator.state.events.find((event) => event.kind === "audio.archive.chunk_written");
+    expect(archiveEvent?.payload).toMatchObject({
+      stream_kind: "archive",
+      chunk_seq: 1,
+      content_type: "audio/mpeg",
+      codec: "mp3",
+      path: path.join(layout.archive_audio_dir, "meeting.mp3"),
+    });
+    expect(coordinator.state.events.filter((event) => event.kind === "audio.live_pcm.chunk_written")).toHaveLength(0);
   } finally {
     coordinator.server.stop(true);
   }

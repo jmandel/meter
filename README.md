@@ -1,73 +1,171 @@
-# Zoom Meeting Capture
+# Meter
 
-Automated Zoom meeting capture. A coordinator process manages isolated per-meeting workers that join via the Zoom web client using headless Chromium + CDP, capture audio in two streams (compressed WebM/Opus archive + 16 kHz PCM for live transcription), track active speakers and chat through DOM observation, and persist everything to local disk and a central SQLite index.
+Meter is an experiment in turning a live Zoom meeting into a readable operational feed.
+
+The point is not just to record a meeting. The point is to continuously turn what is happening inside a Zoom call into:
+
+- legible transcript updates
+- best-effort speaker attribution
+- captured chat messages
+- a durable audio artifact
+- APIs that are easy to inspect manually or feed into another system
+
+Meter captures Zoom meetings with Chromium/CDP, streams audio to Mistral in realtime, tracks active speakers and chat from the Zoom DOM, and saves a single MP3 archive when the run finishes.
+
+The intended output is something closer to a live meeting log than a pile of low-level browser events: who appears to be speaking, what the transcript currently says, what showed up in chat, and what the meeting audio was.
+
+## Project Goals
+
+- Join a Zoom meeting automatically in an isolated worker.
+- Capture audio once and use it for both realtime transcription and final archival output.
+- Keep transcript updates easy to read while the meeting is still in progress.
+- Use Zoom DOM state to improve speaker attribution and chat capture.
+- Preserve raw events so the higher-level views can be replayed or rebuilt later.
+- Expose the meeting state through simple APIs, SSE streams, and a lightweight operator UI.
+
+Meter is therefore a bridge between raw capture and legible meeting state. It is meant to help a human operator or downstream LLM look at an in-progress meeting and understand the conversation without digging through browser internals.
+
+## Requirements
+
+- [Bun](https://bun.sh) 1.3+
+- Chromium or Chrome
+  - default lookup: `/usr/bin/chromium`
+  - override with `CHROME_BIN`
+- `ffmpeg`
+  - required for the final MP3 archive
+  - default lookup: `ffmpeg` on `PATH`
+  - override with `FFMPEG_BIN`
+- Optional: `MISTRAL_API_KEY` for realtime transcription
 
 ## Quick Start
 
-Requires [Bun](https://bun.sh) 1.3+.
-
 ```bash
 bun install
+export MISTRAL_API_KEY=...                      # optional unless using Mistral
+export ZOOMER_TRANSCRIPTION_PROVIDER=mistral   # or leave unset for no transcription
 bun run server.ts --mode all
 ```
 
-Open `http://127.0.0.1:3100` for the web dashboard, or use the API directly:
+Open `http://127.0.0.1:3100`.
+
+Start a run from the dashboard or with the API:
 
 ```bash
-# health check
-curl http://127.0.0.1:3100/v1/health
-
-# start a capture
 curl -X POST http://127.0.0.1:3100/v1/meeting-runs \
   -H 'content-type: application/json' \
   -d '{"join_url":"https://zoom.us/j/123456789?pwd=abc"}'
-
-# list runs
-curl http://127.0.0.1:3100/v1/meeting-runs
-
-# stop a capture
-curl -X POST http://127.0.0.1:3100/v1/meeting-runs/<id>/stop
 ```
 
-## Web Dashboard
+Stop a run:
 
-The built-in control panel at `/` provides:
+```bash
+curl -X POST http://127.0.0.1:3100/v1/meeting-runs/<meeting_run_id>/stop
+```
 
-- **Active jobs** with live browser screenshots (refreshed every 10s), state badges, worker status, event/speech/chat/audio stats, and recent transcript lines
-- **History** table of completed, failed, and aborted meeting runs
-- **New Capture** form to paste a Zoom link and start a job
+## What It Does
 
-The dashboard is a React app served via Bun's HTML import bundler (`ui/index.html` + `ui/app.tsx`). No separate build step required.
+- Launches one worker per meeting run.
+- Uses Chromium + CDP to join the Zoom web client.
+- Captures meeting audio from `getDisplayMedia` with echo cancellation, noise suppression, and auto gain control disabled.
+- Streams 16 kHz mono PCM frames to Mistral in realtime.
+- Detects active speaker changes from the Zoom DOM and uses them for transcript attribution when the provider does not supply a speaker label.
+- Records chat messages from the Zoom DOM.
+- Writes one final MP3 archive at the end of the run.
+- Exposes a live operator dashboard plus JSON and SSE APIs.
+
+In practice, that means the main surfaces are:
+
+- the live dashboard for active runs
+- the per-meeting SSE stream for incremental updates
+- the markdown transcript endpoint for a single readable transcript view
+- the stored event log and SQLite projection for later querying
 
 ## Architecture
 
+```text
+dashboard / API
+       |
+       v
+coordinator (SQLite + SSE + worker supervision)
+       |
+       +--> worker (one per meeting)
+               |
+               +--> Chromium / Zoom tab
+               +--> browser bootstrap
+               +--> Mistral realtime websocket
+               +--> final MP3 archive
 ```
-Client  ──POST /v1/meeting-runs──>  Coordinator (API + SQLite)
-        <──SSE /v1/stream──────────        │
-                                           │ spawns
-                                    ┌──────┼──────┐
-                                    ▼      ▼      ▼
-                                 Worker  Worker  Worker
-                                 Chrome  Chrome  Chrome
-```
 
-**Coordinator** (`src/coordinator.ts`) is long-lived. It owns the SQLite database, serves the public REST/SSE API, manages worker lifecycle, and serves the web dashboard.
+### Coordinator
 
-**Workers** (`src/worker.ts`) are short-lived, one per meeting. Each launches a Chromium instance with an isolated profile, joins the Zoom web client, injects capture code, and runs a private loopback server for the injected browser runtime to send data back through.
+`src/coordinator.ts`
 
-**Injected browser code** (`src/bootstrap.ts`) runs inside the Zoom tab. It captures audio via `getDisplayMedia`, splits it into compressed archive chunks (MediaRecorder) and resampled PCM frames (AudioWorklet), observes the DOM for speaker changes and chat messages, and sends everything back to the owning worker over WebSocket/HTTP.
+- Owns SQLite and the append-only event log projection model.
+- Serves the REST API, SSE streams, transcript markdown endpoint, and dashboard.
+- Spawns and tracks worker processes.
 
-### Deployment Modes
+### Worker
 
-| Mode | Flag | Description |
-|------|------|-------------|
-| `all` | `--mode all` | Combined coordinator + worker supervisor (default) |
-| `api` | `--mode api` | Coordinator only, spawns workers as subprocesses |
-| `worker` | `--mode worker` | Standalone worker, used when spawned by the coordinator |
+`src/worker.ts`
+
+- Launches Chromium with CDP.
+- Joins the Zoom meeting.
+- Injects the browser bootstrap.
+- Accepts browser WebSocket PCM + DOM events.
+- Feeds PCM to Mistral.
+- Pipes the same PCM stream into `ffmpeg` and lands `audio/archive/meeting.mp3` on completion.
+- Makes a best effort to click Zoom's Leave flow before closing Chromium.
+
+### Browser Bootstrap
+
+`src/bootstrap.ts`
+
+- Runs inside the Zoom tab.
+- Captures audio via `getDisplayMedia`.
+- Resamples audio to 16 kHz mono PCM with an `AudioWorklet`.
+- Watches the DOM for active speaker and chat changes.
+- Sends PCM and DOM events back to the owning worker over WebSocket.
+
+## Outputs
+
+Each meeting run gets its own directory under `data/meetings/.../<meeting_run_id>/`.
+
+Important files:
+
+- `events.ndjson`: append-only source of truth
+- `index.sqlite`: central query index
+- `audio/archive/meeting.mp3`: final meeting archive
+- `audio/archive/manifest.json`: metadata for the MP3 artifact
+- `transcripts/provider_raw.ndjson`: raw Mistral websocket messages
+- `transcripts/segments.jsonl`: normalized transcript segments
+- `browser.log` / `worker.log`: runtime logs
+
+Optional debug output:
+
+- `audio/live/*.pcm` if `ZOOMER_PERSIST_LIVE_PCM=true`
+
+By default, live PCM is not persisted. The durable audio artifact is the final MP3.
+
+## Useful Endpoints
+
+- `GET /v1/health`
+- `POST /v1/meeting-runs`
+- `GET /v1/meeting-runs`
+- `GET /v1/meeting-runs/:id`
+- `POST /v1/meeting-runs/:id/stop`
+- `GET /v1/meeting-runs/:id/screenshot`
+- `GET /v1/meeting-runs/:id/speech`
+- `GET /v1/meeting-runs/:id/speakers`
+- `GET /v1/meeting-runs/:id/audio`
+- `GET /v1/meeting-runs/:id/transcript.md`
+- `GET /v1/stream`
+- `GET /v1/meeting-runs/:id/stream`
+
+The transcript markdown endpoint is intended for easy manual inspection and prompt insertion. It returns plain markdown as text, not a downloaded file.
 
 ## Configuration
 
-All settings accept CLI flags or environment variables:
+Core settings:
 
 | Flag | Env | Default |
 |------|-----|---------|
@@ -78,131 +176,46 @@ All settings accept CLI flags or environment variables:
 | `--chrome-bin` | `CHROME_BIN` | `/usr/bin/chromium` |
 | `--default-bot-name` | `BOT_NAME` | `Meeting Bot` |
 | `--transcription-provider` | `ZOOMER_TRANSCRIPTION_PROVIDER` | `none` |
-| `--persist-live-pcm` | `ZOOMER_PERSIST_LIVE_PCM` | `true` |
 | `--persist-archive-audio` | `ZOOMER_PERSIST_ARCHIVE_AUDIO` | `true` |
+| `--persist-live-pcm` | `ZOOMER_PERSIST_LIVE_PCM` | `false` |
 
-## Transcription
+Mistral settings:
 
-To enable realtime Mistral transcription:
+- `MISTRAL_API_KEY`
+- `MISTRAL_REALTIME_MODEL`
+- `MISTRAL_REALTIME_WS_URL`
+- `MISTRAL_STREAMING_DELAY_MS`
+
+Binary overrides:
+
+- `CHROME_BIN`
+- `FFMPEG_BIN`
+
+## Development
+
+Run the app:
 
 ```bash
-export MISTRAL_API_KEY=...
-export ZOOMER_TRANSCRIPTION_PROVIDER=mistral
 bun run server.ts --mode all
 ```
 
-The worker streams PCM to Mistral in realtime, persists raw provider messages to `transcripts/provider_raw.ndjson`, and emits normalized `transcription.segment.partial` and `transcription.segment.final` events. Final segments are projected into SQLite for full-text search.
+Run tests:
 
-If Mistral is unavailable, capture continues normally. Archive audio is always the source of truth.
-
-Segment timestamps are converted from provider-relative offsets to absolute `ts_unix_ms` values by anchoring to the first PCM frame of the capture session. This enables speaker attribution by overlapping with `speaker_spans`.
-
-## REST API
-
-All public endpoints live under `/v1`. Responses are JSON. Lists use cursor-based pagination.
-
-### Control
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/v1/health` | Server health |
-| `POST` | `/v1/meeting-runs` | Start a capture |
-| `GET` | `/v1/meeting-runs` | List meeting runs |
-| `GET` | `/v1/meeting-runs/:id` | Get one meeting run |
-| `POST` | `/v1/meeting-runs/:id/stop` | Request graceful stop |
-| `GET` | `/v1/meeting-runs/:id/screenshot` | Live browser screenshot (JPEG) |
-
-### Query
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/v1/events` | Events across all meetings |
-| `GET` | `/v1/speech` | Transcription segments |
-| `GET` | `/v1/chat` | Chat messages |
-| `GET` | `/v1/search?q=...` | Full-text search (speech + chat) |
-| `GET` | `/v1/rooms` | Zoom rooms |
-| `GET` | `/v1/meeting-runs/:id/speakers` | Speaker spans |
-| `GET` | `/v1/meeting-runs/:id/audio` | Archived audio chunks |
-| `GET` | `/v1/meeting-runs/:id/artifacts` | Non-audio artifacts |
-
-### Live Streaming (SSE)
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/v1/stream` | Global event stream |
-| `GET` | `/v1/meeting-runs/:id/stream` | Meeting-scoped stream |
-| `GET` | `/v1/rooms/:id/stream` | Room-scoped stream |
-
-All SSE endpoints support `Last-Event-ID` and `after_event_id` for replay after reconnect.
-
-## Data Layout
-
-```
-data/
-  index.sqlite                          # Central query index
-  coordinator/
-    coordinator.log
-    state/workers.json
-  meetings/
-    2026/2026-03-11/<meeting_run_id>/
-      metadata.json                     # Immutable run config
-      lifecycle.json                    # Current worker state
-      events.ndjson                     # Append-only event journal (source of truth)
-      errors.ndjson
-      worker.log
-      browser.log
-      audio/
-        archive/                        # Compressed WebM/Opus chunks
-          manifest.json
-          000001.webm
-        live/                           # Raw 16kHz PCM (optional)
-          pcm_manifest.json
-          000001.pcm
-      transcripts/
-        provider_raw.ndjson             # Raw upstream messages
-        segments.jsonl                  # Normalized segments
-      artifacts/
-        dom/
-        screenshots/
+```bash
+bun test
 ```
 
-SQLite is the query index. If normalized tables disagree with raw events, raw events win and projections are replayable.
+The current test suite covers:
 
-## Project Layout
+- append-only file helpers
+- realtime Mistral transcript normalization
+- speaker-label carry-through from Zoom DOM events
+- backend-owned MP3 archive generation from PCM frames
 
-```
-server.ts                   CLI entrypoint
-ui/
-  index.html                Dashboard (Bun HTML import, auto-bundled)
-  app.tsx                   React dashboard app
-src/
-  main.ts                   Mode/config bootstrap
-  coordinator.ts            REST, SSE, worker supervision, dashboard serving
-  worker.ts                 Worker runtime and browser ingest server
-  bootstrap.ts              Injected browser capture code
-  database.ts               SQLite schema, projections, queries
-  domain.ts                 TypeScript types (events, API, domain)
-  files.ts                  File layout and metadata persistence
-  zoom.ts                   Zoom URL normalization
-  utils.ts                  IDs, time, crypto, networking helpers
-  transcription/            Realtime transcription adapters
-legacy-spike.ts             Original monolithic spike (reference only)
-```
+## Notes
 
-## Current Status
+- The system relies on current Zoom web DOM selectors. Zoom UI changes can break join, speaker, or chat observation until selectors are updated.
+- The MP3 archive is emitted when the run completes, not as rolling partial audio objects.
+- If `ffmpeg` is missing, capture and transcription can still run, but the final MP3 archive will fail and the worker will emit `error.raised`.
 
-Working:
-- Coordinator API with all three modes
-- Per-meeting file layout with append-only journals
-- Central SQLite event log with FTS5 search
-- Full REST API for meeting runs, events, speech, chat, speakers, audio, rooms, artifacts, and search
-- SSE with replay after reconnect
-- Worker loopback ingest server (bootstrap, PCM, archive upload)
-- Realtime Mistral transcription adapter
-- Web dashboard with live screenshots and transcript display
-- CDP screenshot proxy for active browser sessions
-
-Not yet ported:
-- Chromium/CDP Zoom join automation (the original spike's join flow needs integration into the worker runtime)
-- End-to-end Mistral verification with a live key
-
-## Spec
-
-See [ARCHITECTURE_SPEC.md](./ARCHITECTURE_SPEC.md) for the full target-state specification including all TypeScript interfaces, event model, internal protocols, and acceptance criteria.
+See [ARCHITECTURE_SPEC.md](./ARCHITECTURE_SPEC.md) for the target-state spec and domain model.

@@ -40,7 +40,7 @@ function loadCoordinatorConfig(args: Map<string, string>): InternalConfig {
     chrome_bin: args.get("--chrome-bin") ?? process.env.CHROME_BIN ?? "/usr/bin/chromium",
     default_bot_name: args.get("--default-bot-name") ?? process.env.BOT_NAME ?? "Meeting Bot",
     transcription_provider: provider,
-    persist_live_pcm: parseBoolean(args.get("--persist-live-pcm") ?? process.env.ZOOMER_PERSIST_LIVE_PCM, true),
+    persist_live_pcm: parseBoolean(args.get("--persist-live-pcm") ?? process.env.ZOOMER_PERSIST_LIVE_PCM, false),
     persist_archive_audio: parseBoolean(args.get("--persist-archive-audio") ?? process.env.ZOOMER_PERSIST_ARCHIVE_AUDIO, true),
     archive_chunk_ms: parseInteger(args.get("--archive-chunk-ms") ?? process.env.ZOOMER_ARCHIVE_CHUNK_MS ?? null, 5000),
     live_pcm_chunk_ms: parseInteger(args.get("--live-pcm-chunk-ms") ?? process.env.ZOOMER_LIVE_PCM_CHUNK_MS ?? null, 480),
