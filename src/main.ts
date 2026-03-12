@@ -23,6 +23,17 @@ function parseArgs(argv: string[]): Map<string, string> {
   return entries;
 }
 
+export function resolveTranscriptionProvider(args: Map<string, string>): TranscriptionProvider {
+  const explicitProvider = args.get("--transcription-provider") ?? process.env.METER_TRANSCRIPTION_PROVIDER ?? null;
+  if (explicitProvider) {
+    return explicitProvider as TranscriptionProvider;
+  }
+  if (process.env.MISTRAL_API_KEY) {
+    return "mistral";
+  }
+  return "none";
+}
+
 function loadCoordinatorConfig(args: Map<string, string>): InternalConfig {
   const mode = (args.get("--mode") ?? process.env.METER_MODE ?? "all") as InternalConfig["mode"];
   const listenHost = args.get("--listen-host") ?? process.env.METER_LISTEN_HOST ?? "127.0.0.1";
@@ -30,7 +41,7 @@ function loadCoordinatorConfig(args: Map<string, string>): InternalConfig {
   const dataRoot = path.resolve(args.get("--data-root") ?? process.env.METER_DATA_ROOT ?? path.join(process.cwd(), "data"));
   const coordinatorBaseUrl = args.get("--coordinator-base-url") ?? process.env.METER_COORDINATOR_BASE_URL ?? `http://127.0.0.1:${listenPort}`;
   const publicBaseUrl = args.get("--public-base-url") ?? process.env.METER_PUBLIC_BASE_URL ?? coordinatorBaseUrl;
-  const provider = (args.get("--transcription-provider") ?? process.env.METER_TRANSCRIPTION_PROVIDER ?? "none") as TranscriptionProvider;
+  const provider = resolveTranscriptionProvider(args);
   return {
     mode,
     public_base_url: publicBaseUrl,
@@ -71,6 +82,9 @@ export async function startFromCommandLine(argv: string[]): Promise<void> {
   }
 
   const config = loadCoordinatorConfig(args);
+  if (!args.get("--transcription-provider") && !process.env.METER_TRANSCRIPTION_PROVIDER && process.env.MISTRAL_API_KEY) {
+    console.log("[api] METER_TRANSCRIPTION_PROVIDER not set; defaulting to mistral because MISTRAL_API_KEY is present");
+  }
   const app = new CoordinatorApp(config);
   await app.start();
 

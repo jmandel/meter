@@ -103,11 +103,27 @@ export class MistralRealtimeTranscriptionAdapter implements TranscriptionAdapter
     this.callbacks = options.callbacks;
   }
 
+  private resetSessionState(): void {
+    this.sessionStarted = false;
+    this.sessionStopped = false;
+    this.providerSessionId = null;
+    this.partialSegmentId = uuidv7();
+    this.partialText = "";
+    this.lastFinalText = "";
+    this.ws = null;
+    this.wsOpen = false;
+    this.connected = false;
+    this.openPromise = null;
+    this.donePromise = null;
+    this.doneResolve = null;
+  }
+
   async start(payload: AudioCaptureStartedPayload): Promise<void> {
     if (this.connected || this.openPromise) {
       return;
     }
 
+    this.resetSessionState();
     this.sampleRateHz = payload.pcm_sample_rate_hz;
     this.donePromise = new Promise<void>((resolve) => {
       this.doneResolve = resolve;
@@ -165,6 +181,8 @@ export class MistralRealtimeTranscriptionAdapter implements TranscriptionAdapter
       ws.addEventListener("close", () => {
         this.wsOpen = false;
         this.connected = false;
+        this.ws = null;
+        this.openPromise = null;
         if (!this.sessionStopped) {
           void this.emitSessionStopped("socket_closed");
         }
@@ -174,6 +192,7 @@ export class MistralRealtimeTranscriptionAdapter implements TranscriptionAdapter
 
     try {
       await this.openPromise;
+      this.openPromise = null;
       this.connected = true;
       await this.callbacks.log(`mistral realtime connected model=${model}`);
     } catch (error) {

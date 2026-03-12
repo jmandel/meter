@@ -36,13 +36,15 @@ Meter is therefore a bridge between raw capture and legible meeting state. It is
   - default lookup: `ffmpeg` on `PATH`
   - override with `FFMPEG_BIN`
 - Optional: `MISTRAL_API_KEY` for realtime transcription
+  - if `METER_TRANSCRIPTION_PROVIDER` is unset and this key is present, Meter now defaults to `mistral`
 
 ## Quick Start
 
 ```bash
 bun install
-export MISTRAL_API_KEY=...                      # optional unless using Mistral
-export METER_TRANSCRIPTION_PROVIDER=mistral    # or leave unset for no transcription
+export MISTRAL_API_KEY=...
+# optional explicit override:
+# export METER_TRANSCRIPTION_PROVIDER=mistral
 bun run server.ts --mode all
 ```
 
@@ -124,6 +126,8 @@ coordinator (SQLite + SSE + worker supervision)
 - Feeds PCM to Mistral.
 - Pipes the same PCM stream into `ffmpeg` and lands `audio/archive/meeting.mp3` on completion.
 - Makes a best effort to click Zoom's Leave flow before closing Chromium.
+- Monitors the Zoom tab for lost browser capture state and re-injects capture when the page drops it.
+- Reconnects the Mistral realtime session if capture is still live but the provider session dies.
 
 ### Browser Bootstrap
 
@@ -258,7 +262,7 @@ Core settings:
 | `--data-root` | `METER_DATA_ROOT` | `./data` |
 | `--chrome-bin` | `CHROME_BIN` | `/usr/bin/chromium` |
 | `--default-bot-name` | `BOT_NAME` | `Meeting Bot` |
-| `--transcription-provider` | `METER_TRANSCRIPTION_PROVIDER` | `none` |
+| `--transcription-provider` | `METER_TRANSCRIPTION_PROVIDER` | `mistral` when `MISTRAL_API_KEY` is present, otherwise `none` |
 | `--persist-archive-audio` | `METER_PERSIST_ARCHIVE_AUDIO` | `true` |
 | `--persist-live-pcm` | `METER_PERSIST_LIVE_PCM` | `false` |
 

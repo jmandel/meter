@@ -128,6 +128,12 @@ export class WorkerProcess {
   private ingestPort = 0;
   private cdpPort = 0;
   private browserConnections = 0;
+  private browserCaptureExpected = false;
+  private captureRecoveryInFlight = false;
+  private transcriptionSessionActive = false;
+  private lastTranscriptionActivityAtUnixMs = 0;
+  private lastTranscriptionReconnectAtUnixMs = 0;
+  private lastCaptureStartedPayload: AudioCaptureStartedPayload | null = null;
   private stopping = false;
   private completionSent = false;
   private pendingEvents: EventEnvelope[] = [];
@@ -153,6 +159,7 @@ export class WorkerProcess {
   private chrome?: Bun.Subprocess<"ignore", "ignore", "inherit">;
   private cdp?: CDPSession;
   private heartbeatTimer?: Timer;
+  private captureHealthTimer?: Timer;
   private server?: Bun.Server;
   private readonly chromeUserDataDir: string;
   private readonly startedAtUnixMs = nowUnixMs();
@@ -348,7 +355,7 @@ export class WorkerProcess {
       await cdp.send("Page.enable");
       await cdp.send("Runtime.enable");
 
-      cdp.on("Runtime.consoleAPICalled", (params: any) => {
+    cdp.on("Runtime.consoleAPICalled", (params: any) => {
         const text = (params.args ?? []).map((arg: any) => arg.value ?? arg.description ?? "").join(" ").trim();
         if (!text) {
           return;
@@ -362,9 +369,15 @@ export class WorkerProcess {
         void this.emitEvent("browser", "browser.console", payload, params);
       });
 
-      cdp.on("Page.javascriptDialogOpening", () => {
-        void cdp.send("Page.handleJavaScriptDialog", { accept: true }).catch(() => undefined);
-      });
+    cdp.on("Page.javascriptDialogOpening", () => {
+      void cdp.send("Page.handleJavaScriptDialog", { accept: true }).catch(() => undefined);
+    });
+
+    cdp.on("Page.loadEventFired", () => {
+      void sleep(1000)
+        .then(() => this.monitorCaptureHealth())
+        .catch(() => undefined);
+    });
 
       const origin = new URL(this.launch.normalized_join_url).origin;
       await cdp.send("Browser.grantPermissions", {
@@ -376,6 +389,7 @@ export class WorkerProcess {
       await this.navigateAndJoin(cdp);
       await this.waitForOperatorRelease("inject_capture_bootstrap");
       await this.injectCaptureBootstrap(cdp);
+      this.startCaptureHealthMonitor();
     } catch (error) {
       if (this.completionSent || this.stopping) {
         return;
@@ -629,6 +643,83 @@ export class WorkerProcess {
     await this.browserLog("browser capture bootstrap is streaming");
   }
 
+  private startCaptureHealthMonitor(): void {
+    if (this.captureHealthTimer) {
+      return;
+    }
+    this.captureHealthTimer = setInterval(() => {
+      void this.monitorCaptureHealth();
+    }, 5000);
+  }
+
+  private async monitorCaptureHealth(): Promise<void> {
+    if (
+      this.stopping ||
+      this.captureRecoveryInFlight ||
+      this.operatorAssistanceClaimed ||
+      !this.cdp ||
+      !this.browserCaptureExpected ||
+      this.state !== "capturing"
+    ) {
+      return;
+    }
+
+    const captureState = await cdpEval(
+      this.cdp,
+      `(() => {
+        const capture = window.__meterCapture;
+        if (!capture) {
+          return { present: false, phase: null, error: null };
+        }
+        return {
+          present: true,
+          phase: capture.state.phase || null,
+          error: capture.state.error || null,
+        };
+      })()`,
+    ).catch(() => null);
+
+    if (captureState?.present && captureState.phase === "streaming") {
+      if (
+        this.launch.options.enable_transcription &&
+        this.launch.app.transcription_provider === "mistral" &&
+        this.lastCaptureStartedPayload &&
+        !this.transcriptionSessionActive
+      ) {
+        const now = nowUnixMs();
+        if (
+          now - this.lastTranscriptionActivityAtUnixMs >= 10_000 &&
+          now - this.lastTranscriptionReconnectAtUnixMs >= 10_000
+        ) {
+          this.captureRecoveryInFlight = true;
+          try {
+            this.lastTranscriptionReconnectAtUnixMs = now;
+            await this.browserLog("capture health check detected inactive transcription session; reconnecting Mistral realtime");
+            await this.getTranscriptionAdapter().start(this.lastCaptureStartedPayload);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            await this.browserLog(`transcription health recovery failed: ${message}`);
+          } finally {
+            this.captureRecoveryInFlight = false;
+          }
+        }
+      }
+      return;
+    }
+
+    this.captureRecoveryInFlight = true;
+    try {
+      const description = captureState?.present ? `phase=${captureState.phase ?? "unknown"}` : "missing bootstrap";
+      await this.browserLog(`capture health check detected ${description}; reinjecting browser capture bootstrap`);
+      await this.injectCaptureBootstrap(this.cdp);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.browserLog(`capture health recovery failed: ${message}`);
+    } finally {
+      this.captureRecoveryInFlight = false;
+    }
+  }
+
   private async clickVisibleBrowserButton(cdp: CDPSession, patterns: string[]): Promise<string | null> {
     return await cdpEval(
       cdp,
@@ -755,8 +846,10 @@ export class WorkerProcess {
       providerRawPath: this.paths.transcripts_provider_raw_path,
       segmentsPath: this.paths.transcripts_segments_path,
       callbacks: {
-        emitEvent: (source, kind, payload, raw, tsUnixMs) =>
-          this.emitEvent(source, kind, this.withCurrentSpeaker(kind, payload), raw, tsUnixMs),
+        emitEvent: (source, kind, payload, raw, tsUnixMs) => {
+          this.noteTranscriptionEvent(kind, tsUnixMs);
+          return this.emitEvent(source, kind, this.withCurrentSpeaker(kind, payload), raw, tsUnixMs);
+        },
         appendProviderRaw: async () => {},
         appendSegment: async () => {},
         raiseError: (error) => this.raiseError(error.code, error.message, error.fatal, error.details),
@@ -1041,6 +1134,7 @@ export class WorkerProcess {
   }
 
   private async handleCaptureStarted(message: BrowserCaptureStartedMessage): Promise<void> {
+    this.browserCaptureExpected = true;
     const payload: AudioCaptureStartedPayload = {
       archive_stream_id: message.archive_stream_id,
       live_stream_id: message.live_stream_id,
@@ -1049,6 +1143,8 @@ export class WorkerProcess {
       pcm_sample_rate_hz: message.pcm_sample_rate_hz,
       pcm_channels: message.pcm_channels,
     };
+    this.lastCaptureStartedPayload = payload;
+    this.lastTranscriptionActivityAtUnixMs = message.ts_unix_ms;
     await this.setState("capturing");
     await this.ensureArchiveEncoder(message);
     await this.browserLog(`capture started archive=${message.archive_stream_id} live=${message.live_stream_id}`);
@@ -1057,6 +1153,8 @@ export class WorkerProcess {
   }
 
   private async handleCaptureStopped(message: BrowserCaptureStoppedMessage): Promise<void> {
+    this.browserCaptureExpected = false;
+    this.transcriptionSessionActive = false;
     await this.browserLog(`capture stopped reason=${message.reason}`);
     await this.emitEvent("audio_capture", "audio.capture.stopped", {
       reason: message.reason,
@@ -1089,6 +1187,23 @@ export class WorkerProcess {
       ...segment,
       speaker_label: this.currentSpeakerLabel,
     } satisfies TranscriptionSegmentPayload;
+  }
+
+  private noteTranscriptionEvent(kind: EventKind, tsUnixMs?: number): void {
+    const observedAt = tsUnixMs ?? nowUnixMs();
+    if (kind === "transcription.session.started") {
+      this.transcriptionSessionActive = true;
+      this.lastTranscriptionActivityAtUnixMs = observedAt;
+      return;
+    }
+    if (kind === "transcription.session.stopped") {
+      this.transcriptionSessionActive = false;
+      this.lastTranscriptionActivityAtUnixMs = observedAt;
+      return;
+    }
+    if (kind === "transcription.segment.partial" || kind === "transcription.segment.final") {
+      this.lastTranscriptionActivityAtUnixMs = observedAt;
+    }
   }
 
   private ffmpegBinary(): string {
@@ -1337,6 +1452,9 @@ export class WorkerProcess {
     await this.writeLifecycle(error ?? null);
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
+    }
+    if (this.captureHealthTimer) {
+      clearInterval(this.captureHealthTimer);
     }
     await this.attemptGracefulLeave();
     await this.stopChrome();
