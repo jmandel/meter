@@ -3,6 +3,7 @@ import path from "node:path";
 import dashboard from "../ui/index.html";
 
 import type {
+  AttendeeSummaryRecord,
   AppendEventsBatchRequest,
   AppConfig,
   ChatMessageRecord,
@@ -19,6 +20,7 @@ import type {
   SpeechSegmentRecord,
   WorkerLaunchConfig,
   WorkerRegisterRequest,
+  ZoomAttendeePresencePayload,
 } from "./domain";
 import { AppDatabase } from "./database";
 import {
@@ -242,6 +244,14 @@ export class CoordinatorApp {
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/transcript\.md$/);
       if (match && request.method === "GET") {
         return this.handleMarkdownTranscript(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/attendees$/);
+      if (match && request.method === "GET") {
+        return this.handleListAttendees(match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/attendees\.md$/);
+      if (match && request.method === "GET") {
+        return this.handleMarkdownAttendees(match[1]);
       }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/chat$/);
       if (match && request.method === "GET") {
@@ -830,6 +840,15 @@ export class CoordinatorApp {
       return lines.join("\n");
     }
 
+    const chatRenderIds = new Map<string, number>();
+    let nextChatRenderId = 1;
+    for (const item of [...chat].sort((left, right) => Date.parse(left.sent_at) - Date.parse(right.sent_at) || left.event_id - right.event_id)) {
+      if (!chatRenderIds.has(item.chat_message_id)) {
+        chatRenderIds.set(item.chat_message_id, nextChatRenderId);
+        nextChatRenderId += 1;
+      }
+    }
+
     const transcriptItems = [
       ...grouped.map((item, index) => ({
         kind: "speech" as const,
@@ -865,21 +884,211 @@ export class CoordinatorApp {
       }
       const receiver = item.chat.receiver_display_name?.trim() || null;
       const chatLabel = receiver ? `${item.chat.sender_display_name ?? "Unknown chatter"} -> ${receiver}` : (item.chat.sender_display_name ?? "Unknown chatter");
-      const chatNotes: string[] = [];
-      if (item.chat.is_thread_reply && item.chat.main_chat_message_id) {
-        chatNotes.push(`reply to ${item.chat.main_chat_message_id}`);
+      const renderedChatId = chatRenderIds.get(item.chat.chat_message_id);
+      const renderedReplyToId = item.chat.main_chat_message_id ? chatRenderIds.get(item.chat.main_chat_message_id) : null;
+      const chatTokens = [`id=${renderedChatId ?? "?"}`];
+      if (renderedReplyToId) {
+        chatTokens.push(`reply-to=${renderedReplyToId}`);
       } else if ((item.chat.thread_reply_count ?? 0) > 0) {
-        const count = item.chat.thread_reply_count ?? 0;
-        chatNotes.push(`${count} ${count === 1 ? "reply" : "replies"}`);
+        chatTokens.push(`replies=${item.chat.thread_reply_count}`);
       }
       if (item.chat.is_edited) {
-        chatNotes.push("edited");
+        chatTokens.push("edited=1");
       }
-      lines.push(`### ${formatTimestamp(item.chat.sent_at)} · [Chat] ${chatLabel}${chatNotes.length ? ` (${chatNotes.join(", ")})` : ""}`);
+      lines.push(`### ${formatTimestamp(item.chat.sent_at)} · [chat ${chatTokens.join(" ")}] ${chatLabel}`);
       lines.push("");
       lines.push(item.chat.text);
       lines.push("");
     }
+    return lines.join("\n");
+  }
+
+  private handleListAttendees(meetingRunId: string): Response {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    return jsonResponse(this.listResponse(this.listAttendeeSummaries(meetingRun)));
+  }
+
+  private handleMarkdownAttendees(meetingRunId: string): Response {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const markdown = this.renderMarkdownAttendees(meetingRun, this.listAttendeeSummaries(meetingRun));
+    return new Response(markdown, {
+      headers: {
+        "content-type": "text/markdown; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  private listAttendeeSummaries(meetingRun: MeetingRunRecord): AttendeeSummaryRecord[] {
+    const attendeeEvents = [
+      ...this.storage.listEventRecords({
+        meeting_run_id: meetingRun.meeting_run_id,
+        kind: "zoom.attendee.joined",
+        limit: 10_000,
+      }),
+      ...this.storage.listEventRecords({
+        meeting_run_id: meetingRun.meeting_run_id,
+        kind: "zoom.attendee.left",
+        limit: 10_000,
+      }),
+    ].sort((left, right) => left.event_id - right.event_id || left.seq - right.seq);
+    return this.buildAttendeeSummaries(meetingRun, attendeeEvents as EventRecord<ZoomAttendeePresencePayload>[]);
+  }
+
+  private buildAttendeeSummaries(
+    meetingRun: MeetingRunRecord,
+    attendeeEvents: EventRecord<ZoomAttendeePresencePayload>[],
+  ): AttendeeSummaryRecord[] {
+    const summaries = new Map<string, AttendeeSummaryRecord>();
+    const pushUniqueString = (values: string[], value: string | null | undefined) => {
+      const normalized = value?.trim();
+      if (!normalized || values.includes(normalized)) {
+        return;
+      }
+      values.push(normalized);
+    };
+    const pushUniqueNumber = (values: number[], value: number | null | undefined) => {
+      if (value === null || value === undefined || !Number.isFinite(value) || values.includes(value)) {
+        return;
+      }
+      values.push(value);
+    };
+    const toStableKey = (payload: ZoomAttendeePresencePayload): string => {
+      const displayName = payload.display_name?.trim().toLowerCase() ?? "";
+      if (payload.is_guest && displayName) {
+        return `guest_name:${displayName}`;
+      }
+      if (payload.user_id !== null && payload.user_id !== undefined) {
+        return `user_id:${payload.user_id}`;
+      }
+      if (displayName) {
+        return `display_name:${displayName}`;
+      }
+      const details = payload.details ?? {};
+      const userGuid = typeof details.user_guid === "string" ? details.user_guid.trim() : "";
+      if (userGuid) {
+        return `user_guid:${userGuid}`;
+      }
+      const confUserId = typeof details.conf_user_id === "string" ? details.conf_user_id.trim() : "";
+      if (confUserId) {
+        return `conf_user_id:${confUserId}`;
+      }
+      const zoomId = typeof details.zoom_id === "string" ? details.zoom_id.trim() : "";
+      if (zoomId) {
+        return `zoom_id:${zoomId}`;
+      }
+      return `attendee_id:${payload.attendee_id}`;
+    };
+
+    for (const event of attendeeEvents) {
+      const payload = event.payload;
+      const summaryKey = toStableKey(payload);
+      const existing = summaries.get(summaryKey) ?? {
+        attendee_key: summaryKey,
+        meeting_run_id: meetingRun.meeting_run_id,
+        room_id: meetingRun.room_id,
+        display_name: null,
+        aliases: [],
+        attendee_ids: [],
+        user_ids: [],
+        is_host: false,
+        is_co_host: false,
+        is_guest: false,
+        present: false,
+        join_count: 0,
+        leave_count: 0,
+        first_seen_at: null,
+        last_seen_at: null,
+      };
+
+      pushUniqueString(existing.aliases, payload.display_name);
+      pushUniqueString(existing.attendee_ids, payload.attendee_id);
+      pushUniqueNumber(existing.user_ids, payload.user_id);
+      existing.display_name = payload.display_name?.trim() || existing.display_name;
+      existing.is_host = existing.is_host || payload.is_host;
+      existing.is_co_host = existing.is_co_host || payload.is_co_host;
+      existing.is_guest = existing.is_guest || payload.is_guest;
+      existing.present = event.kind === "zoom.attendee.joined";
+      existing.first_seen_at = existing.first_seen_at && existing.first_seen_at < event.ts ? existing.first_seen_at : event.ts;
+      existing.last_seen_at = existing.last_seen_at && existing.last_seen_at > event.ts ? existing.last_seen_at : event.ts;
+
+      if (event.kind === "zoom.attendee.joined") {
+        existing.join_count += 1;
+      } else {
+        existing.leave_count += 1;
+      }
+      summaries.set(summaryKey, existing);
+    }
+
+    return Array.from(summaries.values()).sort((left, right) => {
+      if (left.is_host !== right.is_host) {
+        return left.is_host ? -1 : 1;
+      }
+      if (left.is_co_host !== right.is_co_host) {
+        return left.is_co_host ? -1 : 1;
+      }
+      const leftName = (left.display_name ?? left.aliases[0] ?? left.attendee_key).toLowerCase();
+      const rightName = (right.display_name ?? right.aliases[0] ?? right.attendee_key).toLowerCase();
+      return leftName.localeCompare(rightName);
+    });
+  }
+
+  private renderMarkdownAttendees(meetingRun: MeetingRunRecord, attendees: AttendeeSummaryRecord[]): string {
+    const heading = meetingRun.room_id.startsWith("zoom:") ? meetingRun.room_id.slice(5) : meetingRun.room_id;
+    const startedAt = meetingRun.started_at ?? meetingRun.created_at;
+    const formatTimestamp = (iso: string | null) => {
+      if (!iso) {
+        return "Unknown time";
+      }
+      return new Intl.DateTimeFormat("en-US", {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(new Date(iso));
+    };
+    const lines = [
+      `# ${heading} · ${formatTimestamp(startedAt)}`,
+      `Meeting URL: ${meetingRun.normalized_join_url}`,
+      "",
+      "## Attendees",
+      "",
+    ];
+
+    if (attendees.length === 0) {
+      lines.push("_No attendee presence captured yet._");
+      lines.push("");
+      return lines.join("\n");
+    }
+
+    for (const attendee of attendees) {
+      const label = attendee.display_name ?? attendee.aliases[0] ?? "Unknown attendee";
+      const tokens: string[] = [];
+      if (attendee.is_host) {
+        tokens.push("host");
+      } else if (attendee.is_co_host) {
+        tokens.push("co-host");
+      }
+      if (attendee.is_guest) {
+        tokens.push("guest");
+      }
+      if (attendee.join_count > 1) {
+        tokens.push(`joins=${attendee.join_count}`);
+      }
+      const aliases = attendee.aliases.filter((value) => value !== label);
+      if (aliases.length > 0) {
+        tokens.push(`aliases=${aliases.join(" / ")}`);
+      }
+      lines.push(`- ${label}${tokens.length ? ` [${tokens.join(", ")}]` : ""}`);
+    }
+    lines.push("");
     return lines.join("\n");
   }
 

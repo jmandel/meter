@@ -2,10 +2,13 @@ import { expect, test } from "bun:test";
 
 import { CoordinatorApp } from "./coordinator";
 import type {
+  AttendeeSummaryRecord,
   ChatMessageRecord,
+  EventRecord,
   InternalConfig,
   MeetingRunRecord,
   SpeechSegmentRecord,
+  ZoomAttendeePresencePayload,
 } from "./domain";
 
 function buildConfig(): InternalConfig {
@@ -152,6 +155,103 @@ function buildChat(): ChatMessageRecord[] {
   ];
 }
 
+function buildAttendeeEvents(): EventRecord<ZoomAttendeePresencePayload>[] {
+  return [
+    {
+      event_id: 10,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 10,
+      source: "zoom_dom",
+      kind: "zoom.attendee.joined",
+      ts: "2026-03-12T06:48:05.000Z",
+      payload: {
+        attendee_id: "zoom_user:456",
+        user_id: 456,
+        display_name: "Josh Mandel",
+        is_host: true,
+        is_co_host: false,
+        is_guest: false,
+        muted: false,
+        video_on: true,
+        audio_connection: "computer",
+        last_spoken_at_unix_ms: null,
+        backfilled: true,
+        details: null,
+      },
+    },
+    {
+      event_id: 11,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 11,
+      source: "zoom_dom",
+      kind: "zoom.attendee.joined",
+      ts: "2026-03-12T06:48:08.000Z",
+      payload: {
+        attendee_id: "zoom_user:16780288",
+        user_id: 16780288,
+        display_name: "Judge mobile",
+        is_host: false,
+        is_co_host: false,
+        is_guest: true,
+        muted: false,
+        video_on: false,
+        audio_connection: "computer",
+        last_spoken_at_unix_ms: null,
+        backfilled: true,
+        details: null,
+      },
+    },
+    {
+      event_id: 12,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 12,
+      source: "zoom_dom",
+      kind: "zoom.attendee.left",
+      ts: "2026-03-12T06:48:37.000Z",
+      payload: {
+        attendee_id: "zoom_user:16780288",
+        user_id: 16780288,
+        display_name: "Judge mobile",
+        is_host: false,
+        is_co_host: false,
+        is_guest: true,
+        muted: false,
+        video_on: false,
+        audio_connection: "computer",
+        last_spoken_at_unix_ms: null,
+        backfilled: false,
+        details: null,
+      },
+    },
+    {
+      event_id: 13,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 13,
+      source: "zoom_dom",
+      kind: "zoom.attendee.joined",
+      ts: "2026-03-12T06:48:48.000Z",
+      payload: {
+        attendee_id: "zoom_user:16789504",
+        user_id: 16789504,
+        display_name: "Judge mobile",
+        is_host: false,
+        is_co_host: false,
+        is_guest: true,
+        muted: false,
+        video_on: false,
+        audio_connection: "computer",
+        last_spoken_at_unix_ms: null,
+        backfilled: false,
+        details: null,
+      },
+    },
+  ];
+}
+
 test("renderMarkdownTranscript keeps default output speech only", () => {
   const app = new CoordinatorApp(buildConfig());
   const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
@@ -165,7 +265,7 @@ test("renderMarkdownTranscript keeps default output speech only", () => {
 
   expect(markdown).toContain("## Transcript");
   expect(markdown).toContain("Opening remarks");
-  expect(markdown).not.toContain("[Chat]");
+  expect(markdown).not.toContain("[chat ");
   expect(markdown).not.toContain("Reply text");
 });
 
@@ -180,10 +280,49 @@ test("renderMarkdownTranscript can interleave chat entries", () => {
 
   const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), true);
 
-  expect(markdown).toContain("[Chat] Judge mobile -> Everyone (1 reply)");
-  expect(markdown).toContain("[Chat] Josh Mandel -> Everyone (reply to chat-root)");
+  expect(markdown).toContain("[chat id=1 replies=1] Judge mobile -> Everyone");
+  expect(markdown).toContain("[chat id=2 reply-to=1] Josh Mandel -> Everyone");
   expect(markdown).toContain("Reply text");
   expect(markdown.indexOf("Opening remarks")).toBeLessThan(markdown.indexOf("Ahoy"));
   expect(markdown.indexOf("Ahoy")).toBeLessThan(markdown.indexOf("Reply text"));
   expect(markdown.indexOf("Reply text")).toBeLessThan(markdown.indexOf("Follow up"));
+});
+
+test("buildAttendeeSummaries merges guest rejoins into one attendee entry", () => {
+  const app = new CoordinatorApp(buildConfig());
+  const buildAttendeeSummaries = (app as any).buildAttendeeSummaries.bind(app) as (
+    meetingRun: MeetingRunRecord,
+    attendeeEvents: EventRecord<ZoomAttendeePresencePayload>[],
+  ) => AttendeeSummaryRecord[];
+
+  const attendees = buildAttendeeSummaries(buildMeetingRun(), buildAttendeeEvents());
+
+  expect(attendees).toHaveLength(2);
+  expect(attendees[0]?.display_name).toBe("Josh Mandel");
+  expect(attendees[0]?.is_host).toBe(true);
+  const judge = attendees.find((item) => item.display_name === "Judge mobile");
+  expect(judge?.join_count).toBe(2);
+  expect(judge?.leave_count).toBe(1);
+  expect(judge?.is_guest).toBe(true);
+  expect(judge?.present).toBe(true);
+  expect(judge?.user_ids).toEqual([16780288, 16789504]);
+});
+
+test("renderMarkdownAttendees emits a readable attendee list", () => {
+  const app = new CoordinatorApp(buildConfig());
+  const buildAttendeeSummaries = (app as any).buildAttendeeSummaries.bind(app) as (
+    meetingRun: MeetingRunRecord,
+    attendeeEvents: EventRecord<ZoomAttendeePresencePayload>[],
+  ) => AttendeeSummaryRecord[];
+  const renderMarkdownAttendees = (app as any).renderMarkdownAttendees.bind(app) as (
+    meetingRun: MeetingRunRecord,
+    attendees: AttendeeSummaryRecord[],
+  ) => string;
+
+  const markdown = renderMarkdownAttendees(buildMeetingRun(), buildAttendeeSummaries(buildMeetingRun(), buildAttendeeEvents()));
+
+  expect(markdown).toContain("## Attendees");
+  expect(markdown).toContain("- Josh Mandel [host]");
+  expect(markdown).toContain("- Judge mobile [guest, joins=2]");
+  expect(markdown).not.toContain("zoom_user:16780288");
 });

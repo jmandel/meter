@@ -683,6 +683,33 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           return true;
         }
 
+        function observeStoreSnapshots() {
+          const store = resolveReduxStore();
+          if (!store) {
+            return false;
+          }
+          const emitSnapshot = () => {
+            const stateSnapshot = store.getState();
+            const attendeeCount = Array.isArray(stateSnapshot?.attendeesList?.attendeesList)
+              ? stateSnapshot.attendeesList.attendeesList.length
+              : null;
+            const chatMessages = stateSnapshot?.newChat?.meetingChat
+              || stateSnapshot?.chat?.meetingChat
+              || null;
+            const chatMessageCount = Array.isArray(chatMessages) ? chatMessages.length : null;
+            emitDomEvent("zoom.store.snapshot", {
+              captured_at_unix_ms: Date.now(),
+              capture_strategy: "redux_store",
+              top_level_keys: stateSnapshot && typeof stateSnapshot === "object" ? Object.keys(stateSnapshot).sort() : [],
+              attendee_count: attendeeCount,
+              chat_message_count: chatMessageCount,
+            }, stateSnapshot);
+          };
+          emitSnapshot();
+          setInterval(emitSnapshot, 5 * 60 * 1000);
+          return true;
+        }
+
         const meetingApp = document.getElementById("meeting-app");
         if (meetingApp) {
           new MutationObserver(scanSpeaker).observe(meetingApp, {
@@ -696,6 +723,7 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
         setInterval(scanSpeaker, 1000);
 
         observeAttendeeStore();
+        observeStoreSnapshots();
 
         if (!observeChatStore()) {
           void openChatPanel().then(() => {

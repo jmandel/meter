@@ -32,6 +32,7 @@ export type EventKind =
   | "browser.page.loaded"
   | "browser.capture.bootstrap_ready"
   | "zoom.chat.message"
+  | "zoom.store.snapshot"
   | "zoom.attendee.joined"
   | "zoom.attendee.left"
   | "zoom.speaker.active"
@@ -214,6 +215,24 @@ export interface SpeakerSpanRecord {
   ended_at: string | null;
 }
 
+export interface AttendeeSummaryRecord {
+  attendee_key: string;
+  meeting_run_id: string;
+  room_id: string;
+  display_name: string | null;
+  aliases: string[];
+  attendee_ids: string[];
+  user_ids: number[];
+  is_host: boolean;
+  is_co_host: boolean;
+  is_guest: boolean;
+  present: boolean;
+  join_count: number;
+  leave_count: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+}
+
 export interface AudioObjectRecord {
   audio_object_id: string;
   meeting_run_id: string;
@@ -309,6 +328,14 @@ export interface ZoomMeetingJoinedPayload {
 
 export interface ZoomSpeakerActivePayload {
   speaker_display_name: string | null;
+}
+
+export interface ZoomStoreSnapshotPayload {
+  captured_at_unix_ms: number;
+  capture_strategy: "redux_store";
+  top_level_keys: string[];
+  attendee_count: number | null;
+  chat_message_count: number | null;
 }
 
 export interface ZoomAttendeePresencePayload {
