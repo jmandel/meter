@@ -365,6 +365,40 @@ function StatusPill({
   );
 }
 
+function AutoGrowTextarea({
+  value,
+  onChange,
+  disabled,
+  className,
+}: {
+  value: string;
+  onChange: (nextValue: string) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) {
+      return;
+    }
+    element.style.height = "0px";
+    element.style.height = `${element.scrollHeight}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      ref={ref}
+      className={className}
+      disabled={disabled}
+      rows={1}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  );
+}
+
 function StateBadge({ state }: { state: string }) {
   const label = state === "capturing" ? "live" : state;
   return <span className={`state-badge state-${state}`}>{label}</span>;
@@ -509,20 +543,20 @@ function NewCapture({
           <>
             <label className="field">
               <span>Minute prompt</span>
-              <textarea
-                rows={6}
+              <AutoGrowTextarea
+                className="auto-grow-textarea"
                 value={minutePromptBody}
                 disabled={submitting}
-                onChange={(inputEvent) => setMinutePromptBody(inputEvent.target.value)}
+                onChange={setMinutePromptBody}
               />
             </label>
             <label className="field">
               <span>Finalization prompt</span>
-              <textarea
-                rows={4}
+              <AutoGrowTextarea
+                className="auto-grow-textarea"
                 value={minuteFinalPromptBody}
                 disabled={submitting}
-                onChange={(inputEvent) => setMinuteFinalPromptBody(inputEvent.target.value)}
+                onChange={setMinuteFinalPromptBody}
               />
             </label>
           </>
@@ -747,18 +781,18 @@ function MinutesPanel({
       <div className="minutes-controls">
         <label className="minutes-field">
           <span>Minute prompt</span>
-          <textarea
-            rows={6}
+          <AutoGrowTextarea
+            className="auto-grow-textarea"
             value={promptBody}
-            onChange={(event) => setPromptBody(event.target.value)}
+            onChange={setPromptBody}
           />
         </label>
         <label className="minutes-field">
           <span>Finalization prompt</span>
-          <textarea
-            rows={4}
+          <AutoGrowTextarea
+            className="auto-grow-textarea"
             value={finalPromptBody}
-            onChange={(event) => setFinalPromptBody(event.target.value)}
+            onChange={setFinalPromptBody}
           />
         </label>
         <div className="minutes-actions">
