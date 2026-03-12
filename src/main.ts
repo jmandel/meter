@@ -66,6 +66,10 @@ export async function startFromCommandLine(argv: string[]): Promise<void> {
     return;
   }
 
+  if (mode !== "all" && mode !== "api") {
+    throw new Error(`Unsupported mode: ${mode}`);
+  }
+
   const config = loadCoordinatorConfig(args);
   const app = new CoordinatorApp(config);
   await app.start();

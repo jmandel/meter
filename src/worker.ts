@@ -20,6 +20,7 @@ import type {
   MeetingRunState,
   TranscriptionSegmentPayload,
   WorkerHeartbeatPayload,
+  WorkerHeartbeatResponse,
   WorkerLaunchConfig,
   WorkerStartedPayload,
   ZoomMeetingJoinedPayload,
@@ -133,6 +134,9 @@ export class WorkerProcess {
   private flushing = false;
   private browserMessageQueue = Promise.resolve();
   private currentSpeakerLabel: string | null = null;
+  private operatorAssistanceClaimed = false;
+  private operatorAssistanceOperator: string | null = null;
+  private operatorAssistanceReason: string | null = null;
   private archiveErrorReported = false;
   private readonly archiveEncoder: ArchiveEncoderState = {
     process: null,
@@ -368,7 +372,9 @@ export class WorkerProcess {
         permissions: ["audioCapture", "videoCapture", "displayCapture", "notifications"],
       }).catch(() => undefined);
 
+      await this.waitForOperatorRelease("navigate_and_join");
       await this.navigateAndJoin(cdp);
+      await this.waitForOperatorRelease("inject_capture_bootstrap");
       await this.injectCaptureBootstrap(cdp);
     } catch (error) {
       if (this.completionSent || this.stopping) {
@@ -450,11 +456,13 @@ export class WorkerProcess {
       { timeoutMs: 30_000, intervalMs: 500 },
     );
 
+    await this.waitForOperatorRelease("prepare_join_form");
     const hasMeetingApp = await cdpEval(cdp, `!!document.getElementById("meeting-app")`);
     if (!hasMeetingApp) {
       await this.prepareJoinForm(cdp);
     }
 
+    await this.waitForOperatorRelease("wait_for_meeting_shell");
     await this.waitForMeetingShell(cdp);
   }
 
@@ -527,6 +535,7 @@ export class WorkerProcess {
 
   private async waitForMeetingShell(cdp: CDPSession): Promise<void> {
     for (let attempt = 0; attempt < 20; attempt += 1) {
+      await this.waitForOperatorRelease("wait_for_meeting_shell");
       await this.dismissDialogs(cdp);
       const hasMeetingShell = await cdpEval(cdp, `!!document.getElementById("meeting-app")`);
       if (hasMeetingShell) {
@@ -856,10 +865,46 @@ export class WorkerProcess {
       await this.log(`heartbeat failed: ${response.status}`);
       return;
     }
-    const body = await response.json();
+    const body = await response.json() as WorkerHeartbeatResponse;
+    await this.syncOperatorAssistance(body.operator_assistance);
     if (body.stop_requested && !this.stopping) {
       await this.log("stop requested by coordinator");
       await this.complete("completed");
+    }
+  }
+
+  private async syncOperatorAssistance(assistance: WorkerHeartbeatResponse["operator_assistance"]): Promise<void> {
+    const claimed = assistance?.claimed ?? false;
+    if (
+      claimed === this.operatorAssistanceClaimed
+      && (assistance?.operator ?? null) === this.operatorAssistanceOperator
+      && (assistance?.reason ?? null) === this.operatorAssistanceReason
+    ) {
+      return;
+    }
+    this.operatorAssistanceClaimed = claimed;
+    this.operatorAssistanceOperator = assistance?.operator ?? null;
+    this.operatorAssistanceReason = assistance?.reason ?? null;
+    if (claimed) {
+      const summary = [this.operatorAssistanceOperator, this.operatorAssistanceReason].filter(Boolean).join(" :: ");
+      await this.log(`operator assistance claimed${summary ? ` ${summary}` : ""}`);
+      await this.browserLog(`operator assistance claimed${summary ? ` ${summary}` : ""}`);
+      return;
+    }
+    await this.log("operator assistance released");
+    await this.browserLog("operator assistance released");
+  }
+
+  private async waitForOperatorRelease(context: string): Promise<void> {
+    if (!this.operatorAssistanceClaimed) {
+      return;
+    }
+    await this.log(`automation paused for operator assistance at ${context}`);
+    while (this.operatorAssistanceClaimed && !this.stopping && !this.completionSent) {
+      await sleep(500);
+    }
+    if (!this.completionSent && !this.stopping) {
+      await this.log(`automation resumed after operator assistance at ${context}`);
     }
   }
 
@@ -937,6 +982,10 @@ export class WorkerProcess {
     };
     await this.emitEvent("worker", "error.raised", errorPayload);
     await this.log(`error ${code}: ${message}`);
+    if (fatal && this.operatorAssistanceClaimed) {
+      await this.log(`fatal error ${code} suppressed while operator assistance is active`);
+      return;
+    }
     if (fatal) {
       void this.complete("failed", errorPayload);
     }

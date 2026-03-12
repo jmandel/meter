@@ -1,4 +1,5 @@
 import path from "node:path";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import dashboard from "../ui/index.html";
 
@@ -16,9 +17,14 @@ import type {
   ListResponse,
   MeetingRunOptions,
   MeetingRunRecord,
+  OperatorAssistancePayload,
+  RescueClaimRequest,
+  RescueReleaseRequest,
+  RescueStatusResponse,
   SearchHit,
   SpeechSegmentRecord,
   WorkerLaunchConfig,
+  WorkerHeartbeatResponse,
   WorkerRegisterRequest,
   ZoomAttendeePresencePayload,
 } from "./domain";
@@ -54,6 +60,37 @@ interface WorkerHandle {
   completed: boolean;
   child: Bun.Subprocess<"ignore", "ignore", "inherit"> | null;
   child_pid: number | null;
+}
+
+interface RescueClaimState {
+  claimed: boolean;
+  operator: string | null;
+  reason: string | null;
+  note: string | null;
+  claimed_at_unix_ms: number | null;
+  released_at_unix_ms: number | null;
+}
+
+interface AutomatedRescueRuntimeConfig {
+  enabled: boolean;
+  command: string | null;
+  timeout_ms: number;
+  cooldown_ms: number;
+  max_attempts: number;
+  operator_name: string;
+  repo_root: string;
+}
+
+interface AutomatedRescueAttempt {
+  meeting_run_id: string;
+  attempt_number: number;
+  reason: string;
+  started_at_unix_ms: number;
+  child: ChildProcessWithoutNullStreams | null;
+  timeout: Timer | null;
+  log_path: string;
+  prompt_path: string;
+  context_path: string;
 }
 
 interface SseSubscriber {
@@ -140,11 +177,32 @@ export class CoordinatorApp {
   private readonly eventBus = new EventBus();
   private readonly workersByMeetingRunId = new Map<string, WorkerHandle>();
   private readonly workersByWorkerId = new Map<string, WorkerHandle>();
+  private readonly rescueClaimsByMeetingRunId = new Map<string, RescueClaimState>();
+  private readonly automatedRescueAttemptsByMeetingRunId = new Map<string, AutomatedRescueAttempt>();
+  private readonly automatedRescueAttemptCountsByMeetingRunId = new Map<string, number>();
+  private readonly automatedRescueLastAttemptByMeetingRunId = new Map<string, number>();
+  private readonly automatedRescueConfig: AutomatedRescueRuntimeConfig;
   private server?: Bun.Server;
   private coordinatorLogPath = "";
   private stopPromise: Promise<void> | null = null;
+  private rescuePromptTemplatePromise: Promise<string> | null = null;
 
   constructor(private readonly config: InternalConfig) {
+    this.automatedRescueConfig = this.loadAutomatedRescueConfig();
+  }
+
+  private loadAutomatedRescueConfig(): AutomatedRescueRuntimeConfig {
+    const command = process.env.METER_AUTOMATED_RESCUE_COMMAND?.trim() || null;
+    const enabled = Boolean(command) && parseBoolean(process.env.METER_AUTOMATED_RESCUE_ENABLED, true);
+    return {
+      enabled,
+      command,
+      timeout_ms: parseInteger(process.env.METER_AUTOMATED_RESCUE_TIMEOUT_MS ?? null, 10 * 60 * 1000),
+      cooldown_ms: parseInteger(process.env.METER_AUTOMATED_RESCUE_COOLDOWN_MS ?? null, 5 * 60 * 1000),
+      max_attempts: parseInteger(process.env.METER_AUTOMATED_RESCUE_MAX_ATTEMPTS ?? null, 1),
+      operator_name: process.env.METER_AUTOMATED_RESCUE_OPERATOR?.trim() || "automated-rescue",
+      repo_root: path.resolve(new URL("..", import.meta.url).pathname),
+    };
   }
 
   async start(): Promise<void> {
@@ -245,6 +303,18 @@ export class CoordinatorApp {
       if (match && request.method === "GET") {
         return this.handleMarkdownTranscript(url, match[1]);
       }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/rescue$/);
+      if (match && request.method === "GET") {
+        return this.handleGetRescueStatus(request, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/rescue\/claim$/);
+      if (match && request.method === "POST") {
+        return await this.handleRescueClaim(request, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/rescue\/release$/);
+      if (match && request.method === "POST") {
+        return await this.handleRescueRelease(request, match[1]);
+      }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/attendees$/);
       if (match && request.method === "GET") {
         return this.handleListAttendees(match[1]);
@@ -332,7 +402,12 @@ export class CoordinatorApp {
       handle.stop_requested = true;
     }
     await this.persistWorkersState();
-    await Promise.allSettled(activeHandles.map((handle) => this.terminateWorker(handle)));
+    await Promise.allSettled([
+      ...activeHandles.map((handle) => this.terminateWorker(handle)),
+      ...Array.from(this.automatedRescueAttemptsByMeetingRunId.keys()).map((meetingRunId) =>
+        this.stopAutomatedRescueForMeetingRun(meetingRunId, "coordinator stopping"),
+      ),
+    ]);
     this.server?.stop();
     this.storage.close();
   }
@@ -617,6 +692,8 @@ export class CoordinatorApp {
         last_error_code: "worker_exit",
         last_error_message: `Worker exited with code ${code}`,
       });
+      await this.stopAutomatedRescueForMeetingRun(launchConfig.meeting_run_id, "worker exited");
+      this.rescueClaimsByMeetingRunId.delete(launchConfig.meeting_run_id);
       this.eventBus.publish(appended.records);
       await this.persistWorkersState();
     });
@@ -652,6 +729,19 @@ export class CoordinatorApp {
     };
   }
 
+  private async appendCoordinatorEventAndPublish(
+    meetingRunId: string,
+    roomId: string,
+    kind: EventEnvelope["kind"],
+    payload: unknown,
+    tsUnixMs: number,
+  ): Promise<void> {
+    const appended = this.storage.appendEvents([
+      this.buildCoordinatorEvent(meetingRunId, roomId, kind, payload, tsUnixMs),
+    ], tsUnixMs);
+    this.eventBus.publish(appended.records);
+  }
+
   private listResponse<T>(items: T[]): ListResponse<T> {
     return {
       items,
@@ -679,6 +769,97 @@ export class CoordinatorApp {
     return jsonResponse({ meeting_run: record });
   }
 
+  private handleGetRescueStatus(request: Request, meetingRunId: string): Response {
+    const record = this.getMeetingRun(meetingRunId);
+    if (!record) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    return jsonResponse({
+      rescue: this.buildRescueStatus(record, this.resolvePublicBaseUrl(request)),
+    });
+  }
+
+  private async handleRescueClaim(request: Request, meetingRunId: string): Promise<Response> {
+    const record = this.getMeetingRun(meetingRunId);
+    if (!record) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    if (["completed", "failed", "aborted"].includes(record.state)) {
+      return errorResponse(409, "meeting_run_terminal", "Meeting run is already in a terminal state");
+    }
+    if (record.worker?.status !== "online" || !record.worker?.cdp_port) {
+      return errorResponse(409, "worker_unavailable", "No live worker/browser is available to rescue this meeting run");
+    }
+    const body = await parseJsonBody<RescueClaimRequest>(request).catch(() => ({} as RescueClaimRequest));
+    const existing = this.rescueClaimsByMeetingRunId.get(meetingRunId);
+    const requestedOperator = body.operator?.trim() || "codex";
+    if (existing?.claimed && existing.operator && existing.operator !== requestedOperator) {
+      return errorResponse(409, "rescue_already_claimed", "Meeting run is already claimed for operator assistance", {
+        operator: existing.operator,
+      });
+    }
+    const now = nowUnixMs();
+    const claim: RescueClaimState = {
+      claimed: true,
+      operator: requestedOperator,
+      reason: body.reason?.trim() || null,
+      note: body.note?.trim() || null,
+      claimed_at_unix_ms: now,
+      released_at_unix_ms: null,
+    };
+    this.rescueClaimsByMeetingRunId.set(meetingRunId, claim);
+    if (requestedOperator !== this.automatedRescueConfig.operator_name) {
+      void this.stopAutomatedRescueForMeetingRun(meetingRunId, `operator claim transferred to ${requestedOperator}`);
+    }
+    await this.appendCoordinatorEventAndPublish(
+      meetingRunId,
+      record.room_id,
+      "system.operator_assistance.claimed",
+      {
+        operator: claim.operator,
+        reason: claim.reason,
+        note: claim.note,
+      } satisfies OperatorAssistancePayload,
+      now,
+    );
+    return jsonResponse({
+      rescue: this.buildRescueStatus(this.getMeetingRun(meetingRunId) ?? record, this.resolvePublicBaseUrl(request)),
+    });
+  }
+
+  private async handleRescueRelease(request: Request, meetingRunId: string): Promise<Response> {
+    const record = this.getMeetingRun(meetingRunId);
+    if (!record) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const current = this.rescueClaimsByMeetingRunId.get(meetingRunId);
+    const body = await parseJsonBody<RescueReleaseRequest>(request).catch(() => ({} as RescueReleaseRequest));
+    const now = nowUnixMs();
+    const released: RescueClaimState = {
+      claimed: false,
+      operator: body.operator?.trim() || current?.operator || "codex",
+      reason: current?.reason ?? null,
+      note: body.note?.trim() || current?.note || null,
+      claimed_at_unix_ms: current?.claimed_at_unix_ms ?? null,
+      released_at_unix_ms: now,
+    };
+    this.rescueClaimsByMeetingRunId.set(meetingRunId, released);
+    await this.appendCoordinatorEventAndPublish(
+      meetingRunId,
+      record.room_id,
+      "system.operator_assistance.released",
+      {
+        operator: released.operator,
+        reason: released.reason,
+        note: released.note,
+      } satisfies OperatorAssistancePayload,
+      now,
+    );
+    return jsonResponse({
+      rescue: this.buildRescueStatus(this.getMeetingRun(meetingRunId) ?? record, this.resolvePublicBaseUrl(request)),
+    });
+  }
+
   private handleStopMeetingRun(meetingRunId: string): Response {
     const record = this.getMeetingRun(meetingRunId);
     if (!record) {
@@ -700,6 +881,8 @@ export class CoordinatorApp {
       });
     }
     handle.stop_requested = true;
+    this.rescueClaimsByMeetingRunId.delete(meetingRunId);
+    void this.stopAutomatedRescueForMeetingRun(meetingRunId, "stop requested");
     void this.persistWorkersState();
     this.storage.patchMeetingRun(meetingRunId, {
       state: "stopping",
@@ -739,6 +922,340 @@ export class CoordinatorApp {
       limit,
     });
     return jsonResponse(this.listResponse(items));
+  }
+
+  private buildRescueStatus(meetingRun: MeetingRunRecord, publicBaseUrl: string): RescueStatusResponse {
+    const claim = this.rescueClaimsByMeetingRunId.get(meetingRun.meeting_run_id);
+    const events = this.storage.listEventRecords({
+      meeting_run_id: meetingRun.meeting_run_id,
+      room_id: null,
+      source: null,
+      kind: null,
+      from: null,
+      to: null,
+      after_event_id: null,
+      limit: 10_000,
+    });
+    const latestByKind = new Map<string, EventRecord>();
+    for (const event of events) {
+      latestByKind.set(event.kind, event);
+    }
+
+    const pageLoaded = latestByKind.get("browser.page.loaded") ?? null;
+    const meetingJoined = latestByKind.get("zoom.meeting.joined") ?? null;
+    const captureStarted = latestByKind.get("audio.capture.started") ?? null;
+    const captureStopped = latestByKind.get("audio.capture.stopped") ?? null;
+    const bootstrapReady = latestByKind.get("browser.capture.bootstrap_ready") ?? null;
+    const latestBrowserConsole = [...events].reverse().find((event) => event.kind === "browser.console") ?? null;
+    const recentErrors = [...events]
+      .reverse()
+      .filter((event) => event.kind === "error.raised")
+      .slice(0, 5)
+      .map((event) => {
+        const payload = event.payload as { code?: string; message?: string; details?: Record<string, unknown> };
+        return {
+          code: payload.code ?? "worker_error",
+          message: payload.message ?? "",
+          details: payload.details,
+        };
+      });
+
+    const now = nowUnixMs();
+    const createdAtUnixMs = Date.parse(meetingRun.created_at) || now;
+    const latestProgressUnixMs = Math.max(
+      createdAtUnixMs,
+      Date.parse((latestByKind.get("system.worker.started")?.ts) ?? "") || 0,
+      Date.parse((bootstrapReady?.ts) ?? "") || 0,
+      Date.parse((pageLoaded?.ts) ?? "") || 0,
+      Date.parse((meetingJoined?.ts) ?? "") || 0,
+      Date.parse((captureStarted?.ts) ?? "") || 0,
+    );
+    const latestStopProgressUnixMs = Math.max(
+      latestProgressUnixMs,
+      Date.parse((captureStopped?.ts) ?? "") || 0,
+    );
+    let suggestedReason: string | null = null;
+    if (meetingRun.worker?.status === "online" && !captureStarted) {
+      if (meetingRun.state === "starting" && now - latestProgressUnixMs > 20_000 && !pageLoaded) {
+        suggestedReason = "browser_has_not_loaded";
+      } else if (meetingRun.state === "joining" && now - latestProgressUnixMs > 30_000) {
+        suggestedReason = "join_flow_stalled";
+      } else if (meetingRun.state === "stopping" && now - latestStopProgressUnixMs > 20_000) {
+        suggestedReason = "stop_flow_stalled";
+      }
+    }
+
+    return {
+      meeting_run_id: meetingRun.meeting_run_id,
+      claimed: claim?.claimed ?? false,
+      operator: claim?.operator ?? null,
+      reason: claim?.reason ?? null,
+      note: claim?.note ?? null,
+      claimed_at: claim?.claimed_at_unix_ms ? new Date(claim.claimed_at_unix_ms).toISOString() : null,
+      state: meetingRun.state,
+      worker_online: meetingRun.worker?.status === "online",
+      cdp_port: meetingRun.worker?.cdp_port ?? null,
+      ingest_port: meetingRun.worker?.ingest_port ?? null,
+      needs_assistance: Boolean((claim?.claimed ?? false) || suggestedReason),
+      suggested_reason: suggestedReason,
+      checkpoints: {
+        page_loaded: Boolean(pageLoaded),
+        meeting_joined: Boolean(meetingJoined),
+        capture_started: Boolean(captureStarted),
+        capture_stopped: Boolean(captureStopped),
+      },
+      latest_page_url:
+        ((meetingJoined?.payload as { page_url?: string | null } | undefined)?.page_url ??
+          (pageLoaded?.payload as { page_url?: string | null } | undefined)?.page_url ??
+          null),
+      latest_browser_console:
+        ((latestBrowserConsole?.payload as { text?: string | null } | undefined)?.text ?? null),
+      recent_errors: recentErrors,
+      screenshot_url:
+        meetingRun.worker?.status === "online" && meetingRun.worker?.cdp_port
+          ? `${publicBaseUrl}/v1/meeting-runs/${meetingRun.meeting_run_id}/screenshot`
+          : null,
+      browser_bootstrap_url:
+        ((bootstrapReady?.payload as { bootstrap_url?: string | null } | undefined)?.bootstrap_url ?? null),
+    };
+  }
+
+  private rescueBaseUrl(): string {
+    return this.config.public_base_url || `http://${this.config.listen_host}:${this.config.listen_port}`;
+  }
+
+  private async loadRescuePromptTemplate(): Promise<string> {
+    if (!this.rescuePromptTemplatePromise) {
+      const promptPath = path.join(this.automatedRescueConfig.repo_root, "RESCUE_PROMPT.md");
+      this.rescuePromptTemplatePromise = Bun.file(promptPath).text().catch(() => [
+        "# Meter Rescue Prompt",
+        "",
+        "See RESCUE_PROMPT.md in the repo root. This fallback prompt was generated because the file could not be read.",
+      ].join("\n"));
+    }
+    return await this.rescuePromptTemplatePromise;
+  }
+
+  private async renderAutomatedRescuePrompt(meetingRun: MeetingRunRecord, rescueStatus: RescueStatusResponse): Promise<string> {
+    const template = await this.loadRescuePromptTemplate();
+    const extraContext = [
+      "Automated rescue was triggered by the Meter coordinator.",
+      rescueStatus.suggested_reason ? `Suggested reason: ${rescueStatus.suggested_reason}` : null,
+      rescueStatus.latest_browser_console ? `Latest browser console: ${rescueStatus.latest_browser_console}` : null,
+      rescueStatus.recent_errors.length > 0
+        ? `Recent errors: ${rescueStatus.recent_errors.map((item) => `${item.code}: ${item.message}`).join(" | ")}`
+        : null,
+    ].filter(Boolean).join("\n");
+    const replacements: Record<string, string> = {
+      "{{METER_BASE_URL}}": this.rescueBaseUrl(),
+      "{{MEETING_RUN_ID}}": meetingRun.meeting_run_id,
+      "{{ROOM_ID}}": meetingRun.room_id,
+      "{{REQUESTED_BY}}": meetingRun.requested_by ?? "",
+      "{{BOT_NAME}}": meetingRun.bot_name,
+      "{{JOIN_URL}}": meetingRun.normalized_join_url,
+      "{{OPERATOR_NAME}}": this.automatedRescueConfig.operator_name,
+      "{{TIMEOUT_BUDGET}}": `${this.automatedRescueConfig.timeout_ms}ms`,
+      "{{RESCUE_STATUS_JSON}}": JSON.stringify(rescueStatus, null, 2),
+      "{{EXTRA_CONTEXT}}": extraContext,
+    };
+    let rendered = template;
+    for (const [needle, value] of Object.entries(replacements)) {
+      rendered = rendered.split(needle).join(value);
+    }
+    return [
+      rendered,
+      "",
+      "## Generated Runtime Context",
+      "",
+      "```json",
+      JSON.stringify({
+        generated_at: new Date().toISOString(),
+        rescue_status: rescueStatus,
+        meeting_run: meetingRun,
+      }, null, 2),
+      "```",
+      "",
+    ].join("\n");
+  }
+
+  private maybeStartAutomatedRescue(meetingRunId: string): void {
+    void this.maybeStartAutomatedRescueInternal(meetingRunId);
+  }
+
+  private async maybeStartAutomatedRescueInternal(meetingRunId: string): Promise<void> {
+    if (!this.automatedRescueConfig.enabled || !this.automatedRescueConfig.command) {
+      return;
+    }
+    if (this.automatedRescueAttemptsByMeetingRunId.has(meetingRunId)) {
+      return;
+    }
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun || ["completed", "failed", "aborted"].includes(meetingRun.state)) {
+      return;
+    }
+    if (this.rescueClaimsByMeetingRunId.get(meetingRunId)?.claimed) {
+      return;
+    }
+    const attempts = this.automatedRescueAttemptCountsByMeetingRunId.get(meetingRunId) ?? 0;
+    if (attempts >= this.automatedRescueConfig.max_attempts) {
+      return;
+    }
+    const lastAttemptAt = this.automatedRescueLastAttemptByMeetingRunId.get(meetingRunId) ?? 0;
+    const now = nowUnixMs();
+    if (lastAttemptAt > 0 && now - lastAttemptAt < this.automatedRescueConfig.cooldown_ms) {
+      return;
+    }
+
+    const rescueStatus = this.buildRescueStatus(meetingRun, this.rescueBaseUrl());
+    if (!rescueStatus.needs_assistance || !rescueStatus.suggested_reason || !rescueStatus.worker_online || !rescueStatus.cdp_port) {
+      return;
+    }
+
+    const attemptNumber = attempts + 1;
+    this.automatedRescueAttemptCountsByMeetingRunId.set(meetingRunId, attemptNumber);
+    this.automatedRescueLastAttemptByMeetingRunId.set(meetingRunId, now);
+    await this.launchAutomatedRescue(meetingRun, rescueStatus, attemptNumber);
+  }
+
+  private async launchAutomatedRescue(
+    meetingRun: MeetingRunRecord,
+    rescueStatus: RescueStatusResponse,
+    attemptNumber: number,
+  ): Promise<void> {
+    const rescueDir = path.join(meetingRun.paths.data_dir, "rescue");
+    const promptPath = path.join(rescueDir, `attempt-${attemptNumber}.prompt.md`);
+    const contextPath = path.join(rescueDir, `attempt-${attemptNumber}.context.json`);
+    const logPath = path.join(rescueDir, `attempt-${attemptNumber}.log`);
+    const prompt = await this.renderAutomatedRescuePrompt(meetingRun, rescueStatus);
+    const context = {
+      generated_at: new Date().toISOString(),
+      command: this.automatedRescueConfig.command,
+      operator_name: this.automatedRescueConfig.operator_name,
+      rescue_status: rescueStatus,
+      meeting_run: meetingRun,
+    };
+    await Bun.write(promptPath, prompt, { createPath: true });
+    await Bun.write(contextPath, `${JSON.stringify(context, null, 2)}\n`, { createPath: true });
+    await appendLogLine(logPath, `launching automated rescue attempt=${attemptNumber} reason=${rescueStatus.suggested_reason}`);
+    await appendLogLine(this.coordinatorLogPath, `launching automated rescue run=${meetingRun.meeting_run_id} attempt=${attemptNumber} reason=${rescueStatus.suggested_reason}`);
+
+    const attempt: AutomatedRescueAttempt = {
+      meeting_run_id: meetingRun.meeting_run_id,
+      attempt_number: attemptNumber,
+      reason: rescueStatus.suggested_reason,
+      started_at_unix_ms: nowUnixMs(),
+      child: null,
+      timeout: null,
+      log_path: logPath,
+      prompt_path: promptPath,
+      context_path: contextPath,
+    };
+    this.automatedRescueAttemptsByMeetingRunId.set(meetingRun.meeting_run_id, attempt);
+
+    try {
+      const child = spawn("bash", ["-lc", this.automatedRescueConfig.command], {
+        cwd: this.automatedRescueConfig.repo_root,
+        env: {
+          ...process.env,
+          METER_BASE_URL: this.rescueBaseUrl(),
+          METER_MEETING_RUN_ID: meetingRun.meeting_run_id,
+          METER_ROOM_ID: meetingRun.room_id,
+          METER_OPERATOR_NAME: this.automatedRescueConfig.operator_name,
+          METER_TIMEOUT_BUDGET: String(this.automatedRescueConfig.timeout_ms),
+          METER_JOIN_URL: meetingRun.normalized_join_url,
+          METER_RESCUE_STATUS_JSON: JSON.stringify(rescueStatus),
+          METER_RESCUE_PROMPT_PATH: promptPath,
+          METER_RESCUE_CONTEXT_PATH: contextPath,
+          METER_RESCUE_LOG_PATH: logPath,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      attempt.child = child;
+      child.stdin.end(prompt, "utf8");
+      child.stdout.on("data", (chunk) => {
+        void this.appendAutomatedRescueOutput(logPath, "stdout", Buffer.from(chunk).toString("utf8"));
+      });
+      child.stderr.on("data", (chunk) => {
+        void this.appendAutomatedRescueOutput(logPath, "stderr", Buffer.from(chunk).toString("utf8"));
+      });
+      child.on("error", (error) => {
+        void appendLogLine(logPath, `spawn error: ${error.message}`);
+        void appendLogLine(this.coordinatorLogPath, `automated rescue spawn error run=${meetingRun.meeting_run_id}: ${error.message}`);
+      });
+      attempt.timeout = setTimeout(() => {
+        void appendLogLine(logPath, `timeout reached after ${this.automatedRescueConfig.timeout_ms}ms`);
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          return;
+        }
+        setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // ignore best effort kill
+          }
+        }, 2_000);
+      }, this.automatedRescueConfig.timeout_ms);
+      child.on("close", (code, signal) => {
+        const current = this.automatedRescueAttemptsByMeetingRunId.get(meetingRun.meeting_run_id);
+        if (current === attempt) {
+          this.automatedRescueAttemptsByMeetingRunId.delete(meetingRun.meeting_run_id);
+        }
+        if (attempt.timeout) {
+          clearTimeout(attempt.timeout);
+        }
+        void appendLogLine(logPath, `process exited code=${code ?? "null"} signal=${signal ?? "null"}`);
+        void appendLogLine(this.coordinatorLogPath, `automated rescue exited run=${meetingRun.meeting_run_id} attempt=${attemptNumber} code=${code ?? "null"} signal=${signal ?? "null"}`);
+      });
+    } catch (error) {
+      this.automatedRescueAttemptsByMeetingRunId.delete(meetingRun.meeting_run_id);
+      const message = error instanceof Error ? error.message : String(error);
+      await appendLogLine(logPath, `failed to launch automated rescue: ${message}`);
+      await appendLogLine(this.coordinatorLogPath, `failed to launch automated rescue run=${meetingRun.meeting_run_id}: ${message}`);
+    }
+  }
+
+  private async appendAutomatedRescueOutput(logPath: string, streamName: "stdout" | "stderr", text: string): Promise<void> {
+    for (const line of text.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+      await appendLogLine(logPath, `[${streamName}] ${line}`);
+    }
+  }
+
+  private async stopAutomatedRescueForMeetingRun(meetingRunId: string, reason: string): Promise<void> {
+    const attempt = this.automatedRescueAttemptsByMeetingRunId.get(meetingRunId);
+    if (!attempt) {
+      return;
+    }
+    this.automatedRescueAttemptsByMeetingRunId.delete(meetingRunId);
+    if (attempt.timeout) {
+      clearTimeout(attempt.timeout);
+    }
+    await appendLogLine(attempt.log_path, `stopping automated rescue: ${reason}`);
+    await appendLogLine(this.coordinatorLogPath, `stopping automated rescue run=${meetingRunId}: ${reason}`);
+    const child = attempt.child;
+    if (!child) {
+      return;
+    }
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // ignore best effort kill
+        }
+        resolve();
+      }, 2_000);
+      child.once("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   private handleMarkdownTranscript(url: URL, meetingRunId: string): Response {
@@ -1355,10 +1872,28 @@ export class CoordinatorApp {
     });
 
     const handle = this.workersByWorkerId.get(workerId) ?? this.workersByMeetingRunId.get(body.meeting_run_id);
-    return jsonResponse({
+    const claim = this.rescueClaimsByMeetingRunId.get(body.meeting_run_id);
+    const response: WorkerHeartbeatResponse = {
       accepted: true,
       stop_requested: handle?.stop_requested ?? false,
-    });
+      operator_assistance: claim
+        ? {
+            claimed: claim.claimed,
+            operator: claim.operator,
+            reason: claim.reason,
+            note: claim.note,
+            claimed_at_unix_ms: claim.claimed_at_unix_ms,
+          }
+        : {
+            claimed: false,
+            operator: null,
+            reason: null,
+            note: null,
+            claimed_at_unix_ms: null,
+          },
+    };
+    this.maybeStartAutomatedRescue(body.meeting_run_id);
+    return jsonResponse(response);
   }
 
   private async handleAppendEvents(request: Request, meetingRunId: string): Promise<Response> {
@@ -1392,6 +1927,7 @@ export class CoordinatorApp {
     const appended = this.storage.appendEvents(body.events, nowUnixMs());
     this.patchMeetingRunFromEvents(meetingRunId, body.events);
     this.eventBus.publish(appended.records);
+    this.maybeStartAutomatedRescue(meetingRunId);
     return jsonResponse({
       accepted: true,
       highest_event_id: appended.highest_event_id,
@@ -1450,6 +1986,8 @@ export class CoordinatorApp {
       await this.persistWorkersState();
     }
 
+    await this.stopAutomatedRescueForMeetingRun(meetingRunId, "meeting run completed");
+    this.rescueClaimsByMeetingRunId.delete(meetingRunId);
     this.eventBus.publish(appended.records);
     return jsonResponse({ accepted: true });
   }

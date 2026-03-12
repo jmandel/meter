@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import path from "node:path";
+
 import { expect, test } from "bun:test";
 
 import { CoordinatorApp } from "./coordinator";
@@ -252,6 +255,79 @@ function buildAttendeeEvents(): EventRecord<ZoomAttendeePresencePayload>[] {
   ];
 }
 
+function buildRescueMeetingRun(): MeetingRunRecord {
+  return {
+    ...buildMeetingRun(),
+    state: "joining",
+    worker: {
+      worker_id: "worker-1",
+      pid: 1234,
+      ingest_port: 43111,
+      cdp_port: 43112,
+      status: "online",
+      last_heartbeat_at: "2026-03-12T06:48:40.000Z",
+    },
+    updated_at: "2026-03-12T06:48:40.000Z",
+  };
+}
+
+function buildRescueEvents(): EventRecord[] {
+  return [
+    {
+      event_id: 20,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 20,
+      source: "browser",
+      kind: "browser.capture.bootstrap_ready",
+      ts: "2026-03-12T06:48:03.000Z",
+      payload: {
+        bootstrap_url: "http://127.0.0.1:43111/internal/browser/bootstrap.js?token=test",
+      },
+    },
+    {
+      event_id: 21,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 21,
+      source: "browser",
+      kind: "browser.page.loaded",
+      ts: "2026-03-12T06:48:08.000Z",
+      payload: {
+        page_url: "https://app.zoom.us/wc/2193058682/join",
+        user_agent: "test-agent",
+      },
+    },
+    {
+      event_id: 22,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 22,
+      source: "browser",
+      kind: "browser.console",
+      ts: "2026-03-12T06:48:30.000Z",
+      payload: {
+        level: "info",
+        text: "join screen still visible",
+      },
+    },
+    {
+      event_id: 23,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 23,
+      source: "worker",
+      kind: "error.raised",
+      ts: "2026-03-12T06:48:31.000Z",
+      payload: {
+        code: "join_stall",
+        message: "Join flow appears stalled",
+        fatal: false,
+      },
+    },
+  ];
+}
+
 test("renderMarkdownTranscript keeps default output speech only", () => {
   const app = new CoordinatorApp(buildConfig());
   const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
@@ -325,4 +401,131 @@ test("renderMarkdownAttendees emits a readable attendee list", () => {
   expect(markdown).toContain("- Josh Mandel [host]");
   expect(markdown).toContain("- Judge mobile [guest, joins=2]");
   expect(markdown).not.toContain("zoom_user:16780288");
+});
+
+test("buildRescueStatus reports live rescue metadata and bootstrap url", () => {
+  const app = new CoordinatorApp(buildConfig()) as any;
+  app.storage = {
+    listEventRecords: () => buildRescueEvents(),
+  };
+  app.rescueClaimsByMeetingRunId = new Map([
+    ["meeting-run-test", {
+      claimed: true,
+      operator: "codex",
+      reason: "join_flow_stalled",
+      note: "manual inspection",
+      claimed_at_unix_ms: Date.parse("2026-03-12T06:48:45.000Z"),
+      released_at_unix_ms: null,
+    }],
+  ]);
+
+  const rescue = app.buildRescueStatus(buildRescueMeetingRun(), "http://127.0.0.1:3100");
+
+  expect(rescue.claimed).toBe(true);
+  expect(rescue.operator).toBe("codex");
+  expect(rescue.worker_online).toBe(true);
+  expect(rescue.cdp_port).toBe(43112);
+  expect(rescue.suggested_reason).toBe("join_flow_stalled");
+  expect(rescue.checkpoints.page_loaded).toBe(true);
+  expect(rescue.checkpoints.capture_started).toBe(false);
+  expect(rescue.latest_page_url).toBe("https://app.zoom.us/wc/2193058682/join");
+  expect(rescue.latest_browser_console).toBe("join screen still visible");
+  expect(rescue.browser_bootstrap_url).toContain("bootstrap.js?token=test");
+  expect(rescue.screenshot_url).toBe("http://127.0.0.1:3100/v1/meeting-runs/meeting-run-test/screenshot");
+  expect(rescue.recent_errors[0]?.code).toBe("join_stall");
+});
+
+test("renderAutomatedRescuePrompt injects meeting context into the prompt", async () => {
+  const originalCommand = process.env.METER_AUTOMATED_RESCUE_COMMAND;
+  const originalOperator = process.env.METER_AUTOMATED_RESCUE_OPERATOR;
+  process.env.METER_AUTOMATED_RESCUE_COMMAND = "codex exec --yolo";
+  process.env.METER_AUTOMATED_RESCUE_OPERATOR = "codex-auto";
+  try {
+    const app = new CoordinatorApp(buildConfig()) as any;
+    app.storage = {
+      listEventRecords: () => buildRescueEvents(),
+    };
+
+    const meetingRun = buildRescueMeetingRun();
+    const rescue = app.buildRescueStatus(meetingRun, "http://127.0.0.1:3100");
+    const prompt = await app.renderAutomatedRescuePrompt(meetingRun, rescue);
+
+    expect(prompt).toContain("Meeting run ID: `meeting-run-test`");
+    expect(prompt).toContain("Operator name: `codex-auto`");
+    expect(prompt).toContain("Suggested reason: join_flow_stalled");
+    expect(prompt).toContain("\"suggested_reason\": \"join_flow_stalled\"");
+  } finally {
+    if (originalCommand === undefined) {
+      delete process.env.METER_AUTOMATED_RESCUE_COMMAND;
+    } else {
+      process.env.METER_AUTOMATED_RESCUE_COMMAND = originalCommand;
+    }
+    if (originalOperator === undefined) {
+      delete process.env.METER_AUTOMATED_RESCUE_OPERATOR;
+    } else {
+      process.env.METER_AUTOMATED_RESCUE_OPERATOR = originalOperator;
+    }
+  }
+});
+
+test("launchAutomatedRescue streams stdin and injects env into the child process", async () => {
+  const originalCommand = process.env.METER_AUTOMATED_RESCUE_COMMAND;
+  const originalOperator = process.env.METER_AUTOMATED_RESCUE_OPERATOR;
+  const tempDir = mkdtempSync(path.join("/tmp", "meter-auto-rescue-test-"));
+  const stdinPath = path.join(tempDir, "stdin.txt");
+  const envPath = path.join(tempDir, "env.txt");
+  process.env.METER_AUTOMATED_RESCUE_COMMAND = `cat > '${stdinPath}'; printf '%s\\n' "$METER_MEETING_RUN_ID" "$METER_BASE_URL" "$METER_RESCUE_PROMPT_PATH" "$METER_RESCUE_CONTEXT_PATH" "$METER_RESCUE_LOG_PATH" > '${envPath}'`;
+  process.env.METER_AUTOMATED_RESCUE_OPERATOR = "codex-auto";
+
+  try {
+    const app = new CoordinatorApp(buildConfig()) as any;
+    app.storage = {
+      listEventRecords: () => buildRescueEvents(),
+    };
+    app.coordinatorLogPath = path.join(tempDir, "coordinator.log");
+
+    const meetingRun = {
+      ...buildRescueMeetingRun(),
+      paths: {
+        ...buildRescueMeetingRun().paths,
+        data_dir: tempDir,
+      },
+    };
+    const rescue = app.buildRescueStatus(meetingRun, "http://127.0.0.1:3100");
+
+    await app.launchAutomatedRescue(meetingRun, rescue, 1);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (existsSync(stdinPath) && existsSync(envPath)) {
+        break;
+      }
+      await Bun.sleep(50);
+    }
+
+    expect(existsSync(stdinPath)).toBe(true);
+    expect(existsSync(envPath)).toBe(true);
+
+    const stdinText = readFileSync(stdinPath, "utf8");
+    const envLines = readFileSync(envPath, "utf8").trim().split("\n");
+    const rescueDir = path.join(tempDir, "rescue");
+
+    expect(stdinText).toContain("Meeting run ID: `meeting-run-test`");
+    expect(envLines[0]).toBe("meeting-run-test");
+    expect(envLines[1]).toBe("http://127.0.0.1:3100");
+    expect(envLines[2]).toBe(path.join(rescueDir, "attempt-1.prompt.md"));
+    expect(envLines[3]).toBe(path.join(rescueDir, "attempt-1.context.json"));
+    expect(envLines[4]).toBe(path.join(rescueDir, "attempt-1.log"));
+    expect(await Bun.file(path.join(rescueDir, "attempt-1.log")).exists()).toBe(true);
+  } finally {
+    if (originalCommand === undefined) {
+      delete process.env.METER_AUTOMATED_RESCUE_COMMAND;
+    } else {
+      process.env.METER_AUTOMATED_RESCUE_COMMAND = originalCommand;
+    }
+    if (originalOperator === undefined) {
+      delete process.env.METER_AUTOMATED_RESCUE_OPERATOR;
+    } else {
+      process.env.METER_AUTOMATED_RESCUE_OPERATOR = originalOperator;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });

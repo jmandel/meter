@@ -28,6 +28,8 @@ export type EventKind =
   | "system.worker.heartbeat"
   | "system.worker.completed"
   | "system.worker.failed"
+  | "system.operator_assistance.claimed"
+  | "system.operator_assistance.released"
   | "browser.console"
   | "browser.page.loaded"
   | "browser.capture.bootstrap_ready"
@@ -426,6 +428,12 @@ export interface ErrorRaisedPayload {
   details?: Record<string, unknown>;
 }
 
+export interface OperatorAssistancePayload {
+  operator: string | null;
+  reason?: string | null;
+  note?: string | null;
+}
+
 export interface WorkerRegisterRequest {
   worker_id: string;
   meeting_run_id: string;
@@ -451,6 +459,13 @@ export interface WorkerHeartbeatRequest {
 export interface WorkerHeartbeatResponse {
   accepted: true;
   stop_requested: boolean;
+  operator_assistance?: {
+    claimed: boolean;
+    operator: string | null;
+    reason: string | null;
+    note: string | null;
+    claimed_at_unix_ms: number | null;
+  };
 }
 
 export interface AppendEventsBatchRequest {
@@ -474,6 +489,43 @@ export interface CompleteMeetingRunRequest {
 
 export interface CompleteMeetingRunResponse {
   accepted: true;
+}
+
+export interface RescueClaimRequest {
+  operator?: string | null;
+  reason?: string | null;
+  note?: string | null;
+}
+
+export interface RescueReleaseRequest {
+  operator?: string | null;
+  note?: string | null;
+}
+
+export interface RescueStatusResponse {
+  meeting_run_id: string;
+  claimed: boolean;
+  operator: string | null;
+  reason: string | null;
+  note: string | null;
+  claimed_at: string | null;
+  state: MeetingRunState;
+  worker_online: boolean;
+  cdp_port: number | null;
+  ingest_port: number | null;
+  needs_assistance: boolean;
+  suggested_reason: string | null;
+  checkpoints: {
+    page_loaded: boolean;
+    meeting_joined: boolean;
+    capture_started: boolean;
+    capture_stopped: boolean;
+  };
+  latest_page_url: string | null;
+  latest_browser_console: string | null;
+  recent_errors: ApiErrorBody[];
+  screenshot_url: string | null;
+  browser_bootstrap_url: string | null;
 }
 
 export interface BrowserHelloMessage {

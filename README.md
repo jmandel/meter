@@ -62,6 +62,14 @@ Stop a run:
 curl -X POST http://127.0.0.1:3100/v1/meeting-runs/<meeting_run_id>/stop
 ```
 
+Coordination-only rescue commands:
+
+```bash
+bun run meter.ts status --meeting-run-id <meeting_run_id>
+bun run meter.ts claim --meeting-run-id <meeting_run_id> --operator codex --reason "join_flow_stalled"
+bun run meter.ts release --meeting-run-id <meeting_run_id> --operator codex
+```
+
 ## What It Does
 
 - Launches one worker per meeting run.
@@ -153,6 +161,9 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `GET /v1/meeting-runs`
 - `GET /v1/meeting-runs/:id`
 - `POST /v1/meeting-runs/:id/stop`
+- `GET /v1/meeting-runs/:id/rescue`
+- `POST /v1/meeting-runs/:id/rescue/claim`
+- `POST /v1/meeting-runs/:id/rescue/release`
 - `GET /v1/meeting-runs/:id/screenshot`
 - `GET /v1/meeting-runs/:id/speech`
 - `GET /v1/meeting-runs/:id/speakers`
@@ -191,6 +202,39 @@ Binary overrides:
 - `CHROME_BIN`
 - `FFMPEG_BIN`
 
+Automated rescue hooks:
+
+- `METER_AUTOMATED_RESCUE_COMMAND`
+  - if set, the coordinator may spawn this local command when rescue heuristics say a run looks stuck
+  - example: `codex exec --yolo`
+  - launched locally via `bash -lc "$METER_AUTOMATED_RESCUE_COMMAND"` from the repo root
+  - the rendered rescue prompt is streamed to the child over `stdin`
+- `METER_AUTOMATED_RESCUE_ENABLED`
+  - defaults to `true` when `METER_AUTOMATED_RESCUE_COMMAND` is set
+- `METER_AUTOMATED_RESCUE_TIMEOUT_MS`
+  - timeout for the spawned rescue agent
+- `METER_AUTOMATED_RESCUE_COOLDOWN_MS`
+  - minimum delay before retrying automated rescue for the same run
+- `METER_AUTOMATED_RESCUE_MAX_ATTEMPTS`
+  - max automated rescue launches per run
+- `METER_AUTOMATED_RESCUE_OPERATOR`
+  - operator name injected into the prompt/context
+
+Each automated rescue attempt also gets:
+
+- prompt/context/log files under `<meeting-run>/rescue/attempt-N.{prompt.md,context.json,log}`
+- injected environment variables:
+  - `METER_BASE_URL`
+  - `METER_MEETING_RUN_ID`
+  - `METER_ROOM_ID`
+  - `METER_OPERATOR_NAME`
+  - `METER_TIMEOUT_BUDGET`
+  - `METER_JOIN_URL`
+  - `METER_RESCUE_STATUS_JSON`
+  - `METER_RESCUE_PROMPT_PATH`
+  - `METER_RESCUE_CONTEXT_PATH`
+  - `METER_RESCUE_LOG_PATH`
+
 ## Development
 
 Run the app:
@@ -205,6 +249,13 @@ Run tests:
 bun test
 ```
 
+Manual coordination client:
+
+```bash
+bun run meter.ts start --join-url 'https://zoom.us/j/123456789?pwd=abc'
+bun run meter.ts status --meeting-run-id <meeting_run_id>
+```
+
 The current test suite covers:
 
 - append-only file helpers
@@ -217,5 +268,6 @@ The current test suite covers:
 - The system relies on current Zoom web DOM selectors. Zoom UI changes can break join, speaker, or chat observation until selectors are updated.
 - The MP3 archive is emitted when the run completes, not as rolling partial audio objects.
 - If `ffmpeg` is missing, capture and transcription can still run, but the final MP3 archive will fail and the worker will emit `error.raised`.
+- Automated rescue, if enabled, only launches an external local agent and feeds it prompt/context. Any direct page rescue should still happen over local CDP, not through Meter HTTP APIs.
 
 See [ARCHITECTURE_SPEC.md](./ARCHITECTURE_SPEC.md) for the target-state spec and domain model.
