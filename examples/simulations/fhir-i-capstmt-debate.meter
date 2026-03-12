@@ -1,0 +1,275 @@
+# =============================================================================
+# FHIR Infrastructure WG Call — CapabilityStatement Complexity & Feature Framework
+# Simulated Monday call, modeled after real FHIR-I conference calls
+# Topics: CapabilityStatement 2.0 IG, Application Feature Framework,
+#         FHIR-34735, FHIR-32752, FHIR-46167
+# =============================================================================
+
+meeting 8619437205
+title "FHIR-I WG Call 2024-09-16 — CapabilityStatement & Feature Framework"
+bot "HL7 Notetaker"
+requested_by "lloyd.mckenzie@dogwoodhealth.ca"
+speed 1
+tag simulation
+tag fhir-i
+tag wg-call
+tag capabilitystatement
+
+# --- Attendees trickle in over the first ~10 seconds ---
+
++0s     attendee.join id=lloyd    user_id=1001 name="Lloyd McKenzie"      host=1 video_on=1
++0.5s   attendee.join id=rick     user_id=1002 name="Rick Geimer"         co_host=1 video_on=1
++0.5s   attendee.join id=grahame  user_id=1003 name="Grahame Grieve"      video_on=1
++0.5s   attendee.join id=brianp   user_id=1004 name="Brian Postlethwaite" video_on=1
++0.5s   attendee.join id=gino     user_id=1005 name="Gino Canessa"        video_on=1
++0.5s   attendee.join id=ewout    user_id=1006 name="Ewout Kramer"        video_on=1
++0.5s   attendee.join id=ward     user_id=1007 name="Ward Weistra"        video_on=0
++0.5s   attendee.join id=vassil   user_id=1008 name="Vassil Peytchev"     video_on=1
++0.5s   attendee.join id=josh     user_id=1009 name="Josh Mandel"         video_on=1
++0.5s   attendee.join id=eric     user_id=1010 name="Eric Haas"           video_on=0
++0.5s   attendee.join id=cooper   user_id=1011 name="Cooper Thompson"     video_on=1
++0.5s   attendee.join id=simone   user_id=1012 name="Simone Heckmann"     video_on=1
++0.5s   attendee.join id=johnm    user_id=1013 name="John Moehrke"        video_on=0
++0.5s   attendee.join id=jose     user_id=1014 name="Jose Costa Teixeira" video_on=0
++0.5s   attendee.join id=james    user_id=1015 name="James Agnew"         video_on=1
++0.5s   attendee.join id=bret     user_id=1016 name="Bret Heale"          video_on=0
++0.5s   attendee.join id=rob      user_id=1017 name="Rob Hausam"          video_on=0
++0.5s   attendee.join id=sarah    user_id=1018 name="Sarah Gaunt"         video_on=1
+
+# --- Opening / Roll call ---
+
++1s     say speaker="Lloyd McKenzie" text="All right, it is one minute past the hour, so let's get started. Welcome to the FHIR Infrastructure call for September 16th. Rick, are you on scribe duty?"
++5s     say speaker="Rick Geimer" text="I am indeed. Confluence page is up, I'm ready to go."
++4s     say speaker="Lloyd McKenzie" text="Great. We have a pretty packed agenda today. The main topic is going to be CapabilityStatement, the Feature Framework IG, and how those two intersect. But first, any announcements or agenda additions?"
++6s     say speaker="Grahame Grieve" text="Just a reminder that the R6 content freeze is coming up November first, so anything we want in the base spec needs to be locked down in the next six weeks. That includes the CapabilityStatement trial-use properties question."
++5s     chat id=chat-1 from="Gino Canessa" to="Everyone" text="R6 timeline: https://confluence.hl7.org/display/FHIR/FHIR+R6+Timeline"
+
++3s     say speaker="Lloyd McKenzie" text="Thanks Grahame. That urgency is exactly why we're spending the whole call on this. OK, let's dive in."
+
+# --- CapabilityStatement Problem Statement ---
+
++8s     say speaker="Lloyd McKenzie" text="So the core issue, for anyone who hasn't been following, is that CapabilityStatement has become unwieldy. We're seeing instances in the wild that are multiple megabytes. Clients that need to know if a server supports one specific feature have to download this enormous document and parse through it. The Feature Framework IG was proposed to address this, but there's tension about what stays in CapabilityStatement versus what moves to the Feature Framework. Grahame, do you want to lay out the proposal?"
+
++10s    say speaker="Grahame Grieve" text="Sure. The fundamental problem is that CapabilityStatement was designed when FHIR was simpler. It was fine for R2 when you had maybe thirty resources and a handful of search parameters each. But now we have, what, a hundred and fifty resources? And the expectation is that you document every search parameter, every interaction, every operation, for every resource. That's a combinatorial explosion."
+
++8s     say speaker="Grahame Grieve" text="My proposal, which I floated at the Phoenix WGM last year, is essentially a CapabilityStatement 2 IG. The idea is that the existing CapabilityStatement resource stays for backwards compatibility but we create a new, terminological approach where features are expressed as codes in a value set, and you can query for specific features rather than downloading the whole thing."
+
++6s     say speaker="Brian Postlethwaite" text="To give people numbers — the CapabilityStatement for our server at Telstra Health is currently around three and a half megabytes of JSON. And that's without the narrative. If you add the narrative it's over six."
++3s     chat id=chat-2 from="Eric Haas" to="Everyone" text="That's bigger than the actual FHIR spec was in DSTU1 😂"
+
++5s     say speaker="Ewout Kramer" text="We see the same thing at Firely. The Vonk server's CapabilityStatement is, I think, around two megabytes. And clients almost never need the whole thing. They want to know: do you support Patient read? Do you support this search parameter? Can I do a conditional create? That's it."
+
++7s     say speaker="Vassil Peytchev" text="I want to echo that from Epic's perspective. We generate CapabilityStatements for hundreds of organizations, each slightly different based on configuration. The generation cost alone is significant. And then the bandwidth. It's one of our most expensive endpoints in terms of payload size."
+
++5s     say speaker="Josh Mandel" text="I'll add that from the SMART perspective, we've seen apps that download the CapabilityStatement on every launch just to check for a couple of specific features. That's a terrible user experience when it takes two seconds to download and parse."
++4s     chat id=chat-3 from="Ward Weistra" to="Everyone" text="Firely Simplifier stats: average CapabilityStatement across published IGs is 847KB. Median is 340KB. But the tail is very long."
+
+# --- Feature Framework Proposal ---
+
++8s     say speaker="Lloyd McKenzie" text="OK so we're all in agreement that there's a problem. Grahame, walk us through the Feature Framework approach."
+
++6s     say speaker="Grahame Grieve" text="Right. The Application Feature Framework IG, which is at build.fhir.org/ig/HL7/capstmt, introduces a terminology-based approach. Instead of the structured CapabilityStatement rest dot resource dot searchParam hierarchy, you define features as codes. So 'supports Patient read' becomes a code in a feature value set. 'Supports Patient search by name' is another code."
+
++8s     say speaker="Grahame Grieve" text="Then you have two operations: one is a feature query operation where a client can ask 'do you support these specific features' and the server responds with yes, no, or partially for each one. The other is a bulk feature assertion where the server publishes the full set of features it supports, but in a flat list rather than a deeply nested structure."
+
++6s     say speaker="Simone Heckmann" text="I want to note that this intersects with the obligations work. Obligations define what a system is required to do with a data element — populate it, display it, persist it, and so on. Features define what capabilities a system has. These are complementary but we need to make sure they don't overlap or conflict."
+
++7s     say speaker="James Agnew" text="From an implementation perspective, I actually quite like the terminology approach. In HAPI we already index CapabilityStatement as a set of discrete capabilities internally. Having a standard way to express those as codes would simplify things. My concern is migration. We have thousands of systems out there that produce and consume CapabilityStatement as-is. What's the transition story?"
+
++5s     say speaker="Grahame Grieve" text="The transition is: CapabilityStatement stays. It doesn't go away. But we deprecate the trial-use elements and stop adding new ones. New capability assertions go through the Feature Framework. Over time, the CapabilityStatement shrinks back to the core elements that are normative."
+
++4s     chat id=chat-4 from="John Moehrke" to="Everyone" text="So we'd have both CapabilityStatement AND features for an overlapping period? That seems like it could confuse implementers."
++3s     say speaker="John Moehrke" text="I put my concern in chat. Having two parallel mechanisms for expressing capabilities seems like it will confuse people. How long is the overlap?"
+
++5s     say speaker="Grahame Grieve" text="Realistically? Years. CapabilityStatement has been around since DSTU2. It's deeply embedded. But the goal is that for R7 or R8, CapabilityStatement is a much smaller resource that only covers the normative core, and everything else is features."
+
++6s     say speaker="Eric Haas" text="I have to say, I'm nervous about burning a quarter on this and ending up with something that doesn't get adopted. We've seen this before. Remember the decision support module resources? Beautifully designed, nobody used them, and we ended up ripping them out. What's different here?"
+
++4s     say speaker="Lloyd McKenzie" text="That's a fair concern. I think the difference is that the pain is real and immediate. Servers are struggling with CapabilityStatement size today. The decision support resources were solving a problem that implementers didn't think they had yet."
+
+# --- FHIR-34735 Discussion ---
+
++8s     say speaker="Lloyd McKenzie" text="OK, let me pivot to some specific tracker items while we're on this topic. FHIR-34735 is a documentation cleanup — changing the example URLs from 'GET [url]/XX?[params]' to 'GET [url]/[Resource]?[params]'. Cooper, you submitted this one?"
+
++5s     say speaker="Cooper Thompson" text="Yes. It's straightforward. The current examples in the CapabilityStatement section use 'XX' as a placeholder for the resource type, which is confusing because XX isn't defined anywhere. We should use '[Resource]' to be consistent with how we do it everywhere else in the spec."
++3s     chat id=chat-5 from="Jose Costa Teixeira" to="Everyone" text="+1 on FHIR-34735, this has confused several European implementers I work with"
+
++4s     say speaker="Grahame Grieve" text="I'm fine with this. It's editorial. Do we need a vote or can we just apply it?"
++3s     say speaker="Lloyd McKenzie" text="It's editorial. Rick, note that we're applying FHIR-34735 as editorial, no vote needed. Cooper, can you submit the PR?"
++2s     say speaker="Cooper Thompson" text="Will do."
++2s     say speaker="Rick Geimer" text="Noted."
+
+# --- FHIR-32752 Subscription Topic canFilterBy ---
+
++8s     say speaker="Lloyd McKenzie" text="Next, FHIR-32752 — SubscriptionTopic canFilterBy should use a canonical reference instead of a name. Gino, this is your area."
+
++6s     say speaker="Gino Canessa" text="Yes. So currently, SubscriptionTopic.canFilterBy.searchParameterName is just a string — the name of the search parameter. The problem is that search parameter names aren't globally unique. You can have a search parameter called 'status' on fifty different resources. The proposal is to change it to a canonical URL so it unambiguously identifies which search parameter you mean."
+
++5s     say speaker="Brian Postlethwaite" text="This makes sense to me. We've hit this exact ambiguity in our implementation. When a SubscriptionTopic says you can filter by 'date', which date? The resource type scopes it somewhat but not entirely if you have cross-resource topics."
+
++4s     say speaker="Ewout Kramer" text="I support the change but I want to flag that this is a breaking change from R5. The R5 Subscriptions backport IG uses the name-based approach. If we change this in R6, every implementation of the backport IG needs to handle both."
+
++5s     say speaker="Gino Canessa" text="Agreed, and that's noted in the tracker item. The backport IG will need a new version. But I think the ambiguity problem is severe enough that we need to fix it now rather than carry it forward into normative."
++3s     chat id=chat-6 from="James Agnew" to="Everyone" text="HAPI already resolves the canonical internally so this won't be a huge lift for us. +1"
+
++4s     say speaker="Eric Haas" text="Here's my concern. We're changing this in R6 where subscriptions are going normative. That means once we publish, we can never change it again. Are we absolutely sure canonical is the right approach? What about situations where the search parameter doesn't have a canonical URL? Custom search parameters on proprietary servers?"
+
++6s     say speaker="Gino Canessa" text="All search parameters in FHIR have canonical URLs. Even custom ones. You define a SearchParameter resource with a URL. That URL is the canonical. If you're defining search parameters without URLs, you're not conforming to the spec."
+
++3s     say speaker="Eric Haas" text="Fair enough. OK, I'll withdraw my objection."
+
++5s     say speaker="Lloyd McKenzie" text="Let's vote on FHIR-32752 as persuasive. Motion?"
++2s     say speaker="Gino Canessa" text="So moved."
++1s     say speaker="Brian Postlethwaite" text="Second."
++3s     say speaker="Lloyd McKenzie" text="All in favor?"
++2s     chat id=chat-7 from="Rick Geimer" to="Everyone" text="FHIR-32752: Persuasive. Gino Canessa / Brian Postlethwaite. 16-0-2"
++2s     say speaker="Lloyd McKenzie" text="Passes unanimously with two abstentions. Rick, note that."
++1s     say speaker="Rick Geimer" text="Got it."
+
+# --- FHIR-46167 AU Core combined search ---
+
++8s     say speaker="Lloyd McKenzie" text="OK, FHIR-46167. This one came from the Australian realm. It's about whether combined search parameters in AU Core's CapabilityStatement should be SHALL or SHOULD. This touches on our discussion because it highlights how CapabilityStatement requirements can be overly prescriptive."
+
++6s     say speaker="Grahame Grieve" text="I can give context on this since I'm involved with AU Core. The issue is that AU Core's CapabilityStatement says servers SHALL support certain combined search parameters — like searching for a Condition by patient AND clinical-status simultaneously. But many servers support the individual parameters without necessarily supporting the combination. Requiring the combination as SHALL is arguably too strict."
+
++5s     say speaker="Vassil Peytchev" text="This is actually a broader pattern we see. IGs mark things as SHALL in CapabilityStatement without really understanding the implications. SHALL means you MUST do it to be conformant. If you can't search by patient+clinical-status as a combination, you're non-conformant. That's a big deal for certification."
+
++4s     say speaker="Josh Mandel" text="I'll note that from the FMM perspective, this is exactly the kind of thing that makes it hard to assess maturity. External organizations like the Australian Digital Health Agency have created these IGs, but there's no clear pathway for them to report back on real-world conformance. We end up with SHALL requirements that nobody's actually tested."
++3s     chat id=chat-8 from="Bret Heale" to="Everyone" text="This is also a problem in US Core. Many of the combined search requirements have never been tested at a connectathon."
+
++5s     say speaker="Eric Haas" text="I've been saying this for years. If we haven't tested it at a connectathon, it shouldn't be SHALL. Period. Otherwise we're just making things up and putting SHALL in front of them because it sounds good."
+
++6s     say speaker="Grahame Grieve" text="The specific recommendation from the AU team is to change these combined search parameters from SHALL to SHOULD. I think that's reasonable. SHOULD means you're expected to do it unless you have a good reason not to. That's appropriate for combination searches."
+
++4s     say speaker="Lloyd McKenzie" text="Does anyone object to recommending SHOULD for combined search parameters as the general guidance, not just for AU Core?"
++4s     say speaker="Simone Heckmann" text="I think we need to be careful about making a blanket recommendation. Some combined searches are genuinely critical. Patient plus date, for example. If you can't search for a patient's observations by date, that's a serious limitation."
++5s     say speaker="Lloyd McKenzie" text="Good point. So the guidance would be more nuanced — combined searches SHOULD be supported, but specific IGs can elevate individual combinations to SHALL where there's evidence of need. Does that work?"
++3s     say speaker="Simone Heckmann" text="Yes, that's reasonable."
+
++3s     say speaker="Lloyd McKenzie" text="OK, let's mark FHIR-46167 as persuasive with modification. The modification being that we'll update the general CapabilityStatement guidance to recommend SHOULD as the default for combined search parameters. Motion?"
++2s     say speaker="Eric Haas" text="So moved."
++1s     say speaker="Grahame Grieve" text="Second."
++2s     chat id=chat-9 from="Rick Geimer" to="Everyone" text="FHIR-46167: Persuasive with mod. Eric Haas / Grahame Grieve. 14-1-3"
++2s     say speaker="Lloyd McKenzie" text="Carries. One opposed, three abstentions. Thank you."
+
+# --- Feature Framework Deep Dive ---
+
++10s    say speaker="Lloyd McKenzie" text="All right, let's get back to the Feature Framework. We've been going for about twenty-five minutes. Grahame, one thing that came up on the Zulip stream last week was the question of granularity. How fine-grained should features be?"
+
++7s     say speaker="Grahame Grieve" text="This is actually the hardest design question. You could define a feature code for every possible thing a server does. 'Supports Patient read.' 'Supports Patient vread.' 'Supports Patient search.' 'Supports Patient search by name.' 'Supports Patient search by name with exact modifier.' You see how this explodes."
+
++5s     say speaker="Grahame Grieve" text="My view is that we define a base set of features at the resource-interaction level and the search-parameter level. Modifiers, includes, revincludes — those are second-tier. You can assert them if you want, but the base query mechanism doesn't require them."
+
++6s     say speaker="Ewout Kramer" text="I think we also need to consider how this interacts with SMART on FHIR scopes. SMART already has a notion of what a client is allowed to do, expressed as scopes like patient/Patient.read. If features are expressed differently from scopes, we have two vocabularies for similar concepts."
+
++5s     say speaker="Josh Mandel" text="Ewout makes a good point. SMART scopes are about authorization — what you're allowed to do. Features are about capability — what the server can do. They're orthogonal but they look similar from a client's perspective. A client needs both: can the server do X, and am I allowed to do X. We should make sure the vocabularies are aligned even if they serve different purposes."
+
++4s     chat id=chat-10 from="Gino Canessa" to="Everyone" text="This is also related to the subscription topic work. SubscriptionTopic already defines a set of 'features' that a server supports (canFilterBy, notificationShape, etc). We should align these."
+
++6s     say speaker="James Agnew" text="Can I raise a practical concern? In HAPI, we auto-generate the CapabilityStatement from the server's configuration. We introspect what resources are loaded, what search parameters are registered, what operations are available. If we move to a feature-based approach, we need to be able to auto-generate the feature assertions too. The value proposition drops significantly if server authors have to manually maintain a feature list."
+
++5s     say speaker="Grahame Grieve" text="Absolutely. Auto-generation is a hard requirement. The feature code system needs to be structured enough that a server can mechanically determine which features it supports. That's actually one advantage of the terminological approach — codes can follow a systematic naming convention that maps directly to configuration."
+
++4s     say speaker="Brian Postlethwaite" text="We do the same auto-generation. I think the key insight is that most features are derivable from what's already in CapabilityStatement. So the migration path is: take your existing CapabilityStatement, generate the feature codes from it, publish both. Over time, add feature codes that go beyond what CapabilityStatement can express."
+
++3s     chat id=chat-11 from="Ward Weistra" to="Everyone" text="We prototyped a CapabilityStatement-to-features converter at the last Firely hackathon. It works but there are gaps — some things in CapabilityStatement don't map cleanly to discrete features."
+
++6s     say speaker="Rob Hausam" text="I want to bring up the terminology infrastructure angle. If features are codes in a value set, we need to think about governance. Who maintains the value set? How do you add new feature codes? Is it part of the FHIR core value set or is it an external terminology? Because if it's external, we need a maintenance organization and a publication pipeline."
+
++5s     say speaker="Grahame Grieve" text="Good question. My thinking is that the base feature codes are part of the FHIR specification and published with each release. But there's an extension mechanism where IGs can define additional feature codes for their specific needs. Similar to how operation definitions work — there are core operations and IG-specific operations."
+
++4s     say speaker="Lloyd McKenzie" text="And presumably we'd use the existing UTG process for maintaining the code system?"
++3s     say speaker="Grahame Grieve" text="Yes, exactly. It would go through the Unified Terminology Governance process."
+
+# --- Normative Implications ---
+
++8s     say speaker="Lloyd McKenzie" text="Let me raise the elephant in the room. Some of the trial-use elements in CapabilityStatement are being considered for removal in R6 because we don't want to carry trial-use content into a normative resource. Simone, can you speak to which elements are at risk?"
+
++6s     say speaker="Simone Heckmann" text="Yes. The current plan for R6 is that everything in the specification should be normative. That means any element that's currently trial-use either needs to be promoted to normative or moved out — typically to an extension. In CapabilityStatement, the trial-use elements include several of the rest.resource properties, some of the messaging content, and the document mode."
+
++5s     say speaker="John Moehrke" text="Wait, document mode is trial-use? That's been there since DSTU2."
++3s     say speaker="Grahame Grieve" text="It's been there since DSTU2 and it's been trial-use the whole time because nobody's ever provided the implementation evidence needed to make it normative. If it looks like a duck and nobody feeds the duck for four releases, the duck starves."
++2s     chat id=chat-12 from="Eric Haas" to="Everyone" text="🦆 RIP document mode duck"
+
++5s     say speaker="Eric Haas" text="Seriously though, if we remove document mode from CapabilityStatement, that affects IHE. They use document mode for XDS-on-FHIR. Have we talked to the IHE folks?"
++4s     say speaker="John Moehrke" text="I can speak to that as I'm in both organizations. IHE would be concerned. But practically, the IHE profiles that use document mode are all using it in a very specific way that could be captured in an extension or a feature assertion. It doesn't have to be a core CapabilityStatement element."
+
++6s     say speaker="Vassil Peytchev" text="I want to push back a little on the urgency. Yes, R6 aims to be normative. But we've had trial-use elements in normative resources before. The Patient resource is normative and has trial-use extensions. Can we not just leave the trial-use elements where they are and mark them clearly?"
+
++5s     say speaker="Grahame Grieve" text="The ANSI process is the problem. ANSI doesn't have a concept of 'normative resource with trial-use elements.' The resource is either normative or it's not. We went through this with R5 and the compromise was messy. For R6, the FMG's position is: clean it up."
+
++4s     say speaker="Vassil Peytchev" text="Understood. I just want to make sure we're not removing things that people depend on without adequate notice."
++3s     say speaker="Lloyd McKenzie" text="Agreed. That's why we're discussing it now, six weeks before content freeze. Anything that moves out needs to have a migration path documented."
+
+# --- Late joiner ---
+
++5s     attendee.join id=michelle user_id=1019 name="Michelle Miller" video_on=0
++2s     chat id=chat-13 from="Michelle Miller" to="Everyone" text="Sorry I'm late, had a conflict. Catching up on the thread."
+
+# --- _include / _revinclude Performance ---
+
++8s     say speaker="Lloyd McKenzie" text="We have about twenty minutes left. I want to touch on one more related topic before we wrap up — the _include and _revinclude performance issue. This came up in the context of CapabilityStatement because several implementers want to be able to declare limits on includes in their capability assertions."
+
++6s     say speaker="James Agnew" text="This is a real pain point for us. We have clients that do things like Patient?_revinclude=*. That's a query that says: give me all Patients and every resource that references those Patients. On a large server, that can be millions of resources. We have to set hard limits, but there's no standard way to communicate those limits."
+
++4s     say speaker="Cooper Thompson" text="We have the same problem at Epic. We cap _revinclude results at a hundred per parameter, but clients don't know that until they get back fewer results than they expected. There's no way to discover the limit in advance."
+
++5s     say speaker="Grahame Grieve" text="This is exactly the kind of thing that the Feature Framework could handle. You'd have feature codes like 'supports _include' and 'max _include depth is 2' and 'max _revinclude results per parameter is 100'. These aren't things that fit naturally in CapabilityStatement's structure but they're very natural as feature assertions."
+
++4s     say speaker="Eric Haas" text="Or we could just add a few elements to CapabilityStatement. I know, I know — that makes it bigger. But we're talking about three or four simple integer limits. Is the Feature Framework really necessary for this or are we using a sledgehammer?"
++3s     chat id=chat-14 from="Gino Canessa" to="Everyone" text="Eric has a point — but the counter-argument is that every 'just add a few elements' over 10 years is why CapabilityStatement is 3MB now"
+
++5s     say speaker="Eric Haas" text="Hah, touché Gino. I walked right into that one."
+
++4s     say speaker="Josh Mandel" text="I think the answer is both. For R6, we add the critical limits to CapabilityStatement because that's where people look today. And the Feature Framework provides the extensible, long-term mechanism for everything else. We don't have to pick one."
+
++5s     say speaker="Lloyd McKenzie" text="Josh, I think that's pragmatic. Grahame, thoughts?"
++3s     say speaker="Grahame Grieve" text="I'd prefer to not add more to CapabilityStatement, but I recognize the practical reality. Fine. A few integer limits for R6, with a note that this will migrate to the Feature Framework in R7."
+
++4s     say speaker="Brian Postlethwaite" text="Can we get specific about what limits? I'd suggest: max include depth, max revinclude results per parameter, and a boolean for whether wildcard includes are supported."
++3s     say speaker="James Agnew" text="Add max total included resources per search response. That's the one our clients ask about most."
++2s     say speaker="Brian Postlethwaite" text="OK, four items then."
++3s     say speaker="Lloyd McKenzie" text="Can someone open a tracker item for this? We need it before content freeze."
++2s     say speaker="Brian Postlethwaite" text="I'll submit it today."
++1s     chat id=chat-15 from="Rick Geimer" to="Everyone" text="ACTION: Brian Postlethwaite to submit tracker for _include/_revinclude limits in CapabilityStatement"
+
+# --- Wrap-up ---
+
++8s     say speaker="Lloyd McKenzie" text="All right, we're at five minutes to the hour. Let me summarize. First, FHIR-34735 applied as editorial. Second, FHIR-32752 approved as persuasive — SubscriptionTopic canFilterBy moves to canonical. Third, FHIR-46167 approved persuasive with modification — combined search defaults to SHOULD. Fourth, we had a productive discussion on the Feature Framework. The IG is progressing. Grahame will continue working on the granularity question and bring a proposal to the next WGM."
+
++5s     say speaker="Lloyd McKenzie" text="Fifth, for the _include limits, Brian is opening a tracker item. And generally, we're all aware that R6 content freeze is November first so let's get our ducks in a row."
++2s     chat id=chat-16 from="Eric Haas" to="Everyone" text="Are those the same ducks that starved from document mode? 🦆"
++2s     chat id=chat-17 from="Grahame Grieve" to="Everyone" text="Those ducks are now features, Eric"
+
++3s     say speaker="Grahame Grieve" text="One more thing — I want to encourage everyone to review the Feature Framework IG before the next call. It's at build.fhir.org/ig/HL7/capstmt. Comments are welcome on the Zulip stream or as tracker items."
+
++4s     say speaker="Lloyd McKenzie" text="Thanks Grahame. Any other business?"
++3s     say speaker="Gino Canessa" text="Just a plug — if anyone's interested in the subscription side of this, we're doing a deep dive at the next connectathon. Track sign-up is open."
++2s     say speaker="Lloyd McKenzie" text="Great. Thanks everyone. Same time next week."
+
++3s     chat id=chat-18 from="Ward Weistra" to="Everyone" text="Thanks all! FHIRabend! 🔥"
++2s     chat id=chat-19 from="Jose Costa Teixeira" to="Everyone" text="Thanks!"
+
+# --- People leaving ---
+
++5s     attendee.leave id=eric
++3s     attendee.leave id=ward
++2s     attendee.leave id=jose
++2s     attendee.leave id=bret
++3s     attendee.leave id=rob
++2s     attendee.leave id=simone
++2s     attendee.leave id=michelle
++1s     attendee.leave id=cooper
++2s     attendee.leave id=sarah
++2s     attendee.leave id=james
++1s     attendee.leave id=vassil
++2s     attendee.leave id=josh
++1s     attendee.leave id=gino
++2s     attendee.leave id=brianp
++1s     attendee.leave id=johnm
++2s     attendee.leave id=ewout
++3s     attendee.leave id=grahame
++2s     attendee.leave id=rick
++2s     attendee.leave id=lloyd
+
++2s     end state=completed

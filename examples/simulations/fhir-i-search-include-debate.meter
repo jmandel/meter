@@ -1,0 +1,198 @@
+# =============================================================================
+# FHIR Infrastructure WGM Quarter Session — Search, _include, and the 80/20 Rule
+# Working Group Meeting session at the Dallas WGM, Q2 (11:00-12:30).
+# The perennial debate about search parameter complexity, _include/_revinclude
+# performance, and whether FHIR's 80/20 rule is really 65/35.
+# Chairs: Lloyd McKenzie. Scribe: Rick Geimer.
+# Duration: ~60 minutes simulated (compressed from 90-minute quarter)
+# =============================================================================
+
+meeting 6518304792
+title "FHIR-I WGM Dallas Q2 — Search, _include, and the 80/20 Rule"
+bot "HL7 Meeting Bot"
+requested_by "hl7-fhir-i"
+speed 1
+tag fhir-infrastructure
+tag hl7
+tag simulation
+tag search
+tag wgm-dallas
+tag r6
+
+# ------- Attendee Setup (compressed into the first ~10 seconds) -------
+
++0s attendee.join id=lloyd user_id=3001 name="Lloyd McKenzie" host=1 video_on=1
++0.4s attendee.join id=rick user_id=3002 name="Rick Geimer" co_host=1 video_on=1
++0.4s attendee.join id=grahame user_id=3003 name="Grahame Grieve" video_on=1
++0.4s attendee.join id=eric user_id=3004 name="Eric Haas" video_on=1
++0.4s attendee.join id=brian-p user_id=3005 name="Brian Postlethwaite" video_on=1
++0.4s attendee.join id=ewout user_id=3006 name="Ewout Kramer" video_on=1
++0.4s attendee.join id=josh user_id=3007 name="Josh Mandel" video_on=1
++0.4s attendee.join id=vassil user_id=3008 name="Vassil Peytchev" video_on=1
++0.4s attendee.join id=cooper user_id=3009 name="Cooper Thompson" video_on=1
++0.4s attendee.join id=gino user_id=3010 name="Gino Canessa" video_on=1
++0.4s attendee.join id=james-a user_id=3011 name="James Agnew" video_on=1
++0.4s attendee.join id=john-m user_id=3012 name="John Moehrke" video_on=1
++0.4s attendee.join id=bret user_id=3013 name="Bret Heale" video_on=1
++0.4s attendee.join id=rob user_id=3014 name="Rob Hausam" video_on=1
++0.4s attendee.join id=ward user_id=3015 name="Ward Weistra" video_on=1
++0.4s attendee.join id=simone user_id=3016 name="Simone Heckmann" video_on=1
++0.4s attendee.join id=jean user_id=3017 name="Jean-Henri Duteau" video_on=1
++0.4s attendee.join id=sean user_id=3018 name="Sean McIlvenna" video_on=1
++0.4s attendee.join id=brett-m user_id=3019 name="Brett Marquard" video_on=1
++0.4s attendee.join id=alexander user_id=3020 name="Alexander Henket" video_on=1
++0.4s attendee.join id=michelle user_id=3021 name="Michelle Miller" video_on=1
++0.4s attendee.join id=jose user_id=3022 name="Jose Costa Teixeira" video_on=1
++0.4s attendee.join id=michael-l user_id=3023 name="Michael Lawley" video_on=1
++0.4s attendee.join id=richard user_id=3024 name="Richard Ettema" video_on=0
++0.4s attendee.join id=dan-g user_id=3025 name="Dan Gottlieb" video_on=1
++0.4s attendee.join id=sarah user_id=3026 name="Sarah Gaunt" video_on=1
++0.4s attendee.join id=paul-k user_id=3027 name="Paul Knapp" video_on=1
+
+# ------- Opening (WGM in-person style) -------
+
++1s say speaker="Lloyd McKenzie" text="All right, welcome to Q2. This is FHIR Infrastructure, and today we're tackling the search parameter topic. For those of you who are joining us for the first time at a WGM — welcome to Dallas, hope you're enjoying the barbecue — we operate by Robert's Rules, loosely interpreted. The queue is the mic line over there. Please state your name before speaking for the scribe."
++3s say speaker="Lloyd McKenzie" text="We have a packed ninety minutes. The agenda is: first, the status of search-related tracker items for R6. Second, the _include/_revinclude performance question. And third, if we get there, the bigger philosophical question about the eighty-twenty rule and how much of FHIR's search capability should be in core versus IGs."
++2s say speaker="Rick Geimer" text="Scribing on Confluence. Please speak into the mic and state your name."
+
++2s chat id=chat-1 from="Grahame Grieve" to="Everyone" text="Agenda page: https://confluence.hl7.org/spaces/FHIRI/pages/234784975/FHIR+Infrastructure+Minutes+WGM+202405+-+Dallas"
++2s chat id=chat-2 from="Eric Haas" to="Everyone" text="For remote attendees: please use Zulip #wgm-fhir-i for questions"
+
+# ------- Search parameter status update -------
+
++5s say speaker="Grahame Grieve" text="Okay, let me set the stage. For R6, we have about forty-five search-related tracker items. I've triaged them into three buckets. Bucket one: editorial fixes, typos, clarifications — about twenty items. We'll batch-vote those. Bucket two: substantive but non-breaking changes — about fifteen items. These need individual discussion. Bucket three: potentially breaking changes — about ten items. These are the contentious ones."
++3s say speaker="Grahame Grieve" text="For today, I want to focus on bucket three. The bucket one items are in a spreadsheet that Rick will circulate — I'd like people to review and we'll vote at Q4."
+
++4s say speaker="Eric Haas" text="Before we dive in — can we talk about the meta-problem? FHIR search is normative, which means we can't make breaking changes. But almost every bucket three item is about fixing something that's fundamentally broken in the search design. We've painted ourselves into a corner."
++3s say speaker="Grahame Grieve" text="Well, 'fundamentally broken' is a strong characterization. I'd say 'suboptimal design decisions that we now understand better.' The beauty of normative is that it's stable. The challenge is that stability sometimes means living with imperfection."
++3s say speaker="Eric Haas" text="Spoken like the person who designed the imperfection."
++2s say speaker="Grahame Grieve" text="Guilty as charged."
+
+# ------- _include/_revinclude performance debate -------
+
++5s say speaker="Lloyd McKenzie" text="Let's get to the first bucket three topic: _include and _revinclude. James, you filed the tracker item — FHIR-37649. Walk us through it."
++4s say speaker="James Agnew" text="Thanks Lloyd. So, FHIR-37649 is about the Task-based approach for fetching data, but it connects directly to the _include performance problem. The core issue is that _include and _revinclude are unbounded by default. If you search for a Patient and _include all linked resources, you could get back thousands of resources. For _revinclude, it's even worse — you're asking the server to find everything that references the matched resources."
++4s say speaker="James Agnew" text="In HAPI FHIR, we had to add a hard limit — MaxCount of one hundred per _include parameter — because we had production servers falling over. One query with _revinclude:Observation:patient was trying to load fifty thousand lab results into a single response bundle. The server just died."
++3s say speaker="Vassil Peytchev" text="We have the same limit. One hundred is our default, configurable up to a thousand. But the spec doesn't mention any limit, which means clients assume they'll get everything."
++3s say speaker="Cooper Thompson" text="And the iterate modifier makes it recursive. _include:iterate is essentially asking for a graph traversal of unknown depth. That's an unbounded query by definition."
+
++2s chat id=chat-3 from="Dan Gottlieb" to="Everyone" text="This is related to why Bulk Data uses $export instead of search — search semantics don't scale to large datasets."
++2s chat id=chat-4 from="Brian Postlethwaite" to="Everyone" text="Our default _include limit is 500. We've seen real-world queries that try to pull entire patient charts via a single _include chain."
+
++5s say speaker="Grahame Grieve" text="So I hear two problems. One: the spec doesn't set expectations about _include limits. Two: the iterate modifier is dangerous. For the first, I think we can add a SHOULD about servers limiting _include results without breaking normative. For the second, iterate is already qualified by 'servers are not obliged to honor' in the spec, but that language is buried."
++3s say speaker="James Agnew" text="I'd go further. I think _include:iterate should be deprecated in favor of a GraphDefinition-based approach. GraphDefinition gives you explicit control over the traversal path and depth. _include:iterate is trying to do the same thing with much less expressiveness."
++4s say speaker="Brian Postlethwaite" text="I agree with James conceptually, but GraphDefinition has its own problems. It's FMM 1. Almost nobody has implemented it. Deprecating _include:iterate in favor of something even less mature would be chaos."
++3s say speaker="Ewout Kramer" text="Can I offer a middle path? Don't deprecate _include:iterate, but add a _maxinclude parameter that lets the client specify how many included resources they want. Server returns up to that many, plus a link to get more if available. It's pagination for includes."
+
++3s say speaker="Eric Haas" text="That's actually clever. It's backward compatible — old clients don't send _maxinclude and get the current behavior. New clients can limit themselves."
++3s say speaker="Grahame Grieve" text="I like it in principle, but every new search parameter we add makes the search API more complex. And the search API is already arguably the most complex part of FHIR. This is a spec that was supposed to be simple."
++2s say speaker="Eric Haas" text="Grahame, we blew past simple about three editions ago. The eighty-twenty rule ship has sailed. We're at sixty-five thirty-five and sinking."
+
++2s chat id=chat-5 from="Alexander Henket" to="Everyone" text="NICTIZ research on FHIR extension usage: Observation and Extension account for half the profiles across ~3000 profiles from 125 IGs. The 80/20 aspiration is closer to 65/35 in practice."
++2s chat id=chat-6 from="Josh Mandel" to="Everyone" text="Link to Alexander's research paper on FHIR profiling patterns: https://pubmed.ncbi.nlm.nih.gov/example"
+
+# ------- The 80/20 philosophical detour -------
+
++5s say speaker="Lloyd McKenzie" text="I see we're drifting toward the eighty-twenty discussion, which was agenda item three. But since we're here — Alexander, do you want to present your findings briefly?"
++4s say speaker="Alexander Henket" text="Sure. At NICTIZ, we analyzed about three thousand profiles from a hundred and twenty-five published FHIR implementation guides. The key finding is that FHIR's core resources cover about sixty-five percent of the data elements used in practice. The remaining thirty-five percent is handled through extensions, slicing, and profiling. Observation alone accounts for a disproportionate share — roughly twenty percent of all profiles are Observation profiles."
++3s say speaker="Alexander Henket" text="For search parameters specifically, it's even worse. About forty percent of IGs define custom search parameters because the core search parameters don't cover their use cases. And these custom search parameters are the hardest for servers to implement because they're not in the base spec."
++4s say speaker="Grahame Grieve" text="I want to contextualize this. The eighty-twenty rule was never meant to be a precise measurement. It's a design principle — we put the most common stuff in core and let profiling handle the rest. The fact that it's sixty-five thirty-five doesn't mean the design principle failed. It means healthcare is more complex than we estimated."
++3s say speaker="Brett Marquard" text="From the US Core perspective, we've been pretty successful at staying within core resources. Most of US Core's search parameters map to core search parameters. The gap is really in the complex search scenarios — like composite searches, combined date ranges, chained searches with modifiers. That's where implementations diverge."
+
++4s say speaker="Michael Lawley" text="I want to add the terminology angle. From CSIRO's perspective, the most complex search scenarios involve terminology. Searching for Conditions using a ValueSet expansion, or searching for Observations where the code is in a hierarchy — these are the queries that bring servers to their knees. And they're not really _include problems, they're terminology expansion problems."
++3s say speaker="Rob Hausam" text="Michael's right. The token:in modifier is the most expensive search operation in the spec, and it's the one clinicians most need. 'Find me all lab results in this panel' requires expanding a ValueSet, then searching across all matching codes. The computational cost is enormous."
++3s say speaker="Grahame Grieve" text="Which is why token:in was deliberately left at SHOULD, not SHALL. Servers that can't handle it aren't required to support it."
++2s say speaker="Michael Lawley" text="But if servers don't support it, clients have to do the expansion client-side and issue N individual queries. That's worse for everyone."
+
++2s chat id=chat-7 from="Bret Heale" to="Everyone" text="Related: the _filter parameter solves some of these complex search scenarios. But it's trial-use and barely implemented."
++2s chat id=chat-8 from="Ward Weistra" to="Everyone" text="Firely supports _filter in Vonk. It's actually quite powerful, but the syntax is intimidating for developers."
++3s chat id=chat-9 from="Jose Costa Teixeira" to="Everyone" text="In the WHO SMART Guidelines, we use CQL for complex queries rather than FHIR search. Different paradigm entirely."
+
+# ------- The _filter debate -------
+
++5s say speaker="Bret Heale" text="Since Ward mentioned it — can we talk about _filter? I've been advocating for _filter for years. It solves the composite search problem, the complex date range problem, the nested boolean logic problem. It's a proper query language for FHIR. But nobody implements it because it's stuck at trial-use."
++3s say speaker="Grahame Grieve" text="_filter is powerful but it's also a full expression language. The security implications of accepting arbitrary boolean expressions from clients are significant. SQL injection for FHIR, basically."
++2s say speaker="John Moehrke" text="That's exactly my concern. _filter is a server-side evaluation of client-provided expressions. If you're not careful, it's FHIRPath injection."
++3s say speaker="Bret Heale" text="That's a solvable problem. You validate the expression against the allowed search parameters before evaluation. You don't just pass it through to SQL."
++2s say speaker="James Agnew" text="In HAPI FHIR, we compile _filter expressions into a safe query tree. There's no SQL injection risk because the expression never touches SQL directly. It's translated into our internal query model."
++3s say speaker="Grahame Grieve" text="I believe James, but not every implementer is as careful as the HAPI team. The spec needs to protect against the least careful implementer, not the most."
+
++4s say speaker="Ewout Kramer" text="Can I bring up GraphQL? We keep having this conversation about search parameter limitations, and GraphQL was supposed to be the answer. Whatever happened to FHIR GraphQL?"
++3s say speaker="Grahame Grieve" text="GraphQL is still in the spec as a draft. The problem is that the GraphQL community never formalized it as a standard. We can't make something normative in FHIR that depends on a non-standard foundation."
++2s say speaker="Ewout Kramer" text="GraphQL has been used in production by Facebook, GitHub, Shopify, and a thousand other companies. Just because it's not an ISO standard doesn't mean it's not a standard."
++3s say speaker="Grahame Grieve" text="I hear you, but HL7 has specific requirements about referencing external standards. And the GraphQL foundation isn't an ANSI-accredited SDO. We've been over this with the TSC."
++2s say speaker="Eric Haas" text="And around and around we go. Like a _include:iterate with no depth limit."
+
++3s say speaker="Lloyd McKenzie" text="Let's try to land this plane. We've identified several potential improvements for R6 search: Ewout's _maxinclude proposal, elevating the _include limit guidance, and the question of _filter's future. Can we assign action items?"
+
+# ------- Action items and straw polls -------
+
++5s say speaker="Lloyd McKenzie" text="First, straw poll: should we add a _maxinclude parameter to R6 search? This would be a new trial-use parameter."
++2s say speaker="Lloyd McKenzie" text="Show of hands in the room... I count fifteen in favor, three opposed, four abstaining. That's enough to proceed. Ewout, will you draft the proposal?"
++2s say speaker="Ewout Kramer" text="Happy to. I'll have a tracker item filed by end of the week."
+
++3s say speaker="Lloyd McKenzie" text="Second straw poll: should the spec include normative language about servers limiting _include results?"
++2s say speaker="Lloyd McKenzie" text="Hands... eighteen in favor, one opposed, three abstaining. James, you're the expert — will you draft the language?"
++2s say speaker="James Agnew" text="Will do. I'll base it on what HAPI already implements and generalize from there."
+
++3s say speaker="Lloyd McKenzie" text="Third: should _filter be promoted from trial-use for R6?"
++2s say speaker="Lloyd McKenzie" text="Hands... eight in favor, nine opposed, five abstaining. That's a no for now. _filter stays trial-use."
++2s say speaker="Bret Heale" text="I'm disappointed but not surprised. Can we at least get it to a point where it's recommended for the next connectathon track? More implementations might change the vote."
++2s say speaker="Lloyd McKenzie" text="That's fair. Bret, will you organize a _filter track for the next connectathon?"
++2s say speaker="Bret Heale" text="Absolutely."
+
++2s chat id=chat-10 from="Sarah Gaunt" to="Everyone" text="Summary of straw poll results for remote attendees: _maxinclude: 15-3-4 proceed. _include limits: 18-1-3 proceed. _filter promotion: 8-9-5 no."
++2s chat id=chat-11 from="Richard Ettema" to="Everyone" text="AEGIS will support _filter testing at the connectathon with Touchstone."
+
+# ------- Closing debate / cultural moment -------
+
++5s say speaker="Grahame Grieve" text="Before we close, I want to acknowledge something. FHIR search is the most complex part of the spec, and it's the part that causes the most pain for implementers. I designed it in 2012 based on what I thought was a reasonable subset of query capabilities. Thirteen years later, we've learned a lot about what works and what doesn't."
++3s say speaker="Grahame Grieve" text="The temptation is to redesign the whole thing. But we can't — it's normative. What we can do is layer improvements on top: better guidance, better limits, better alternatives for complex scenarios. That's what R6 is about. Not perfection, but progress."
++3s say speaker="Eric Haas" text="That was almost poetic, Grahame. Should I submit it to the FHIR pun collection, or is it too earnest?"
++2s say speaker="Grahame Grieve" text="It's not a pun if it doesn't have the word FHIR in it, Eric."
++2s say speaker="Eric Haas" text="Fine. FHIR search: where every query is a FHIRst-time experience because no two servers implement it the same way."
++2s say speaker="Grahame Grieve" text="Now that's a pun. Terrible, but valid."
+
++3s say speaker="Lloyd McKenzie" text="And on that note, we're out of time. Great discussion today. Action items: Ewout drafts _maxinclude proposal. James drafts _include limit guidance. Bret organizes _filter connectathon track. Grahame reviews bucket one editorial items spreadsheet for Q4 vote. Rick will post minutes."
++2s say speaker="Rick Geimer" text="Minutes will be on Confluence by end of day."
+
++3s say speaker="Lloyd McKenzie" text="Lunch is in the room down the hall. The barbecue is from the place Grahame found on Yelp, so manage your expectations accordingly."
++2s say speaker="Grahame Grieve" text="It had four and a half stars!"
++2s say speaker="Eric Haas" text="Everything in Dallas has four and a half stars, Grahame. It's Texas."
++2s say speaker="Lloyd McKenzie" text="See everyone at Q3 — that's the messaging session with INM. One forty-five in this room."
+
++2s chat id=chat-12 from="Jean-Henri Duteau" to="Everyone" text="FYI Q3 agenda has been updated: https://confluence.hl7.org/spaces/FHIRI/pages/234784975"
++2s chat id=chat-13 from="Paul Knapp" to="Everyone" text="Reminder: FMG meeting tonight at Q5. Dinner and governance — what more could you want?"
++2s chat id=chat-14 from="Eric Haas" to="Everyone" text="FHIRabend comes early in Dallas 🤠" reply_to=chat-13
+
+# ------- People leave for lunch -------
+
++5s attendee.leave id=michelle
++1s attendee.leave id=jose
++1s attendee.leave id=richard
++2s attendee.leave id=dan-g
++1s attendee.leave id=sarah
++1s attendee.leave id=paul-k
++2s attendee.leave id=michael-l
++1s attendee.leave id=sean
++1s attendee.leave id=brett-m
++2s attendee.leave id=jean
++1s attendee.leave id=alexander
++1s attendee.leave id=bret
++2s attendee.leave id=rob
++1s attendee.leave id=simone
++1s attendee.leave id=ward
++2s attendee.leave id=gino
++1s attendee.leave id=john-m
++1s attendee.leave id=cooper
++2s attendee.leave id=vassil
++1s attendee.leave id=josh
++1s attendee.leave id=james-a
++2s attendee.leave id=ewout
++1s attendee.leave id=brian-p
++1s attendee.leave id=eric
++2s attendee.leave id=grahame
++1s attendee.leave id=rick
++2s attendee.leave id=lloyd
+
++1s end

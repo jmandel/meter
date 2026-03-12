@@ -115,6 +115,56 @@ function buildSpeech(): SpeechSegmentRecord[] {
   ];
 }
 
+function buildSpeechWithGrowingTurn(): SpeechSegmentRecord[] {
+  return [
+    {
+      speech_segment_id: "seg-1",
+      event_id: 1,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      provider: "mistral",
+      provider_segment_id: "provider-seg-1",
+      text: "Opening remarks",
+      status: "final",
+      speaker_label: "Judge mobile",
+      speaker_confidence: null,
+      started_at: "2026-03-12T06:48:10.000Z",
+      ended_at: "2026-03-12T06:48:12.000Z",
+      emitted_at: "2026-03-12T06:48:12.100Z",
+    },
+    {
+      speech_segment_id: "seg-1b",
+      event_id: 2,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      provider: "mistral",
+      provider_segment_id: "provider-seg-1b",
+      text: "continued thought",
+      status: "final",
+      speaker_label: "Judge mobile",
+      speaker_confidence: null,
+      started_at: "2026-03-12T06:48:14.000Z",
+      ended_at: "2026-03-12T06:48:20.000Z",
+      emitted_at: "2026-03-12T06:48:20.100Z",
+    },
+    {
+      speech_segment_id: "seg-2",
+      event_id: 3,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      provider: "mistral",
+      provider_segment_id: "provider-seg-2",
+      text: "Follow up",
+      status: "final",
+      speaker_label: "Josh Mandel",
+      speaker_confidence: null,
+      started_at: "2026-03-12T06:48:30.000Z",
+      ended_at: "2026-03-12T06:48:31.000Z",
+      emitted_at: "2026-03-12T06:48:31.100Z",
+    },
+  ];
+}
+
 function buildChat(): ChatMessageRecord[] {
   return [
     {
@@ -328,71 +378,106 @@ function buildRescueEvents(): EventRecord[] {
   ];
 }
 
-test("renderMarkdownTranscript keeps default output speech only", () => {
+test("renderMarkdownTranscript defaults to speech, joins, and chat", () => {
   const app = new CoordinatorApp(buildConfig());
   const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
     meetingRun: MeetingRunRecord,
     speech: SpeechSegmentRecord[],
     chat?: ChatMessageRecord[],
+    attendeeEvents?: EventRecord<ZoomAttendeePresencePayload>[],
     options?: {
-      include_chat?: boolean;
+      include?: Array<"speech" | "joins" | "chat">;
       since_unix_ms?: number | null;
     },
   ) => string;
 
-  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), { include_chat: false });
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), buildAttendeeEvents());
 
   expect(markdown).toContain("## Transcript");
-  expect(markdown).toContain("Opening remarks");
-  expect(markdown).toContain("cursor 2026-03-12T06:48:12.100Z");
-  expect(markdown).not.toContain("[chat ");
-  expect(markdown).not.toContain("Reply text");
+  expect(markdown).toContain("Meeting start: 2026-03-12T06:48:00.000Z");
+  expect(markdown).toContain("[00:10 spk=\"Judge mobile\"] Opening remarks");
+  expect(markdown).toContain("[00:05 present] Josh Mandel, Judge mobile");
+  expect(markdown).toContain("[00:20 chat id=1 replies=1 from=\"Judge mobile\" to=Everyone] Ahoy");
+  expect(markdown).toContain("Reply text");
+  expect(markdown).not.toContain("joined the meeting");
+  expect(markdown).not.toContain("[cursor=");
 });
 
-test("renderMarkdownTranscript can interleave chat entries", () => {
+test("renderMarkdownTranscript can limit output with include filters", () => {
   const app = new CoordinatorApp(buildConfig());
   const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
     meetingRun: MeetingRunRecord,
     speech: SpeechSegmentRecord[],
     chat?: ChatMessageRecord[],
+    attendeeEvents?: EventRecord<ZoomAttendeePresencePayload>[],
     options?: {
-      include_chat?: boolean;
+      include?: Array<"speech" | "joins" | "chat">;
       since_unix_ms?: number | null;
     },
   ) => string;
 
-  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), { include_chat: true });
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), buildAttendeeEvents(), {
+    include: ["speech", "chat"],
+  });
 
-  expect(markdown).toContain("[chat id=1 replies=1] Judge mobile -> Everyone");
-  expect(markdown).toContain("[chat id=2 reply-to=1] Josh Mandel -> Everyone");
-  expect(markdown).toContain("cursor 2026-03-12T06:48:20.000Z");
+  expect(markdown).toContain("[00:20 chat id=1 replies=1 from=\"Judge mobile\" to=Everyone] Ahoy");
+  expect(markdown).toContain("[00:21 chat id=2 reply-to=1 from=\"Josh Mandel\" to=Everyone] Reply text");
   expect(markdown).toContain("Reply text");
+  expect(markdown).not.toContain("[joins]");
+  expect(markdown).not.toContain("[present]");
   expect(markdown.indexOf("Opening remarks")).toBeLessThan(markdown.indexOf("Ahoy"));
-  expect(markdown.indexOf("Ahoy")).toBeLessThan(markdown.indexOf("Reply text"));
   expect(markdown.indexOf("Reply text")).toBeLessThan(markdown.indexOf("Follow up"));
 });
 
-test("renderMarkdownTranscript supports since with copyable cursor timestamps", () => {
+test("renderMarkdownTranscript supports since with visible line timestamps and complete turns", () => {
   const app = new CoordinatorApp(buildConfig());
   const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
     meetingRun: MeetingRunRecord,
     speech: SpeechSegmentRecord[],
     chat?: ChatMessageRecord[],
+    attendeeEvents?: EventRecord<ZoomAttendeePresencePayload>[],
     options?: {
-      include_chat?: boolean;
+      include?: Array<"speech" | "joins" | "chat">;
       since_unix_ms?: number | null;
     },
   ) => string;
 
-  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), {
-    include_chat: true,
-    since_unix_ms: Date.parse("2026-03-12T06:48:12.100Z"),
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeechWithGrowingTurn(), buildChat(), buildAttendeeEvents(), {
+    include: ["speech", "joins", "chat"],
+    since_unix_ms: Date.parse("2026-03-12T06:48:10.000Z"),
   });
 
-  expect(markdown).not.toContain("Opening remarks");
+  expect(markdown).not.toContain("# 2193058682");
+  expect(markdown).not.toContain("Meeting start:");
+  expect(markdown).not.toContain("## Transcript");
+  expect(markdown).not.toContain("[present] Josh Mandel");
+  expect(markdown).toContain("[00:10 spk=\"Judge mobile\"] Opening remarks continued thought");
   expect(markdown).toContain("Reply text");
   expect(markdown).toContain("Follow up");
-  expect(markdown).toContain("cursor 2026-03-12T06:48:31.100Z");
+  expect(markdown).toContain("[00:30 spk=\"Josh Mandel\"] Follow up");
+  expect(markdown).not.toContain("[cursor=");
+});
+
+test("renderMarkdownTranscript never emits a cursor footer", () => {
+  const app = new CoordinatorApp(buildConfig());
+  const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
+    meetingRun: MeetingRunRecord,
+    speech: SpeechSegmentRecord[],
+    chat?: ChatMessageRecord[],
+    attendeeEvents?: EventRecord<ZoomAttendeePresencePayload>[],
+    options?: {
+      include?: Array<"speech" | "joins" | "chat">;
+      since_unix_ms?: number | null;
+    },
+  ) => string;
+
+  const markdown = renderMarkdownTranscript({
+    ...buildMeetingRun(),
+    state: "completed",
+    ended_at: "2026-03-12T06:49:00.000Z",
+  }, buildSpeech(), buildChat(), buildAttendeeEvents());
+
+  expect(markdown).not.toContain("[cursor=");
 });
 
 test("buildAttendeeSummaries merges guest rejoins into one attendee entry", () => {

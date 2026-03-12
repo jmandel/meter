@@ -120,6 +120,8 @@ interface SseSubscriber {
   close(): void;
 }
 
+type TranscriptIncludeKind = "speech" | "chat" | "joins";
+
 class EventBus {
   private subscribers = new Set<SseSubscriber>();
 
@@ -1893,31 +1895,85 @@ export class CoordinatorApp {
     return this.renderMarkdownTranscriptResponse(url, meetingRun);
   }
 
-  private renderMarkdownTranscriptResponse(url: URL, meetingRun: MeetingRunRecord): Response {
+  private parseTranscriptIncludes(url: URL): TranscriptIncludeKind[] | Response {
     const includeParams = url.searchParams
       .getAll("include")
       .flatMap((value) => value.split(","))
       .map((value) => value.trim().toLowerCase())
       .filter(Boolean);
-    const includeChat = parseBoolean(url.searchParams.get("chat") ?? undefined, false) || includeParams.includes("chat");
+    if (includeParams.length === 0) {
+      return ["speech", "joins", "chat"];
+    }
+    const allowed = new Set<TranscriptIncludeKind>(["speech", "joins", "chat"]);
+    const invalid = includeParams.filter((value) => !allowed.has(value as TranscriptIncludeKind));
+    if (invalid.length > 0) {
+      return errorResponse(400, "invalid_request", `Unsupported transcript include values: ${invalid.join(", ")}`);
+    }
+    return [...new Set(includeParams as TranscriptIncludeKind[])];
+  }
+
+  private parseTranscriptSinceValue(meetingRun: MeetingRunRecord, raw: string | null): number | null {
+    if (!raw) {
+      return null;
+    }
+    const absolute = parseTimestamp(raw);
+    if (absolute !== null) {
+      return absolute;
+    }
+    const meetingStartUnixMs = Date.parse(meetingRun.started_at ?? meetingRun.created_at ?? "");
+    if (!Number.isFinite(meetingStartUnixMs)) {
+      return null;
+    }
+    const match = raw.trim().match(/^(\d+):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?$/);
+    if (!match) {
+      return null;
+    }
+    const first = Number.parseInt(match[1], 10);
+    const second = Number.parseInt(match[2], 10);
+    const third = match[3] ? Number.parseInt(match[3], 10) : null;
+    const millis = match[4] ? Number.parseInt(match[4].padEnd(3, "0"), 10) : 0;
+    const hours = third === null ? 0 : first;
+    const minutes = third === null ? first : second;
+    const seconds = third === null ? second : third;
+    if (minutes > 59 || seconds > 59) {
+      return null;
+    }
+    return meetingStartUnixMs + ((((hours * 60) + minutes) * 60 + seconds) * 1000) + millis;
+  }
+
+  private renderMarkdownTranscriptResponse(url: URL, meetingRun: MeetingRunRecord): Response {
+    const includes = this.parseTranscriptIncludes(url);
+    if (includes instanceof Response) {
+      return includes;
+    }
+    const includeSet = new Set<TranscriptIncludeKind>(includes);
     const sinceParam = url.searchParams.get("since");
-    const sinceUnixMs = sinceParam ? parseTimestamp(sinceParam) : null;
+    const sinceUnixMs = this.parseTranscriptSinceValue(meetingRun, sinceParam);
     if (sinceParam && sinceUnixMs === null) {
       return errorResponse(400, "invalid_request", "`since` must be a parseable timestamp");
     }
-    const speech = this.storage.listSpeechRecords({
-      meeting_run_id: meetingRun.meeting_run_id,
-      status: "final",
-      limit: 10_000,
-    });
-    const chat = includeChat
-      ? this.storage.listChatRecords({
-          meeting_run_id: meetingRun.meeting_run_id,
-          limit: 10_000,
-        })
+    const speech = includeSet.has("speech")
+      ? this.listTranscriptSpeechRecords(meetingRun.meeting_run_id)
       : [];
-    const markdown = this.renderMarkdownTranscript(meetingRun, speech, chat, {
-      include_chat: includeChat,
+    const chat = includeSet.has("chat")
+      ? this.listTranscriptChatRecords(meetingRun.meeting_run_id)
+      : [];
+    const attendeeEvents = includeSet.has("joins")
+      ? [
+          ...this.storage.listEventRecords({
+            meeting_run_id: meetingRun.meeting_run_id,
+            kind: "zoom.attendee.joined",
+            limit: 10_000,
+          }),
+          ...this.storage.listEventRecords({
+            meeting_run_id: meetingRun.meeting_run_id,
+            kind: "zoom.attendee.left",
+            limit: 10_000,
+          }),
+        ].sort((left, right) => left.event_id - right.event_id || left.seq - right.seq) as EventRecord<ZoomAttendeePresencePayload>[]
+      : [];
+    const markdown = this.renderMarkdownTranscript(meetingRun, speech, chat, attendeeEvents, {
+      include: includes,
       since_unix_ms: sinceUnixMs,
     });
     return new Response(markdown, {
@@ -1928,141 +1984,272 @@ export class CoordinatorApp {
     });
   }
 
+  private listTranscriptSpeechRecords(meetingRunId: string): SpeechSegmentRecord[] {
+    const events = this.storage.listEventRecords({
+      meeting_run_id: meetingRunId,
+      kind: "transcription.segment.final",
+      limit: 10_000,
+    }) as EventRecord<TranscriptionSegmentPayload>[];
+    const latestBySegmentId = new Map<string, SpeechSegmentRecord>();
+    for (const event of events) {
+      const payload = event.payload;
+      const speechSegmentId = payload.speech_segment_id;
+      if (!speechSegmentId) {
+        continue;
+      }
+      latestBySegmentId.set(speechSegmentId, {
+        speech_segment_id: speechSegmentId,
+        event_id: event.event_id,
+        meeting_run_id: event.meeting_run_id,
+        room_id: event.room_id,
+        provider: payload.provider,
+        provider_segment_id: payload.provider_segment_id ?? null,
+        text: payload.text ?? "",
+        status: payload.status,
+        speaker_label: payload.speaker_label ?? null,
+        speaker_confidence: payload.speaker_confidence ?? null,
+        started_at: payload.started_at_unix_ms ? new Date(payload.started_at_unix_ms).toISOString() : null,
+        ended_at: payload.ended_at_unix_ms ? new Date(payload.ended_at_unix_ms).toISOString() : null,
+        emitted_at: event.ts,
+      });
+    }
+    return [...latestBySegmentId.values()].sort((left, right) => left.event_id - right.event_id);
+  }
+
+  private listTranscriptChatRecords(meetingRunId: string): ChatMessageRecord[] {
+    const events = this.storage.listEventRecords({
+      meeting_run_id: meetingRunId,
+      kind: "zoom.chat.message",
+      limit: 10_000,
+    }) as EventRecord<ZoomChatMessagePayload>[];
+    const latestByChatId = new Map<string, ChatMessageRecord>();
+    for (const event of events) {
+      const payload = event.payload;
+      const chatMessageId = payload.chat_message_id;
+      if (!chatMessageId) {
+        continue;
+      }
+      latestByChatId.set(chatMessageId, {
+        chat_message_id: chatMessageId,
+        event_id: event.event_id,
+        meeting_run_id: event.meeting_run_id,
+        room_id: event.room_id,
+        sender_display_name: payload.sender_display_name ?? null,
+        sender_user_id: payload.sender_user_id ?? null,
+        receiver_display_name: payload.receiver_display_name ?? null,
+        receiver_user_id: payload.receiver_user_id ?? null,
+        visibility: payload.visibility,
+        text: payload.text ?? "",
+        sent_at: payload.sent_at_unix_ms ? new Date(payload.sent_at_unix_ms).toISOString() : event.ts,
+        main_chat_message_id: payload.main_chat_message_id ?? null,
+        thread_reply_count: payload.thread_reply_count ?? null,
+        is_thread_reply: payload.is_thread_reply,
+        is_edited: payload.is_edited,
+        chat_type: payload.chat_type ?? null,
+        details: payload.details ?? null,
+      });
+    }
+    return [...latestByChatId.values()].sort((left, right) => left.event_id - right.event_id);
+  }
+
   private renderMarkdownTranscript(
     meetingRun: MeetingRunRecord,
     speech: SpeechSegmentRecord[],
     chat: ChatMessageRecord[] = [],
+    attendeeEvents: EventRecord<ZoomAttendeePresencePayload>[] = [],
     options?: {
-      include_chat?: boolean;
+      include?: TranscriptIncludeKind[];
       since_unix_ms?: number | null;
     },
   ): string {
-    const includeChat = options?.include_chat ?? false;
+    const includeSet = new Set<TranscriptIncludeKind>(options?.include ?? ["speech", "joins", "chat"]);
+    const includeSpeech = includeSet.has("speech");
+    const includeJoins = includeSet.has("joins");
+    const includeChat = includeSet.has("chat");
     const sinceUnixMs = options?.since_unix_ms ?? null;
     const heading = meetingRun.room_id.startsWith("zoom:") ? meetingRun.room_id.slice(5) : meetingRun.room_id;
     const startedAt = meetingRun.started_at ?? meetingRun.created_at;
-    const formatDisplayTimestamp = (iso: string | null) => {
-      if (!iso) {
-        return "Unknown time";
+    const meetingStartUnixMs = Date.parse(startedAt ?? "");
+
+    const formatDisplayOffset = (iso: string | null) => {
+      const valueUnixMs = Date.parse(iso ?? "");
+      if (!Number.isFinite(meetingStartUnixMs) || !Number.isFinite(valueUnixMs)) {
+        return "??:??";
       }
-      return new Intl.DateTimeFormat("en-US", {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-        second: "2-digit",
-      }).format(new Date(iso));
+      const diffMs = Math.max(0, valueUnixMs - meetingStartUnixMs);
+      const totalSeconds = Math.floor(diffMs / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+        : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
     };
 
-    const formatCursorTimestamp = (iso: string | null) => iso ?? "unknown";
-    const speechCursorUnixMs = (segment: SpeechSegmentRecord) => {
-      return Date.parse(segment.emitted_at ?? segment.ended_at ?? segment.started_at ?? "") || 0;
+    const formatMetaValue = (value: string | null | undefined) => {
+      if (!value) {
+        return "\"\"";
+      }
+      return /[\s"=\]]/.test(value) ? JSON.stringify(value) : value;
     };
-    const filteredSpeech = sinceUnixMs === null
-      ? speech
-      : speech.filter((segment) => speechCursorUnixMs(segment) > sinceUnixMs);
-    const filteredChat = sinceUnixMs === null
-      ? chat
-      : chat.filter((item) => (Date.parse(item.sent_at) || 0) > sinceUnixMs);
-
-    const grouped: Array<{ speaker: string; started_at: string | null; cursor_at: string | null; text: string }> = [];
-    for (const segment of filteredSpeech) {
-      const text = segment.text.trim();
-      if (!text) {
-        continue;
-      }
-      const speaker = segment.speaker_label?.trim() || "Unknown speaker";
-      const startedAtIso = segment.started_at ?? segment.emitted_at;
-      const cursorAtIso = segment.emitted_at ?? segment.ended_at ?? segment.started_at ?? null;
-      const previous = grouped[grouped.length - 1];
-      if (previous && speaker !== "Unknown speaker" && previous.speaker === speaker) {
-        previous.text = `${previous.text}${previous.text.endsWith("-") ? "" : " "}${text}`.trim();
-        previous.cursor_at = cursorAtIso ?? previous.cursor_at;
-        continue;
-      }
-      grouped.push({
-        speaker,
-        started_at: startedAtIso,
-        cursor_at: cursorAtIso,
-        text,
-      });
-    }
-
-    const lines = [
-      `# ${heading} · ${formatDisplayTimestamp(startedAt)}`,
-      `Meeting URL: ${meetingRun.normalized_join_url}`,
-      "",
-      "## Transcript",
-      "",
-      "_Use `?since=<cursor timestamp>` with any cursor shown below to fetch only newer entries._",
-      "",
-    ];
-
-    if (grouped.length === 0) {
-      if (!includeChat || filteredChat.length === 0) {
-        lines.push(sinceUnixMs === null ? "_No finalized transcript yet._" : `_No transcript entries newer than ${new Date(sinceUnixMs).toISOString()}._`);
-        lines.push("");
-        return lines.join("\n");
-      }
-    }
-
-    if (!includeChat) {
-      for (const item of grouped) {
-        lines.push(`### ${formatDisplayTimestamp(item.started_at)} · ${item.speaker} · cursor ${formatCursorTimestamp(item.cursor_at)}`);
-        lines.push("");
-        lines.push(item.text);
-        lines.push("");
-      }
-      return lines.join("\n");
-    }
 
     const chatRenderIds = new Map<string, number>();
     let nextChatRenderId = 1;
-    for (const item of [...filteredChat].sort((left, right) => Date.parse(left.sent_at) - Date.parse(right.sent_at) || left.event_id - right.event_id)) {
+    for (const item of [...chat].sort((left, right) => Date.parse(left.sent_at) - Date.parse(right.sent_at) || left.event_id - right.event_id)) {
       if (!chatRenderIds.has(item.chat_message_id)) {
         chatRenderIds.set(item.chat_message_id, nextChatRenderId);
         nextChatRenderId += 1;
       }
     }
 
-    const transcriptItems = [
-      ...grouped.map((item, index) => ({
-        kind: "speech" as const,
-        sort_ts: Date.parse(item.started_at ?? startedAt) || 0,
-        sort_index: index,
-        speaker: item.speaker,
-        started_at: item.started_at,
-        cursor_at: item.cursor_at,
-        text: item.text,
-      })),
-      ...filteredChat
-        .filter((item) => item.text.trim())
+    const rawItems = [
+      ...(includeSpeech ? speech : [])
+        .map((segment) => {
+          const text = segment.text.trim();
+          if (!text) {
+            return null;
+          }
+          return {
+            kind: "speech" as const,
+            sort_ts: Date.parse(segment.started_at ?? segment.emitted_at ?? segment.ended_at ?? startedAt) || 0,
+            sort_index: segment.event_id,
+            speaker: segment.speaker_label?.trim() || "Unknown speaker",
+            display_at: segment.started_at ?? segment.emitted_at,
+            updated_at: segment.emitted_at ?? segment.ended_at ?? segment.started_at ?? null,
+            text,
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null),
+      ...(includeChat ? chat : [])
         .map((item, index) => ({
           kind: "chat" as const,
           sort_ts: Date.parse(item.sent_at) || 0,
-          sort_index: index,
+          sort_index: item.event_id || index,
           chat: item,
         })),
-    ].sort((left, right) => left.sort_ts - right.sort_ts || left.sort_index - right.sort_index || (left.kind === "speech" ? -1 : 1));
+      ...(includeJoins ? attendeeEvents : []).map((event) => ({
+        kind: "presence" as const,
+        sort_ts: Date.parse(event.ts) || 0,
+        sort_index: event.event_id,
+        event,
+      })),
+    ].sort((left, right) => left.sort_ts - right.sort_ts || left.sort_index - right.sort_index);
 
-    if (transcriptItems.length === 0) {
-      lines.push(sinceUnixMs === null
-        ? "_No finalized transcript or chat yet._"
-        : `_No transcript or chat entries newer than ${new Date(sinceUnixMs).toISOString()}._`);
-      lines.push("");
-      return lines.join("\n");
+    const transcriptItems: Array<
+      | {
+          kind: "speech";
+          sort_ts: number;
+          sort_index: number;
+          speaker: string;
+          display_at: string | null;
+          updated_at: string | null;
+          text: string;
+        }
+      | {
+          kind: "chat";
+          sort_ts: number;
+          sort_index: number;
+          chat: ChatMessageRecord;
+        }
+      | {
+          kind: "presence";
+          sort_ts: number;
+          sort_index: number;
+          event: EventRecord<ZoomAttendeePresencePayload>;
+        }
+    > = [];
+
+    for (const item of rawItems) {
+      if (item.kind !== "speech") {
+        transcriptItems.push(item);
+        continue;
+      }
+      const previous = transcriptItems[transcriptItems.length - 1];
+      if (previous && previous.kind === "speech" && item.speaker !== "Unknown speaker" && previous.speaker === item.speaker) {
+        previous.text = `${previous.text}${previous.text.endsWith("-") ? "" : " "}${item.text}`.trim();
+        previous.updated_at = item.updated_at ?? previous.updated_at;
+        continue;
+      }
+      transcriptItems.push(item);
     }
 
-    for (const item of transcriptItems) {
+    const transcriptItemDisplayUnixMs = (item: (typeof transcriptItems)[number]) => {
       if (item.kind === "speech") {
-        lines.push(`### ${formatDisplayTimestamp(item.started_at)} · ${item.speaker} · cursor ${formatCursorTimestamp(item.cursor_at)}`);
+        return Date.parse(item.display_at ?? item.updated_at ?? startedAt ?? "") || 0;
+      }
+      if (item.kind === "chat") {
+        return Date.parse(item.chat.sent_at ?? "") || 0;
+      }
+      return Date.parse(item.event.ts ?? "") || 0;
+    };
+
+    const filteredTranscriptItems = sinceUnixMs === null
+      ? transcriptItems
+      : transcriptItems.filter((item) => transcriptItemDisplayUnixMs(item) >= sinceUnixMs);
+
+    const lines = sinceUnixMs === null
+      ? [
+          `# ${heading}`,
+          `Meeting start: ${startedAt ?? "unknown"}`,
+          `Meeting URL: ${meetingRun.normalized_join_url}`,
+          "",
+          "## Transcript",
+          "",
+          `_Defaults to \`speech,joins,chat\`. Use \`?include=${[...includeSet].join(",")}\` or any comma-separated subset to narrow it._`,
+          "_Use `?since=<timestamp>` with a visible line timestamp like `00:30` to fetch from that point onward. Pagination returns complete rendered turns, so the first returned line may repeat text you already saw._",
+          "",
+        ]
+      : [];
+
+    if (filteredTranscriptItems.length === 0) {
+      if (sinceUnixMs === null) {
+        const includedKinds = [...includeSet].join(", ");
+        lines.push(`_No ${includedKinds} entries yet._`);
         lines.push("");
-        lines.push(item.text);
-        lines.push("");
+        return lines.join("\n");
+      }
+      return "";
+    }
+
+    const presenceGroupWindowMs = 10_000;
+
+    for (let index = 0; index < filteredTranscriptItems.length; index += 1) {
+      const item = filteredTranscriptItems[index];
+      if (item.kind === "speech") {
+        lines.push(`[${formatDisplayOffset(item.display_at)} spk=${formatMetaValue(item.speaker)}] ${item.text}`);
+        continue;
+      }
+      if (item.kind === "presence") {
+        const groupedEvents = [item.event];
+        const groupStartedAt = item.event.ts;
+        let updatedAt = item.event.ts;
+        while (index + 1 < filteredTranscriptItems.length) {
+          const nextItem = filteredTranscriptItems[index + 1];
+          if (nextItem.kind !== "presence") {
+            break;
+          }
+          const sameKind = nextItem.event.kind === item.event.kind;
+          const sameBackfillState = nextItem.event.payload.backfilled === item.event.payload.backfilled;
+          const closeEnough = ((Date.parse(nextItem.event.ts) || 0) - (Date.parse(updatedAt) || 0)) <= presenceGroupWindowMs;
+          if (!sameKind || !sameBackfillState || !closeEnough) {
+            break;
+          }
+          groupedEvents.push(nextItem.event);
+          updatedAt = nextItem.event.ts;
+          index += 1;
+        }
+        const label = item.event.kind === "zoom.attendee.left"
+          ? "leaves"
+          : item.event.payload.backfilled
+          ? "present"
+          : "joins";
+        const attendeeLabels = groupedEvents
+          .map((event) => event.payload.display_name?.trim() || "Unknown attendee")
+          .join(", ");
+        lines.push(`[${formatDisplayOffset(groupStartedAt)} ${label}] ${attendeeLabels}`);
         continue;
       }
       const receiver = item.chat.receiver_display_name?.trim() || null;
-      const chatLabel = receiver ? `${item.chat.sender_display_name ?? "Unknown chatter"} -> ${receiver}` : (item.chat.sender_display_name ?? "Unknown chatter");
       const renderedChatId = chatRenderIds.get(item.chat.chat_message_id);
       const renderedReplyToId = item.chat.main_chat_message_id ? chatRenderIds.get(item.chat.main_chat_message_id) : null;
       const chatTokens = [`id=${renderedChatId ?? "?"}`];
@@ -2074,10 +2261,9 @@ export class CoordinatorApp {
       if (item.chat.is_edited) {
         chatTokens.push("edited=1");
       }
-      lines.push(`### ${formatDisplayTimestamp(item.chat.sent_at)} · [chat ${chatTokens.join(" ")}] ${chatLabel} · cursor ${formatCursorTimestamp(item.chat.sent_at)}`);
-      lines.push("");
-      lines.push(item.chat.text);
-      lines.push("");
+      lines.push(
+        `[${formatDisplayOffset(item.chat.sent_at)} chat ${chatTokens.join(" ")} from=${formatMetaValue(item.chat.sender_display_name ?? "Unknown chatter")}${receiver ? ` to=${formatMetaValue(receiver)}` : ""}] ${item.chat.text}`,
+      );
     }
     return lines.join("\n");
   }

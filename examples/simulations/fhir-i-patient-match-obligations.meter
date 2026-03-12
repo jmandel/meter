@@ -1,0 +1,230 @@
+# =============================================================================
+# FHIR Infrastructure WG Call — Patient $match and Obligations for R6
+# Regular Monday conference call. Joint discussion with Patient Administration
+# WG representatives. Focus on $match algorithm standardization, scoring
+# confidence, and how obligations interact with Must Support for R6.
+# Chairs: Lloyd McKenzie. Scribe: Rick Geimer.
+# Duration: ~60 minutes simulated
+# =============================================================================
+
+meeting 5937261084
+title "FHIR-I WG Call 2025-09-08 — Patient $match & Obligations for R6"
+bot "HL7 Meeting Bot"
+requested_by "hl7-fhir-i"
+speed 1
+tag fhir-infrastructure
+tag hl7
+tag simulation
+tag patient-match
+tag obligations
+tag r6
+
+# ------- Attendee Setup (compressed into the first ~10 seconds) -------
+
++0s attendee.join id=lloyd user_id=4001 name="Lloyd McKenzie" host=1 video_on=1
++0.5s attendee.join id=rick user_id=4002 name="Rick Geimer" co_host=1 video_on=1
++0.5s attendee.join id=grahame user_id=4003 name="Grahame Grieve" video_on=1
++0.5s attendee.join id=simone user_id=4004 name="Simone Heckmann" video_on=1
++0.5s attendee.join id=josh user_id=4005 name="Josh Mandel" video_on=0
++0.5s attendee.join id=eric user_id=4006 name="Eric Haas" video_on=0
++0.5s attendee.join id=brian-p user_id=4007 name="Brian Postlethwaite" video_on=1
++0.5s attendee.join id=vassil user_id=4008 name="Vassil Peytchev" video_on=1
++0.5s attendee.join id=cooper user_id=4009 name="Cooper Thompson" video_on=1
++0.5s attendee.join id=ewout user_id=4010 name="Ewout Kramer" video_on=1
++0.5s attendee.join id=james-a user_id=4011 name="James Agnew" video_on=1
++0.5s attendee.join id=john-m user_id=4012 name="John Moehrke" video_on=0
++0.5s attendee.join id=rob user_id=4013 name="Rob Hausam" video_on=0
++0.5s attendee.join id=ward user_id=4014 name="Ward Weistra" video_on=0
++0.5s attendee.join id=bryn user_id=4015 name="Bryn Rhodes" video_on=0
++0.5s attendee.join id=brett-m user_id=4016 name="Brett Marquard" video_on=0
++0.5s attendee.join id=jean user_id=4017 name="Jean-Henri Duteau" video_on=0
++0.5s attendee.join id=alexander user_id=4018 name="Alexander Henket" video_on=0
++0.5s attendee.join id=david-h user_id=4019 name="David Hay" video_on=0
++0.5s attendee.join id=jeff-b user_id=4020 name="Jeff Brown" video_on=0
+# PA WG representatives
++0.5s attendee.join id=irma user_id=4021 name="Irma Jongeneel" video_on=0
++0.5s attendee.join id=gay user_id=4022 name="Gay Dolin" video_on=0
+
+# ------- Opening -------
+
++1s say speaker="Lloyd McKenzie" text="Good morning everyone. Welcome to the FHIR-I call for September eighth. We have a joint session today with Patient Administration to discuss patient matching and then we'll pivot to obligations. Irma and Gay, thank you for joining us from PA."
++2s say speaker="Irma Jongeneel" text="Happy to be here. Patient $match has been on our agenda for three WGMs running, so it's good to finally do a deep dive with FHIR-I."
++2s say speaker="Lloyd McKenzie" text="Rick, you're scribing?"
++1s say speaker="Rick Geimer" text="Yep. Page is ready."
+
+# ------- Patient $match overview -------
+
++5s say speaker="Lloyd McKenzie" text="Let's start with the current state. The $match operation is defined on Patient. It accepts a Patient resource as input and returns a Bundle of potential matches with confidence scores. The spec is deliberately vague about the matching algorithm — it just says servers MAY use probabilistic or deterministic matching. Grahame, what's the R6 plan?"
++4s say speaker="Grahame Grieve" text="So the R6 plan, based on tracker feedback, is to add more structure to the response. Right now, the confidence score is a decimal with no standard interpretation. A score of 0.85 means one thing on one server and something completely different on another. We want to standardize the confidence tiers."
++3s say speaker="Grahame Grieve" text="The proposal is three tiers: definite match — the server is confident these are the same person. Probable match — the server thinks these are likely the same person but wants human review. Possible match — there's enough overlap to flag but not enough to act on. Each tier would have a code in the Bundle.entry.search.mode extension."
+
++4s say speaker="Vassil Peytchev" text="I like the tier approach but I want to push back on the names. 'Definite match' implies certainty that the server can't guarantee. Even with identical MRN, name, date of birth, and SSN, there's a nonzero chance it's a different person. Can we use 'high confidence' instead of 'definite'?"
++2s say speaker="Cooper Thompson" text="Agreed. In our matching system, we never use the word 'definite.' It's always 'high,' 'medium,' 'low.' Customers get nervous when software claims certainty about patient identity."
++3s say speaker="Grahame Grieve" text="Fine. High confidence, medium confidence, low confidence. I'm not attached to the names."
+
++2s chat id=chat-1 from="Brett Marquard" to="Everyone" text="US Core has a patient matching profile in development. We'd want to align with whatever FHIR-I decides here."
++2s chat id=chat-2 from="Jeff Brown" to="Everyone" text="Sequoia/Carequality also has matching requirements. Alignment is critical."
+
++5s say speaker="Eric Haas" text="Okay, tiers are fine, but what I really want to know is: are we going to say anything about the algorithm? Because right now, every vendor has a different black box, and they all claim theirs is the best. As an implementer, I have no way to compare."
++3s say speaker="Grahame Grieve" text="We are not going to standardize the algorithm. That's been discussed and rejected multiple times. The algorithms are legitimately different for good reasons — probabilistic matching works better with incomplete demographics, deterministic matching works better with reliable identifiers. Different markets need different approaches."
++3s say speaker="James Agnew" text="I'd reinforce that. In HAPI FHIR, we support pluggable matching engines. Some of our customers use Jaro-Winkler string similarity, others use exact match on identifier, others use a weighted scoring model. Standardizing on one algorithm would break half our deployments."
+
++4s say speaker="Irma Jongeneel" text="From the PA perspective, we hear from implementers all the time that the $match operation is too vague to be useful. They want guidance, not mandates. Can we at least publish recommended minimum input parameters? Like, if you're going to call $match, you SHOULD provide at least name plus date of birth, or identifier?"
++3s say speaker="Grahame Grieve" text="That's reasonable. We can add SHOULD guidance on minimum input without constraining the algorithm."
++2s say speaker="Gay Dolin" text="We'd also like guidance on what the server SHOULD return as match criteria. Right now, the response doesn't tell you WHY a match was scored the way it was. Did it match on name? On DOB? On address? That metadata is crucial for human review."
+
++3s say speaker="Josh Mandel" text="This connects to the transparency question. In the US, there are regulatory requirements around patient matching — 21st Century Cures, information blocking, Trusted Exchange Framework. Payers and providers need to explain WHY a match was made. A black box score of 0.87 doesn't satisfy auditors."
++3s say speaker="Brian Postlethwaite" text="We have an extension for match metadata in our implementation. It returns which fields contributed to the score and by how much. We could propose standardizing that extension."
++2s say speaker="Grahame Grieve" text="I'd rather not add more extensions to Patient $match. Extensions grow like weeds. If we need match metadata, let's add it to the operation definition properly."
+
++2s chat id=chat-3 from="David Hay" to="Everyone" text="FHIR-29768 is related — CareTeam mandatory search composite OR search. Similar pattern of 'we need more structured responses.'"
++2s chat id=chat-4 from="Jean-Henri Duteau" to="Everyone" text="Canadian implementations use a two-tier model: 'verified match' (linked records) vs 'potential match' (flagged for review). Three tiers would be compatible."
+
++4s say speaker="Lloyd McKenzie" text="Okay, I'm hearing convergence. Let me summarize. For R6 $match: add three confidence tiers — high, medium, low — as coded values. Add SHOULD guidance on minimum input parameters. Add match metadata as part of the operation definition, not an extension. Brian, will you draft the match metadata structure?"
++2s say speaker="Brian Postlethwaite" text="Yes, I'll base it on what we already have and generalize."
++3s say speaker="Lloyd McKenzie" text="Grahame, will you update the tracker item with the three-tier proposal?"
++2s say speaker="Grahame Grieve" text="Will do. I'll file it under FHIR-I with a cross-reference to PA."
++2s say speaker="Irma Jongeneel" text="PA is happy with this direction. We'll review the draft at our next call."
+
+# ------- Transition to Obligations -------
+
++5s say speaker="Lloyd McKenzie" text="Great. Let's pivot to the second topic — obligations. Simone, this is your baby. Give us the update."
++4s say speaker="Simone Heckmann" text="Thank you, Lloyd. So, for those who haven't been following: obligations are the R6 replacement for — well, not replacement, but enhancement of — Must Support. The fundamental problem with Must Support is that it means different things in different contexts. In US Core, Must Support means 'you must be able to populate this element if you have the data.' In IHE profiles, it means 'you must be able to process this element if you receive it.' Same label, different semantics."
++4s say speaker="Simone Heckmann" text="Obligations make this explicit. Instead of a boolean Must Support flag, you get a coded obligation that says exactly what is required. SHALL:populate, SHALL:handle, SHALL:persist, MAY:display, and so on. The obligation is on a specific actor — sender, receiver, intermediary — so there's no ambiguity about who has to do what."
+
++3s say speaker="Brett Marquard" text="For US Core, this is transformative. We've spent years writing narrative text to explain what Must Support means for each element. With obligations, the semantics are computable. A validator can check whether a server actually meets its obligations without reading twenty pages of prose."
++3s say speaker="Eric Haas" text="Brett, I share your enthusiasm, but can we talk about the migration? US Core R4 has hundreds of Must Support flags. Are we going to rewrite every profile to use obligations? Because that's a massive amount of work."
++2s say speaker="Brett Marquard" text="Not rewrite — augment. Must Support stays. Obligations are added alongside. Over time, obligations carry the semantic weight and Must Support becomes informational."
+
++4s say speaker="Simone Heckmann" text="That's exactly right. And this is important — obligations do NOT replace Must Support. They coexist. Must Support is a simple flag that says 'pay attention to this element.' Obligations say precisely what kind of attention. Think of it as Must Support being the headline and obligations being the fine print."
++3s say speaker="Ewout Kramer" text="Simone, I have a practical question. How does this work in StructureDefinition? Are obligations expressed as extensions on ElementDefinition?"
++2s say speaker="Simone Heckmann" text="Currently, yes. There's an obligation extension on ElementDefinition with a complex type that includes the obligation code, the actor, and optional conditions. For R6, the proposal is to move this into the ElementDefinition backbone element proper, so it's a first-class field."
++3s say speaker="Ewout Kramer" text="That concerns me. ElementDefinition is already one of the most complex types in FHIR. Adding obligation fields makes it even more complex. Tooling authors — and I speak as one — are going to groan."
++3s say speaker="Simone Heckmann" text="I understand, but the alternative is keeping it as an extension forever, which means tooling might ignore it. If it's a first-class field, tooling has to support it."
++2s say speaker="Ewout Kramer" text="Or tooling developers will quietly implement it two years late and claim they didn't know about it."
++2s say speaker="Eric Haas" text="If it looks and acts like a duck, Ewout..."
++2s say speaker="Ewout Kramer" text="It's a very complex duck."
+
++2s chat id=chat-5 from="Simone Heckmann" to="Everyone" text="Obligations spec: https://build.fhir.org/obligations.html"
++2s chat id=chat-6 from="Alexander Henket" to="Everyone" text="NICTIZ has been piloting obligations in Dutch national profiles since January. Happy to share lessons learned."
++2s chat id=chat-7 from="Ward Weistra" to="Everyone" text="Firely Simplifier already supports obligation extensions in snapshot generation. If it moves to ElementDefinition proper, we can support that." reply_to=chat-6
+
+# ------- The normative challenge -------
+
++5s say speaker="Grahame Grieve" text="There's a deeper issue here that we need to confront. For R6, we're targeting normative for all core content. That means StructureDefinition — including ElementDefinition — must be normative. If we add obligations to ElementDefinition, those fields are normative from day one. No trial-use period."
++3s say speaker="Simone Heckmann" text="I'm comfortable with that for the core obligation codes. SHALL:populate, SHALL:handle, SHALL:persist — these are well-understood. What I'm less comfortable making normative is the actor model. We have three defined actors today — sender, receiver, intermediary — but there might be more in the future."
++3s say speaker="Grahame Grieve" text="Then we make the actor a CodeableConcept that's extensible. The core three are normative. New actors can be added as coded values without breaking the structure."
++2s say speaker="Simone Heckmann" text="That works. I'll update the proposal."
+
++4s say speaker="Josh Mandel" text="I want to raise the tooling testability question again. David, you've been tracking FMM evidence. How do we measure whether obligations are actually being used correctly?"
++3s say speaker="David Hay" text="Honestly? We don't have the infrastructure for it yet. ConMan tracks implementation counts for resources and operations. It doesn't track profile-level features like obligations. We'd need to extend the evidence model."
++2s say speaker="Josh Mandel" text="This is the chronic problem. We add sophisticated features to the spec, then have no way to measure whether they're being used. Obligations could end up like GraphDefinition — technically brilliant, practically ignored."
++3s say speaker="Simone Heckmann" text="Josh, I take that seriously. But obligations have something GraphDefinition doesn't — a pressing need. Every national program that creates FHIR profiles needs to express Must Support semantics precisely. There are twenty-plus national FHIR programs now. That's built-in demand."
++2s say speaker="Alexander Henket" text="Confirmed. The Netherlands, Germany, Switzerland, Australia, Canada, and the UK are all either using or evaluating obligations. That's more implementation interest than most FMM 3 resources."
+
++2s chat id=chat-8 from="Bryn Rhodes" to="Everyone" text="Clinical Reasoning has the same challenge with Must Support. We'd love obligations for CQL-based measure profiles."
++2s chat id=chat-9 from="Gay Dolin" to="Everyone" text="C-CDA templates have had explicit conformance verbs for decades. Obligations bring FHIR closer to that expressiveness."
+
+# ------- The controversial obligation codes -------
+
++5s say speaker="Lloyd McKenzie" text="Let's get into the specific obligation codes. Simone, walk us through the controversial ones."
++4s say speaker="Simone Heckmann" text="The non-controversial ones are: SHALL:populate — if you have the data, you must include this element. SHALL:handle — if you receive this element, you must process it. SHALL:persist — if you receive this element, you must store it. SHALL:display — if you display the resource, you must display this element."
++3s say speaker="Simone Heckmann" text="The controversial ones are: SHALL:able-to-populate — you must be CAPABLE of populating this element, even if you don't have the data for every instance. This is the US Core interpretation of Must Support. And then there's SHALL:no-alter — you must not modify this element in transit. This is for intermediary systems that pass data through."
++3s say speaker="Eric Haas" text="SHALL:able-to-populate is exactly what US Core needs. Today we write paragraphs explaining that Must Support means the system must be designed to capture this data, even if a particular patient record doesn't have it. With able-to-populate, that's one code."
++3s say speaker="James Agnew" text="I'm not sure how you test 'able to populate.' You can test whether a system DID populate an element. You can't easily test whether it COULD populate it but didn't because the data wasn't available."
++2s say speaker="Brett Marquard" text="You test it with the capability statement or feature declaration. The system declares that it's able to populate, and the test checks that a conformant resource CAN include the element. The absence of data in a specific instance isn't a conformance failure."
+
++4s say speaker="Grahame Grieve" text="This gets into the difference between instance conformance and system conformance. Instance validation checks a specific resource. System conformance checks whether a system's behavior matches its declared obligations. We've never had formal system conformance testing in FHIR."
++3s say speaker="Brian Postlethwaite" text="And I'd argue we need it. Instance validation is necessary but not sufficient. A system could produce perfectly valid resources while systematically dropping half the data. Obligations give us a framework for system-level conformance, but only if we build the testing infrastructure."
++3s say speaker="Simone Heckmann" text="For R6, I'd be happy with instance-level obligation validation as a starting point. System-level conformance can come in R7. We don't need to solve everything at once."
+
++2s chat id=chat-10 from="Rob Hausam" to="Everyone" text="The obligation vocabulary will need careful terminology work. Rob volunteers to help with code system design."
++2s chat id=chat-11 from="Irma Jongeneel" to="Everyone" text="PA would like SHALL:able-to-populate added to the Patient resource profile for key demographics — name, DOB, gender, identifier."
++3s chat id=chat-12 from="John Moehrke" to="Everyone" text="SHALL:no-alter is critical for audit trail integrity. IHE already has this requirement for XDS/MHD intermediaries."
+
+# ------- The no-alter debate -------
+
++5s say speaker="John Moehrke" text="I want to flag SHALL:no-alter for special attention. In IHE profiles, we require that intermediary systems — things like XDS repositories or MHD document responders — do not alter the clinical content that passes through them. Currently, we express this in narrative. Obligations would let us express it as a computable requirement."
++3s say speaker="Grahame Grieve" text="I have a philosophical issue with no-alter. It implies that the receiving system can detect alteration. How? If I receive a resource, I don't know what it looked like before the intermediary touched it. No-alter is only verifiable with signatures or provenance."
++3s say speaker="John Moehrke" text="Which is why no-alter goes hand-in-hand with digital signatures. The sender signs the resource, the intermediary passes it through, the receiver verifies the signature. If the signature fails, the intermediary altered something."
++2s say speaker="Grahame Grieve" text="In theory, yes. In practice, how many FHIR implementations actually verify digital signatures?"
++2s say speaker="John Moehrke" text="More would if we made it easier. The current signature infrastructure in FHIR is... I'll be diplomatic and say 'minimally specified.'"
++2s say speaker="Grahame Grieve" text="John, you and I have been having this argument since HL7 v2. We're going to keep having it until one of us retires."
++2s say speaker="John Moehrke" text="Then we'd better solve it before then."
+
++2s chat id=chat-13 from="Eric Haas" to="Everyone" text="If we keep debating, we'll be setting the world on FHIR long enough to need fire insurance."
+
++4s say speaker="Lloyd McKenzie" text="Let me try to land this. John, can we accept SHALL:no-alter as a trial-use obligation code for R6, with the understanding that the verification mechanism — signatures, provenance, whatever — is specified separately?"
++2s say speaker="John Moehrke" text="Trial-use is acceptable as long as it's clear that the obligation exists even if the verification method isn't standardized yet."
++2s say speaker="Grahame Grieve" text="I can live with that."
++2s say speaker="Lloyd McKenzie" text="Simone?"
++1s say speaker="Simone Heckmann" text="Ja, that works. Trial-use for no-alter, normative for the core codes."
+
+# ------- Voting block -------
+
++5s say speaker="Lloyd McKenzie" text="All right, let's formalize. I have three motions. First: add obligations as first-class fields in ElementDefinition for R6, with core codes SHALL:populate, SHALL:handle, SHALL:persist, SHALL:display as normative, and actors as extensible CodeableConcept."
++2s say speaker="Simone Heckmann" text="So moved."
++1s say speaker="Brett Marquard" text="Second."
++2s say speaker="Lloyd McKenzie" text="Simone Heckmann/Brett Marquard. All in favor? Opposed? Abstentions?"
++2s say speaker="Ewout Kramer" text="I abstain. I agree with the direction but I need to assess the tooling impact."
++1s say speaker="Rick Geimer" text="Persuasive: Simone Heckmann/Brett Marquard: 17-0-1. Ewout abstaining."
+
++3s say speaker="Lloyd McKenzie" text="Second motion: add SHALL:able-to-populate as normative obligation code."
++2s say speaker="Eric Haas" text="So moved."
++1s say speaker="Brett Marquard" text="Second."
++2s say speaker="Lloyd McKenzie" text="Eric Haas/Brett Marquard. All in favor? Opposed? Abstentions? Unanimous."
++1s say speaker="Rick Geimer" text="Persuasive: Eric Haas/Brett Marquard: 18-0-0."
+
++3s say speaker="Lloyd McKenzie" text="Third motion: add SHALL:no-alter as trial-use obligation code, with verification mechanism to be specified separately."
++2s say speaker="John Moehrke" text="So moved."
++1s say speaker="Gay Dolin" text="Second."
++2s say speaker="Lloyd McKenzie" text="John Moehrke/Gay Dolin. All in favor? Opposed? Abstentions?"
++2s say speaker="Grahame Grieve" text="In favor, reluctantly."
++1s say speaker="Rick Geimer" text="Persuasive: John Moehrke/Gay Dolin: 18-0-0. Noted Grahame's reluctance for the record."
++2s say speaker="Grahame Grieve" text="Recorded reluctance is my brand."
+
+# ------- Closing / other business -------
+
++5s say speaker="Lloyd McKenzie" text="Excellent. We covered a lot of ground today. Irma, Gay — thank you for joining from PA. This was productive."
++2s say speaker="Irma Jongeneel" text="Very productive. We'll bring the $match updates to the PA call on Wednesday."
++2s say speaker="Gay Dolin" text="And thank you for the obligations discussion. PA will draft obligation annotations for the Patient resource."
+
++3s say speaker="Lloyd McKenzie" text="Any other business before we close?"
++3s say speaker="David Hay" text="Quick plug — I've updated the Hay on FHIR blog with a post about the R6 normative timeline. If people could share it, that would help raise awareness about the November content freeze."
++2s say speaker="Grahame Grieve" text="Is it 'Hay on FHIR' or 'FHIR and Hay'? I can never remember."
++2s say speaker="David Hay" text="It's Hay on FHIR, Grahame. It's been Hay on FHIR for ten years. You were at the naming meeting."
++2s say speaker="Grahame Grieve" text="I've been to a lot of naming meetings. Most of the names were better than 'Hay on FHIR.'"
++2s say speaker="David Hay" text="Says the man who named the spec after a misspelling."
++2s say speaker="Eric Haas" text="FHIR — Fast Healthcare Interoperability Resources. Or as I like to call it, Finally Healthcare Interoperability... Remains. Elusive."
++2s say speaker="Lloyd McKenzie" text="And on that deeply encouraging note — meeting adjourned. See everyone next Monday."
+
++2s chat id=chat-14 from="Simone Heckmann" to="Everyone" text="Frohe FHIRtage to those of us already thinking about the holidays."
++2s chat id=chat-15 from="Ward Weistra" to="Everyone" text="It's September, Simone."
++2s chat id=chat-16 from="Simone Heckmann" to="Everyone" text="In standards time, September IS the holidays. The November freeze is our Christmas deadline." reply_to=chat-15
+
+# ------- People leave -------
+
++3s attendee.leave id=irma
++1s attendee.leave id=gay
++2s attendee.leave id=jeff-b
++1s attendee.leave id=alexander
++2s attendee.leave id=jean
++1s attendee.leave id=brett-m
++2s attendee.leave id=bryn
++1s attendee.leave id=david-h
++2s attendee.leave id=ward
++1s attendee.leave id=rob
++2s attendee.leave id=john-m
++1s attendee.leave id=james-a
++2s attendee.leave id=ewout
++1s attendee.leave id=cooper
++2s attendee.leave id=vassil
++1s attendee.leave id=brian-p
++2s attendee.leave id=eric
++1s attendee.leave id=josh
++2s attendee.leave id=simone
++1s attendee.leave id=grahame
++2s attendee.leave id=rick
++2s attendee.leave id=lloyd
+
++1s end

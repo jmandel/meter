@@ -184,7 +184,7 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `GET /v1/stream`
 - `GET /v1/meeting-runs/:id/stream`
 
-The transcript markdown endpoint is intended for easy manual inspection and prompt insertion. It returns plain markdown as text, not a downloaded file.
+The transcript markdown endpoint is intended for easy manual inspection and prompt insertion. It returns plain markdown as text, not a downloaded file. By default it includes speech, attendee joins/leaves, and chat in one time-ordered log.
 
 Recurring-meeting aliases:
 
@@ -194,21 +194,24 @@ Recurring-meeting aliases:
 
 Incremental transcript fetch:
 
-- `GET /v1/meeting-runs/:id/transcript.md?since=<cursor>`
-- `GET /v1/zoom-meetings/:meeting_id/transcript.md?since=<cursor>`
-- each transcript section now includes a visible `cursor <ISO-8601 timestamp>` marker
-- use that exact cursor value as `since=` to fetch only newer transcript/chat sections next time
+- `GET /v1/meeting-runs/:id/transcript.md?since=<timestamp>`
+- `GET /v1/zoom-meetings/:meeting_id/transcript.md?since=<timestamp>`
+- pass `?include=speech,joins,chat` or any comma-separated subset such as `?include=speech,chat`
+- each transcript row uses a compact bracket like `[00:24 chat id=1 from="Gino" to=Everyone]`
+- use a visible line timestamp such as `00:30` as `since=`
+- `since=` responses omit the transcript header and return entries from that timestamp onward
+- pagination returns complete rendered turns, so the first returned speech line may repeat text you already saw if that turn kept growing
 
 Example:
 
 ```text
-### Mar 12, 6:48:30 AM · Josh Mandel · cursor 2026-03-12T06:48:31.100Z
+[00:30 spk="Josh Mandel"] Here's the latest update.
 ```
 
 Then:
 
 ```bash
-curl 'http://127.0.0.1:3100/v1/zoom-meetings/2193058682/transcript.md?since=2026-03-12T06:48:31.100Z'
+curl 'http://127.0.0.1:3100/v1/zoom-meetings/2193058682/transcript.md?since=00:30'
 ```
 
 Simulation kit:
@@ -224,11 +227,18 @@ meeting 2193058682
 title "Weekly Sync Simulation"
 speed 10
 
+# Each +duration is relative to the previous step.
 +0s attendee.join id=host-1 user_id=101 name="Alice Host" host=1
 +0.5s say speaker="Alice Host" text="Welcome everyone."
 +0.5s chat from="Alice Host" to="Everyone" text="Please review the notes."
 +1s end
 ```
+
+Simulation timing notes:
+
+- each `+<duration>` is a delay after the previous step, not an absolute offset from meeting start
+- keep startup joins compressed if you want transcript content to appear quickly
+- use `speed` to accelerate long scripts without changing the scripted relative pacing
 
 Supported simulation actions:
 

@@ -33,6 +33,7 @@ test("parseSimulationScript parses directives and timed steps", () => {
     "meeting 2193058682",
     "title \"Weekly Sync Simulation\"",
     "speed 2",
+    "# Each +duration is relative to the previous step.",
     "+0.5s attendee.join id=host-1 name=\"Alice Host\" host=1",
     "+1s say speaker=\"Alice Host\" text=\"Hello team\"",
     "+2s end state=completed",
@@ -68,6 +69,7 @@ test("simulation API replays scripted meeting events into transcript and attende
           "+0s attendee.join id=host-1 user_id=101 name=\"Alice Host\" host=1",
           "+0.2s say speaker=\"Alice Host\" text=\"Hello team\"",
           "+0.2s chat from=\"Alice Host\" to=\"Everyone\" text=\"Please review the notes\"",
+          "+0.2s attendee.leave id=host-1",
           "+0.2s end",
         ].join("\n"),
       }),
@@ -79,7 +81,11 @@ test("simulation API replays scripted meeting events into transcript and attende
 
     const transcript = await fetch(body.simulation.transcript_url).then((value) => value.text());
     expect(transcript).toContain("Hello team");
-    expect(transcript).toContain("cursor ");
+    expect(transcript).toContain("[00:00 joins] Alice Host");
+    expect(transcript).toContain("[00:00 spk=\"Alice Host\"] Hello team");
+    expect(transcript).toContain("[00:00 chat id=1 from=\"Alice Host\" to=Everyone] Please review the notes");
+    expect(transcript).toContain("[00:00 leaves] Alice Host");
+    expect(transcript).not.toContain("[cursor=");
 
     const attendees = await fetch(body.simulation.attendees_url).then((value) => value.json()) as { items: Array<{ display_name: string | null }> };
     expect(attendees.items[0]?.display_name).toBe("Alice Host");

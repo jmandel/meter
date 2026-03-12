@@ -1,0 +1,241 @@
+# =============================================================================
+# FHIR Infrastructure WG Call — R6 Subscriptions Ballot Reconciliation
+# Special ballot reconciliation call for topic-based subscriptions tracker
+# items. Focus on FHIR-32752, FHIR-31720, FHIR-31063, and backport IG
+# alignment. Chairs: Lloyd McKenzie. Scribe: Rick Geimer.
+# Duration: ~60 minutes simulated
+# =============================================================================
+
+meeting 7429185036
+title "FHIR-I WG Call 2025-10-20 — R6 Subscriptions Ballot Reconciliation"
+bot "HL7 Meeting Bot"
+requested_by "hl7-fhir-i"
+speed 1
+tag fhir-infrastructure
+tag hl7
+tag simulation
+tag subscriptions
+tag ballot-reconciliation
+tag r6
+
+# ------- Attendee Setup (compressed into the first ~10 seconds) -------
+
++0s attendee.join id=lloyd user_id=2001 name="Lloyd McKenzie" host=1 video_on=1
++0.5s attendee.join id=rick user_id=2002 name="Rick Geimer" co_host=1 video_on=1
++0.5s attendee.join id=gino user_id=2003 name="Gino Canessa" video_on=1
++0.5s attendee.join id=grahame user_id=2004 name="Grahame Grieve" video_on=1
++0.5s attendee.join id=josh user_id=2005 name="Josh Mandel" video_on=0
++0.5s attendee.join id=eric user_id=2006 name="Eric Haas" video_on=0
++0.5s attendee.join id=brian-p user_id=2007 name="Brian Postlethwaite" video_on=1
++0.5s attendee.join id=vassil user_id=2008 name="Vassil Peytchev" video_on=1
++0.5s attendee.join id=adam user_id=2009 name="Adam Strickland" video_on=0
++0.5s attendee.join id=john-m user_id=2010 name="John Moehrke" video_on=0
++0.5s attendee.join id=cooper user_id=2011 name="Cooper Thompson" video_on=1
++0.5s attendee.join id=jose user_id=2012 name="Jose Costa Teixeira" video_on=0
++0.5s attendee.join id=alexander user_id=2013 name="Alexander Henket" video_on=0
++0.5s attendee.join id=rob user_id=2014 name="Rob Hausam" video_on=0
++0.5s attendee.join id=ewout user_id=2015 name="Ewout Kramer" video_on=1
++0.5s attendee.join id=ward user_id=2016 name="Ward Weistra" video_on=0
++0.5s attendee.join id=richard user_id=2017 name="Richard Ettema" video_on=0
++0.5s attendee.join id=craig user_id=2018 name="Craig Newman" video_on=0
++0.5s attendee.join id=michelle user_id=2019 name="Michelle Miller" video_on=0
++0.5s attendee.join id=james-a user_id=2020 name="James Agnew" video_on=1
+
+# ------- Opening -------
+
++1s say speaker="Lloyd McKenzie" text="All right everyone, let's get started. This is a special ballot reconciliation call for the R6 subscriptions content. We've got twenty-three tracker items to get through, so we're going to need to be efficient. Gino, you're driving the content today?"
++3s say speaker="Gino Canessa" text="Yep. I've got the list sorted by priority. I'd like to start with the ones that have the most implementation impact, then work through the editorial items at the end if we have time."
++2s say speaker="Lloyd McKenzie" text="Sounds good. Rick, you're scribing?"
++1s say speaker="Rick Geimer" text="Ready to go."
++2s say speaker="Lloyd McKenzie" text="And I want to remind everyone of the process — for each item, Gino will present the issue and proposed disposition. We'll discuss briefly, then vote. Dispositions are persuasive, not persuasive, or persuasive with mod. If there's a substantive change to normative content, that triggers a reballot requirement. Let's be mindful of that."
+
++2s chat id=chat-1 from="Gino Canessa" to="Everyone" text="Tracker items spreadsheet: https://docs.google.com/spreadsheets/d/1example — sorted by priority column"
++2s chat id=chat-2 from="Alexander Henket" to="Everyone" text="JIRA filter for all open R6 subscription items: https://jira.hl7.org/issues/?filter=12345"
+
+# ------- FHIR-31720: Add new R5 Subscription resources -------
+
++5s say speaker="Gino Canessa" text="Okay, first item. FHIR-31720 — Add new R5 Subscription resources. This is about making sure the R6 ballot includes the SubscriptionTopic and SubscriptionStatus resources that were introduced in R5. The ballot comment says these resources are listed as trial-use in R5 but should be normative for R6."
++3s say speaker="Gino Canessa" text="My proposed disposition is persuasive with modification. We agree that SubscriptionTopic and SubscriptionStatus should be targeted for normative in R6, but with the caveat that the canFilterBy changes from FHIR-32752 need to be incorporated first. We can't make something normative that has a known structural issue."
++3s say speaker="Grahame Grieve" text="I agree with the disposition. These resources have been through enough implementation cycles via the backport IG that they should qualify for normative. The FMM evidence is there."
+
++2s say speaker="Brian Postlethwaite" text="How many implementations do we have? I want to make sure we're not just counting the backport IG adopters as R5 implementations."
++3s say speaker="Gino Canessa" text="Good question. For SubscriptionTopic specifically, we have: Microsoft's reference implementation, HAPI FHIR, Smile CDR, two Epic endpoints that are in production, the Aidbox implementation, and the Firely Vonk implementation. That's seven independent implementations. The backport IG implementations are separate — those are R4 implementations using the cross-version extension approach."
++2s say speaker="James Agnew" text="I can confirm HAPI FHIR has had SubscriptionTopic support since version 6.4. It's been stable. We do see some rough edges with canFilterBy, which is why I voted for FHIR-32752 as well."
++2s say speaker="Brian Postlethwaite" text="Okay, seven is solid. I'm comfortable."
+
++3s say speaker="Lloyd McKenzie" text="Any other discussion? Hearing none. Motion to accept FHIR-31720 as persuasive with modification per Gino's proposal. Gino moves, who seconds?"
++1s say speaker="James Agnew" text="Second."
++2s say speaker="Lloyd McKenzie" text="Gino Canessa/James Agnew. All in favor? Opposed? Abstentions?"
++2s say speaker="Rick Geimer" text="Persuasive with Mod: Gino Canessa/James Agnew: 16-0-0."
+
+# ------- FHIR-31063: Subscriptions over SMART Web Messaging -------
+
++5s say speaker="Gino Canessa" text="Next up — FHIR-31063. Support FHIR Subscriptions over SMART Web Messaging. This one's been sitting in the tracker for a while. The submitter wants subscription notifications to be deliverable via SMART Web Messaging channels, not just REST hooks, websockets, and email."
++3s say speaker="Josh Mandel" text="I should probably recuse myself from voting since I'm one of the SMART Web Messaging editors, but I can provide context. The idea is that if you have an EHR that's already running a SMART app in an iframe, you should be able to push subscription notifications into that app via the existing postMessage channel rather than requiring the app to maintain a separate REST endpoint or websocket connection."
++2s say speaker="Gino Canessa" text="Right. And my proposed disposition is persuasive with modification. We'd add SMART Web Messaging as a channel type in R6, but mark it as trial-use since the SMART Web Messaging spec itself is still maturing."
+
++4s say speaker="John Moehrke" text="I have a security concern here. SMART Web Messaging uses postMessage, which has a well-known history of cross-origin vulnerabilities. If we're pushing clinical data through that channel, we need to make sure the security considerations are thorough."
++3s say speaker="Josh Mandel" text="That's fair, John. The SMART Web Messaging spec does address origin verification, but I agree the subscription-specific security considerations should be explicit. Things like: the EHR must verify the SMART app's origin before delivering notifications, notifications should not include full resource content by default — use the id-only notification type so the app has to fetch via the existing authorized FHIR connection."
++3s say speaker="John Moehrke" text="Id-only by default is a good mitigation. I'd want that to be a SHALL, not a SHOULD."
++2s say speaker="Gino Canessa" text="I'm okay with that as a modification. SMART Web Messaging channel type SHALL default to id-only notification content."
+
++3s say speaker="Vassil Peytchev" text="From a practical standpoint, does anyone actually need this? Our SMART apps currently use websockets for real-time updates and it works fine."
++2s say speaker="Josh Mandel" text="It matters most for contexts where websockets aren't available — like embedded browser views in mobile EHR apps, or environments with aggressive proxy servers that strip websocket upgrades. SMART Web Messaging works in those contexts because it's just postMessage."
++2s say speaker="Vassil Peytchev" text="Fair enough. I won't block it."
+
++2s chat id=chat-3 from="Jose Costa Teixeira" to="Everyone" text="This could be useful for the WHO SMART Guidelines work where connectivity constraints make websockets unreliable."
++2s chat id=chat-4 from="John Moehrke" to="Everyone" text="Security review checklist for subscription channels: https://build.fhir.org/safety.html — sections 6 and 7 are relevant"
+
++3s say speaker="Lloyd McKenzie" text="Okay, I think we have a path. Motion to accept FHIR-31063 as persuasive with modification: add SMART Web Messaging channel type as trial-use, with SHALL default to id-only notification content. Motion?"
++1s say speaker="Gino Canessa" text="So moved."
++1s say speaker="John Moehrke" text="Second."
++2s say speaker="Lloyd McKenzie" text="Gino Canessa/John Moehrke. All in favor? Opposed? Abstentions?"
++2s say speaker="Josh Mandel" text="Abstaining due to conflict of interest."
++1s say speaker="Rick Geimer" text="Persuasive with Mod: Gino Canessa/John Moehrke: 15-0-1. Josh Mandel abstaining."
+
+# ------- FHIR-31470: Missing notification type details -------
+
++5s say speaker="Gino Canessa" text="FHIR-31470 — Missing notification type details. This is about the fact that the subscription notification bundle doesn't clearly document the differences between full-resource, id-only, and empty notification content levels. The ballot comment says the descriptions are 'woefully inadequate' — their words, not mine."
++2s say speaker="Gino Canessa" text="I think this is straightforwardly persuasive. We just need better documentation. I've drafted expanded descriptions with examples for each content level."
++2s say speaker="Grahame Grieve" text="I've reviewed Gino's draft. It's good. The examples are clear. I'd suggest we also add a table comparing the three levels side by side."
++2s say speaker="Gino Canessa" text="Good idea. I'll add that."
+
++2s say speaker="Eric Haas" text="Can we also clarify what happens when a server doesn't support the requested content level? Right now it's ambiguous. If I request full-resource but the server only supports id-only, does it error or downgrade silently?"
++3s say speaker="Gino Canessa" text="Currently the spec says the server MAY return a lower content level. But I agree that's confusing. Proposal: server SHOULD return the requested level or reject the subscription with an OperationOutcome explaining what's supported."
++2s say speaker="Eric Haas" text="SHOULD, not SHALL?"
++2s say speaker="Gino Canessa" text="SHOULD. There are edge cases where a server might not be able to deliver full-resource for security reasons — like if the resource was deleted and the content is no longer available. In those cases, downgrading to id-only is correct behavior."
++2s say speaker="Eric Haas" text="Okay, SHOULD works. I can live with that."
+
++2s chat id=chat-5 from="Richard Ettema" to="Everyone" text="AEGIS has test scripts for all three notification levels in Touchstone. Happy to share the test results as FMM evidence."
++2s chat id=chat-6 from="Brian Postlethwaite" to="Everyone" text="Do we need a fourth level? 'empty-with-count' has come up in a few implementations where the client just wants to know HOW MANY things changed."
++3s chat id=chat-7 from="Gino Canessa" to="Everyone" text="@Brian let's track that as a separate R7 proposal. R6 scope is already tight enough." reply_to=chat-6
+
++3s say speaker="Lloyd McKenzie" text="Let's vote. Motion to accept FHIR-31470 as persuasive with modification per Gino's expanded documentation plus the SHOULD language on content level negotiation. Motion?"
++1s say speaker="Gino Canessa" text="So moved."
++1s say speaker="Eric Haas" text="Second."
++2s say speaker="Lloyd McKenzie" text="Gino Canessa/Eric Haas. All in favor? Opposed? Abstentions? Unanimous."
++1s say speaker="Rick Geimer" text="Persuasive with Mod: Gino Canessa/Eric Haas: 16-0-0."
+
+# ------- Heated exchange about SubscriptionTopic discovery -------
+
++5s say speaker="Gino Canessa" text="Okay, next cluster of items. FHIR-32772 — Clarify authorization rules for the SubscriptionTopic status endpoint. And it connects to a broader question about topic discovery that several commenters raised."
++3s say speaker="Gino Canessa" text="The issue is: how does a client discover what SubscriptionTopics a server supports? Right now, you do a search on SubscriptionTopic, but servers may not want to expose all topics to all clients. A client with a patient-level scope shouldn't necessarily see system-level administrative topics."
++4s say speaker="Josh Mandel" text="This is the SMART scoping question. Currently there's no defined scope for SubscriptionTopic. You'd need something like system/SubscriptionTopic.read, but that's a very broad grant. Ideally you'd want topic-specific scopes, but that gets complicated fast."
++3s say speaker="Vassil Peytchev" text="We've been struggling with this internally. Our current approach is to filter the SubscriptionTopic search results based on the client's existing resource scopes. If a client has patient/Observation.read, they can see topics related to Observation. But that's a heuristic, not a standard."
++2s say speaker="Cooper Thompson" text="Same approach at our end. But it's fragile. What if a topic spans multiple resource types? Like an admission topic that involves Encounter, Patient, and Location?"
+
++4s say speaker="Gino Canessa" text="This is exactly the problem the ballot comments are raising. My proposed disposition for FHIR-32772 is persuasive with modification. We add guidance that servers SHOULD filter SubscriptionTopic search results based on the client's authorization context, but we don't prescribe the exact filtering algorithm because it depends on the authorization model."
++3s say speaker="John Moehrke" text="That's too vague. 'SHOULD filter based on authorization context' could mean anything. We need at least a normative statement about what MUST NOT happen — for example, a server MUST NOT return SubscriptionTopics that reference resource types the client is not authorized to access."
++3s say speaker="Gino Canessa" text="Okay, I can strengthen it to include a MUST NOT. That gives implementers a clear floor without over-constraining the algorithm."
+
++2s say speaker="Grahame Grieve" text="I want to push back slightly. Do we actually have the evidence that this is a real security problem? Has anyone demonstrated an information leakage attack via SubscriptionTopic discovery?"
++3s say speaker="John Moehrke" text="Grahame, you don't need a demonstrated attack to have a security requirement. The principle of least privilege means you shouldn't expose metadata about resources the client can't access. Full stop. We've been over this with every resource that has a search endpoint."
++2s say speaker="Grahame Grieve" text="I agree with the principle. I'm just questioning whether the MUST NOT is testable. How does a test verify that a server didn't return a topic it shouldn't have, without knowing the server's full topic set?"
++3s say speaker="John Moehrke" text="The same way you test any negative requirement — you set up a test context with known topics and scopes, and verify the response matches expectations. Richard's Touchstone tests can do this."
++2s say speaker="Richard Ettema" text="Confirmed, we can write that test. It's not trivial but it's doable."
+
++2s chat id=chat-8 from="Alexander Henket" to="Everyone" text="NICTIZ has similar requirements for the Dutch infrastructure. We filter topics by organization-level authorization grants."
++2s chat id=chat-9 from="James Agnew" to="Everyone" text="HAPI FHIR currently doesn't filter SubscriptionTopic search results at all. We'd need to add this. It's not a small change."
+
++4s say speaker="Gino Canessa" text="James, I appreciate the honesty. Would the MUST NOT be a problem for HAPI?"
++3s say speaker="James Agnew" text="It means we'd need to integrate the authorization layer with the topic search, which we currently don't. It's maybe a two-sprint effort. Not catastrophic, but I want to flag it as real implementation work."
++2s say speaker="Eric Haas" text="Two sprints to not leak information seems like a reasonable investment."
++2s say speaker="James Agnew" text="Oh, I agree. I'm not arguing against it. Just sizing the impact for the group."
+
++3s say speaker="Lloyd McKenzie" text="Okay, I think we have consensus on the direction. Motion to accept FHIR-32772 as persuasive with modification: add MUST NOT return SubscriptionTopics referencing resource types outside the client's authorized scope, plus SHOULD guidance on filtering based on broader authorization context. Motion?"
++1s say speaker="Gino Canessa" text="So moved."
++1s say speaker="John Moehrke" text="Second."
++2s say speaker="Lloyd McKenzie" text="Gino Canessa/John Moehrke. All in favor? Opposed? Abstentions?"
++2s say speaker="Rick Geimer" text="Persuasive with Mod: Gino Canessa/John Moehrke: 16-0-0."
+
+# ------- Lighter moment: the backport IG joke -------
+
++5s say speaker="Gino Canessa" text="Okay, before the next batch, I want to address the elephant in the room. Several ballot comments reference the backport IG and ask whether it's still needed post-R6. The answer is: yes, because R4 isn't going away anytime soon, and the backport IG bridges R4 to R5-era subscriptions."
++3s say speaker="Eric Haas" text="Gino, you've been maintaining the backport IG for, what, four years now? At some point we should give you a FHIR hat that says 'I survived the subscription rewrite.'"
++2s say speaker="Gino Canessa" text="I already have three FHIR hats. What I need is for people to stop asking me to backport R6 features to R4. There's a limit to how many versions I can hold in my head simultaneously."
++3s say speaker="Grahame Grieve" text="There's no limit, Gino. You're the subscription guru. Gurus don't get limits."
++2s say speaker="Gino Canessa" text="Gurus get burnout, Grahame."
++2s say speaker="Lloyd McKenzie" text="Noted. Let's add 'prevent Gino burnout' to the R7 roadmap."
+
++2s chat id=chat-10 from="Ward Weistra" to="Everyone" text="Subscription guru support group meets Wednesdays on chat.fhir.org #subscriptions"
++2s chat id=chat-11 from="Ewout Kramer" to="Everyone" text="We should start a FHIReside Chat podcast episode about subscription trauma" reply_to=chat-10
+
+# ------- Batch of editorial items -------
+
++5s say speaker="Gino Canessa" text="All right, next I have a batch of five editorial items that I'd like to handle together if there are no objections. These are: FHIR-30670 — remove outdated text from subscription introduction. FHIR-30893 — fix the of-type modifier typo in a search example. FHIR-34735 — fix URL pattern examples. FHIR-27897 — fix Quick Start heading inconsistencies. And FHIR-30515 — add dependsOn field documentation for $translate when used with subscription parameters."
++3s say speaker="Gino Canessa" text="All five are editorial, non-substantive changes. Proposed disposition for all: persuasive, applied. I've already made the changes in the build and they're in the CI preview."
++2s say speaker="Lloyd McKenzie" text="Any objections to handling these as a block?"
++3s say speaker="Lloyd McKenzie" text="Hearing none. Motion to accept FHIR-30670, FHIR-30893, FHIR-34735, FHIR-27897, and FHIR-30515 as persuasive, applied. Motion?"
++1s say speaker="Gino Canessa" text="So moved."
++1s say speaker="Rob Hausam" text="Second."
++2s say speaker="Lloyd McKenzie" text="Gino Canessa/Rob Hausam. All in favor? Unanimous."
++1s say speaker="Rick Geimer" text="Persuasive block: Gino Canessa/Rob Hausam: 16-0-0. Five items."
+
+# ------- WebSocket vs. REST hook performance debate -------
+
++5s say speaker="Gino Canessa" text="Last substantial item for today — a cluster of comments about WebSocket versus REST hook performance. Several commenters are asking for guidance on when to use which channel type. The spec currently says 'implementations may choose' but doesn't help with the choice."
++4s say speaker="Brian Postlethwaite" text="This is a real pain point for us. We support both, and our users constantly ask which one they should use. REST hooks are simpler to set up but have higher latency due to the HTTP round-trip per notification. WebSockets are lower latency but harder to scale behind a load balancer."
++3s say speaker="Gino Canessa" text="Right. My proposal is to add an informative section — not normative — with guidance on channel type selection. REST hooks for: low-volume, server-to-server, behind firewalls. WebSockets for: high-volume, real-time UI updates, single-client scenarios. Email for: low-priority, human-readable alerts. And SMART Web Messaging for: embedded app contexts."
++3s say speaker="James Agnew" text="I'd add one thing: REST hooks with bundled notifications. A lot of implementations miss that you can batch multiple notifications into a single bundle delivery. That dramatically reduces the HTTP overhead for high-volume REST hook scenarios."
++2s say speaker="Gino Canessa" text="Good point. I'll include bundling guidance under the REST hook section."
+
++3s say speaker="Ewout Kramer" text="Can we also address the heartbeat question? WebSocket connections that go silent for too long get killed by intermediate proxies. The current spec says servers SHOULD send heartbeat notifications but doesn't specify an interval."
++2s say speaker="Gino Canessa" text="I've been advocating for a default heartbeat of sixty seconds for WebSocket channels. That's aggressive enough to keep proxies happy without generating excessive traffic."
++2s say speaker="Brian Postlethwaite" text="Sixty seconds is fine. Some of our environments have thirty-second proxy timeouts, but the server can negotiate that down at subscription creation time."
++2s say speaker="Gino Canessa" text="Right, the heartbeat period should be configurable per-subscription. The sixty seconds is just the default when the client doesn't specify."
+
++2s chat id=chat-12 from="Craig Newman" to="Everyone" text="For reference: AWS API Gateway has a 10-minute idle timeout for WebSocket connections. Azure has 4 minutes. GCP has 60 seconds."
++2s chat id=chat-13 from="Vassil Peytchev" to="Everyone" text="Our load balancers use 30s timeouts. 60s default heartbeat would not work for us." reply_to=chat-12
++2s chat id=chat-14 from="Gino Canessa" to="Everyone" text="@Vassil that's why the heartbeat is configurable — you'd set it to 25s for your environment" reply_to=chat-13
+
++3s say speaker="Lloyd McKenzie" text="This sounds like informative guidance, not a normative change. Can we vote on adding the section?"
++2s say speaker="Lloyd McKenzie" text="Motion to add informative channel type selection guidance section to the Subscriptions page, including heartbeat recommendations. Motion?"
++1s say speaker="Gino Canessa" text="So moved."
++1s say speaker="Brian Postlethwaite" text="Second."
++2s say speaker="Lloyd McKenzie" text="Gino Canessa/Brian Postlethwaite. All in favor? Opposed? Abstentions? Unanimous."
++1s say speaker="Rick Geimer" text="Persuasive with Mod: Gino Canessa/Brian Postlethwaite: 16-0-0."
+
+# ------- Wrap up -------
+
++5s say speaker="Lloyd McKenzie" text="All right, excellent progress. We got through twelve items today with nine to go. I'd like to schedule a follow-up call for next Monday to finish the remaining items. Gino, does that work?"
++2s say speaker="Gino Canessa" text="Works for me. The remaining items are mostly about error handling and retry semantics. Should be less contentious."
++2s say speaker="Eric Haas" text="Famous last words from the subscription guru."
++2s say speaker="Gino Canessa" text="I walked into that one."
+
++3s say speaker="Lloyd McKenzie" text="One more housekeeping item — the R6 content freeze is November first. That's eleven days away. If anyone has outstanding tracker items that affect subscriptions, please file them NOW. Not next week. Now."
++2s say speaker="Grahame Grieve" text="And make sure to use the FHIR project in JIRA, not the old gForge tracker. I still get items submitted to gForge and it's 2025."
++2s say speaker="Eric Haas" text="Some habits die hard. Like using Conformance instead of CapabilityStatement."
++2s say speaker="Grahame Grieve" text="Eric, if you call it Conformance one more time, I'm going to rename it to CapabilityFeatureDeclarationStatement just to spite everyone."
++2s say speaker="Lloyd McKenzie" text="Please don't."
+
++3s say speaker="Lloyd McKenzie" text="Thank you all for your time. We made good progress today. Twelve items resolved, nine remaining. Next call is Monday the twenty-seventh, same time. Rick, please post the minutes to Confluence."
++2s say speaker="Rick Geimer" text="Will do. Minutes will be up by end of day."
++2s say speaker="Lloyd McKenzie" text="Meeting adjourned. Have a good week everyone."
+
++2s chat id=chat-15 from="Gino Canessa" to="Everyone" text="Thanks all! Reminder: #subscriptions on chat.fhir.org if you have questions before next week."
++2s chat id=chat-16 from="Jose Costa Teixeira" to="Everyone" text="Great meeting. FHIRe away! 🔥"
+
+# ------- People leave -------
+
++3s attendee.leave id=jose
++1s attendee.leave id=alexander
++2s attendee.leave id=craig
++1s attendee.leave id=michelle
++2s attendee.leave id=richard
++1s attendee.leave id=ward
++2s attendee.leave id=adam
++1s attendee.leave id=rob
++3s attendee.leave id=eric
++2s attendee.leave id=james-a
++1s attendee.leave id=cooper
++2s attendee.leave id=john-m
++1s attendee.leave id=ewout
++3s attendee.leave id=vassil
++2s attendee.leave id=brian-p
++1s attendee.leave id=josh
++2s attendee.leave id=grahame
++3s attendee.leave id=gino
++2s attendee.leave id=rick
++2s attendee.leave id=lloyd
+
++1s end
