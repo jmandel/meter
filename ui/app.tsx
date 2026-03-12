@@ -3,14 +3,6 @@ import { createRoot } from "react-dom/client";
 import { marked } from "marked";
 
 import { DEFAULT_MINUTE_FINAL_PROMPT_BODY, DEFAULT_MINUTE_PROMPT_BODY } from "../src/minute-prompts";
-import {
-  appendTranscriptEvent,
-  buildTranscriptPreview,
-  normalizeTranscriptSpeaker,
-  transcriptEntryText,
-  type SpeechSegmentRecord,
-  type TranscriptEntry,
-} from "./transcript";
 
 type ConnectionState = "connecting" | "live" | "reconnecting";
 
@@ -153,17 +145,6 @@ function formatTime(iso: string | null): string {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-  }).format(new Date(iso));
-}
-
-function formatTranscriptTime(iso: string | null): string {
-  if (!iso) {
-    return "--:--:--";
-  }
-  return new Intl.DateTimeFormat([], {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
   }).format(new Date(iso));
 }
 
@@ -628,10 +609,6 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function speakerFromEvent(event: EventRecord): string | null {
-  return normalizeTranscriptSpeaker(event.payload?.speaker_label ?? event.payload?.speaker_display_name ?? null);
-}
-
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -652,13 +629,6 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     throw new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);
   }
   return response.json();
-}
-
-async function fetchSpeechPreview(meetingRunId: string): Promise<TranscriptEntry[]> {
-  const response = await fetchJson<{ items: SpeechSegmentRecord[] }>(
-    `/v1/meeting-runs/${meetingRunId}/speech?status=final&limit=24`,
-  );
-  return buildTranscriptPreview([...response.items].reverse());
 }
 
 function StatusPill({
@@ -1123,7 +1093,7 @@ function MinutesPanel({
   return (
     <div className={`minutes-panel minutes-panel-${mode}`} hidden={hidden}>
       <div className="minutes-head">
-        <div className="transcript-heading">Live minutes</div>
+        <div className="transcript-heading">{mode === "settings" ? "Minute settings" : "Live minutes"}</div>
         <div className="minutes-head-meta">
           <span className={`minutes-state minutes-state-${run.minutes?.state ?? "idle"}`}>
             {run.minutes?.state ?? "idle"}
@@ -1311,18 +1281,16 @@ function MinutesPanel({
 
 function LiveRunCard({
   run,
-  transcript,
   onStopped,
   onMinutesChanged,
 }: {
   run: MeetingRunRecord;
-  transcript: TranscriptEntry[];
   onStopped: () => Promise<void>;
   onMinutesChanged: () => void;
 }) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [workspaceTab, setWorkspaceTab] = useState<"transcript" | "minutes" | "settings">("transcript");
+  const [showMinuteSettings, setShowMinuteSettings] = useState(false);
 
   const handleStop = async () => {
     setStopping(true);
@@ -1342,10 +1310,10 @@ function LiveRunCard({
   }, [run.state]);
 
   useEffect(() => {
-    if (!run.minutes && workspaceTab !== "transcript") {
-      setWorkspaceTab("transcript");
+    if (!run.minutes) {
+      setShowMinuteSettings(false);
     }
-  }, [run.minutes, workspaceTab]);
+  }, [run.minutes]);
 
   return (
     <article className="run-card">
@@ -1416,35 +1384,14 @@ function LiveRunCard({
           ) : null}
           {error ? <div className="inline-error">{error}</div> : null}
 
-          <div className="workspace-panel">
-            <div className="workspace-head">
-              <div className="workspace-tabs" role="tablist" aria-label="Capture workspace">
-                <button
-                  className={`workspace-tab ${workspaceTab === "transcript" ? "workspace-tab-active" : ""}`}
-                  onClick={() => setWorkspaceTab("transcript")}
-                  role="tab"
-                  type="button"
-                >
-                  Transcript
-                </button>
-                <button
-                  className={`workspace-tab ${workspaceTab === "minutes" ? "workspace-tab-active" : ""}`}
-                  onClick={() => setWorkspaceTab("minutes")}
-                  role="tab"
-                  type="button"
-                >
-                  Minutes
-                </button>
-                <button
-                  className={`workspace-tab ${workspaceTab === "settings" ? "workspace-tab-active" : ""}`}
-                  onClick={() => setWorkspaceTab("settings")}
-                  role="tab"
-                  type="button"
-                >
-                  Minute settings
-                </button>
-              </div>
-              <div className="workspace-links">
+          <div className="record-links-card">
+            <div className="transcript-heading">Records</div>
+            <div className="record-links-list">
+              <div className="record-link-row">
+                <div>
+                  <strong>Transcript</strong>
+                  <span>{run.stats.speech_segment_count} finalized segments</span>
+                </div>
                 <a
                   className="action-link"
                   href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
@@ -1453,68 +1400,71 @@ function LiveRunCard({
                 >
                   Open transcript
                 </a>
-                {run.minutes ? (
-                  <a
-                    className="action-link"
-                    href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
-                    rel="noreferrer"
-                    target="_blank"
+              </div>
+              <div className="record-link-row">
+                <div>
+                  <strong>Minutes</strong>
+                  <span>
+                    {run.minutes
+                      ? `State: ${run.minutes.state}${run.minutes.last_update_at ? ` · updated ${formatTime(run.minutes.last_update_at)}` : ""}`
+                      : "Not running for this capture"}
+                  </span>
+                </div>
+                <div className="record-link-actions">
+                  {run.minutes ? (
+                    <a
+                      className="action-link"
+                      href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      Open minutes
+                    </a>
+                  ) : null}
+                  <button
+                    className="ghost-button"
+                    onClick={() => setShowMinuteSettings((current) => !current)}
+                    type="button"
                   >
-                    Open minutes
-                  </a>
-                ) : null}
+                    {showMinuteSettings ? "Hide settings" : run.minutes ? "Minute settings" : "Start minutes"}
+                  </button>
+                </div>
               </div>
             </div>
+          </div>
 
-            <div className="transcript-panel" hidden={workspaceTab !== "transcript"}>
-              {transcript.length === 0 ? (
-                <div className="transcript-empty">Waiting for transcript activity.</div>
-              ) : (
-                <div className="transcript-stream">
-                  {transcript.map((entry) => (
-                    <article
-                      className={`transcript-entry transcript-${entry.status}`}
-                      key={entry.row_id}
-                    >
-                      <div className="transcript-meta">
-                        <span className="transcript-time">
-                          {formatTranscriptTime(entry.started_at ?? entry.updated_at)}
-                        </span>
-                        <span className="transcript-speaker">
-                          {entry.speaker_label ?? "Unknown speaker"}
-                        </span>
-                        <span className={`transcript-status transcript-status-${entry.status}`}>
-                          {entry.status === "streaming" ? "live" : "done"}
-                        </span>
-                      </div>
-                      <p>{transcriptEntryText(entry)}</p>
-                    </article>
-                  ))}
-                </div>
-              )}
+        </div>
+      </div>
+      {showMinuteSettings ? (
+        <div className="modal-scrim" onClick={() => setShowMinuteSettings(false)} role="presentation">
+          <div className="modal-card" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Minute settings">
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">Minutes</p>
+                <h3>Minute settings</h3>
+              </div>
+              <button className="ghost-button" onClick={() => setShowMinuteSettings(false)} type="button">
+                Close
+              </button>
             </div>
-
             <MinutesPanel
-              hidden={workspaceTab === "transcript"}
-              mode={workspaceTab === "settings" ? "settings" : "preview"}
+              mode="settings"
               run={run}
               onChanged={onMinutesChanged}
             />
           </div>
         </div>
-      </div>
+      ) : null}
     </article>
   );
 }
 
 function LiveRuns({
   runs,
-  transcriptsByRun,
   onStopRun,
   onMinutesChanged,
 }: {
   runs: MeetingRunRecord[];
-  transcriptsByRun: Record<string, TranscriptEntry[]>;
   onStopRun: (meetingRunId: string) => Promise<void>;
   onMinutesChanged: (meetingRunId: string) => void;
 }) {
@@ -1538,7 +1488,6 @@ function LiveRuns({
             <LiveRunCard
               key={run.meeting_run_id}
               run={run}
-              transcript={transcriptsByRun[run.meeting_run_id] ?? []}
               onStopped={() => onStopRun(run.meeting_run_id)}
               onMinutesChanged={() => onMinutesChanged(run.meeting_run_id)}
             />
@@ -1666,42 +1615,15 @@ function HistoryTable({
 
 function App() {
   const [runs, setRuns] = useState<MeetingRunRecord[]>([]);
-  const [transcriptsByRun, setTranscriptsByRun] = useState<Record<string, TranscriptEntry[]>>({});
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [pageError, setPageError] = useState<string | null>(null);
   const refreshQueueRef = useRef<Set<string>>(new Set());
   const refreshTimerRef = useRef<number | null>(null);
-  const activeSpeakerByRunRef = useRef<Record<string, string | null>>({});
 
   const refreshRun = useCallback(async (meetingRunId: string) => {
     const response = await fetchJson<{ meeting_run: MeetingRunRecord }>(`/v1/meeting-runs/${meetingRunId}`);
     setRuns((currentRuns) => mergeRun(currentRuns, response.meeting_run));
-
-    if (isActiveRun(response.meeting_run)) {
-      let shouldLoadPreview = false;
-      setTranscriptsByRun((current) => {
-        shouldLoadPreview = !current[meetingRunId] || current[meetingRunId].length === 0;
-        return current;
-      });
-      if (shouldLoadPreview) {
-        const preview = await fetchSpeechPreview(meetingRunId).catch(() => []);
-        setTranscriptsByRun((current) => ({
-          ...current,
-          [meetingRunId]: preview,
-        }));
-      }
-      return;
-    }
-
-    setTranscriptsByRun((current) => {
-      if (!(meetingRunId in current)) {
-        return current;
-      }
-      const next = { ...current };
-      delete next[meetingRunId];
-      return next;
-    });
   }, []);
 
   const queueRunRefresh = useCallback((meetingRunId: string) => {
@@ -1725,13 +1647,6 @@ function App() {
     const orderedRuns = sortRuns(runsResponse.items);
     setRuns(orderedRuns);
     setHealth(healthResponse);
-
-    const previewEntries = await Promise.all(
-      orderedRuns
-        .filter((run) => isActiveRun(run))
-        .map(async (run) => [run.meeting_run_id, await fetchSpeechPreview(run.meeting_run_id).catch(() => [])] as const),
-    );
-    setTranscriptsByRun(Object.fromEntries(previewEntries));
     setPageError(null);
   }, []);
 
@@ -1769,32 +1684,6 @@ function App() {
       setConnectionState("live");
       const payload = JSON.parse(message.data) as { event_id: number; event: EventRecord };
       const event = payload.event;
-      if (event.kind === "zoom.speaker.active") {
-        activeSpeakerByRunRef.current[event.meeting_run_id] = speakerFromEvent(event);
-      }
-      if (event.kind === "transcription.segment.partial" || event.kind === "transcription.segment.final") {
-        const payload = event.payload as {
-          speech_segment_id: string;
-          text: string;
-          status: "partial" | "final";
-          speaker_label?: string | null;
-          started_at_unix_ms?: number | null;
-          ended_at_unix_ms?: number | null;
-        };
-        const segment: SpeechSegmentRecord = {
-          speech_segment_id: payload.speech_segment_id,
-          text: payload.text,
-          status: payload.status,
-          speaker_label: normalizeTranscriptSpeaker(payload.speaker_label) ?? activeSpeakerByRunRef.current[event.meeting_run_id] ?? null,
-          started_at: payload.started_at_unix_ms ? new Date(payload.started_at_unix_ms).toISOString() : null,
-          ended_at: payload.ended_at_unix_ms ? new Date(payload.ended_at_unix_ms).toISOString() : null,
-          emitted_at: event.ts,
-        };
-        setTranscriptsByRun((current) => ({
-          ...current,
-          [event.meeting_run_id]: appendTranscriptEvent(current[event.meeting_run_id] ?? [], segment),
-        }));
-      }
       if (event.kind !== "system.worker.heartbeat") {
         queueRunRefresh(event.meeting_run_id);
       }
@@ -1865,7 +1754,6 @@ function App() {
         <section className="main-column">
           <LiveRuns
             runs={activeRuns}
-            transcriptsByRun={transcriptsByRun}
             onStopRun={handleStopRun}
             onMinutesChanged={queueRunRefresh}
           />
