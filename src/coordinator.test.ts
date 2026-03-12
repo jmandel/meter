@@ -4,6 +4,7 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 
 import { CoordinatorApp } from "./coordinator";
+import { createMeetingRunLayout } from "./files";
 import type {
   AttendeeSummaryRecord,
   ChatMessageRecord,
@@ -32,6 +33,16 @@ function buildConfig(): InternalConfig {
     coordinator_base_url: "http://127.0.0.1:3100",
     coordinator_token: "test-token",
     heartbeat_interval_ms: 5000,
+  };
+}
+
+function buildTempConfig(tempDir: string): InternalConfig {
+  return {
+    ...buildConfig(),
+    listen_port: 0,
+    data_root: tempDir,
+    sqlite_path: path.join(tempDir, "index.sqlite"),
+    coordinator_base_url: "http://127.0.0.1:0",
   };
 }
 
@@ -669,6 +680,194 @@ test("launchAutomatedRescue streams a self-contained prompt over stdin", async (
       delete process.env.METER_AUTOMATED_RESCUE_OPERATOR;
     } else {
       process.env.METER_AUTOMATED_RESCUE_OPERATOR = originalOperator;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("minute jobs can start, stream, restart, and stop without leaking old visible state", async () => {
+  const tempDir = mkdtempSync(path.join("/tmp", "meter-minute-job-"));
+  const fakeMinuteTakerPath = path.join(tempDir, "fake-minute-taker.ts");
+  const originalEntry = process.env.METER_MINUTE_TAKER_ENTRY;
+  const originalCwd = process.env.METER_MINUTE_TAKER_CWD;
+  process.env.METER_MINUTE_TAKER_ENTRY = fakeMinuteTakerPath;
+  process.env.METER_MINUTE_TAKER_CWD = tempDir;
+
+  await Bun.write(fakeMinuteTakerPath, `#!/usr/bin/env bun
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+const args = new Map();
+for (let index = 2; index < Bun.argv.length; index += 1) {
+  const key = Bun.argv[index];
+  if (!key.startsWith("--")) continue;
+  const next = Bun.argv[index + 1];
+  if (!next || next.startsWith("--")) {
+    args.set(key, "true");
+    continue;
+  }
+  args.set(key, next);
+  index += 1;
+}
+
+const meetingRunId = args.get("--meeting-run-id");
+const minutesRoot = path.resolve(args.get("--minutes-root") ?? "./minutes");
+const runDir = path.join(minutesRoot, meetingRunId);
+const config = process.env.METER_MINUTE_TAKER_CONFIG_B64
+  ? JSON.parse(Buffer.from(process.env.METER_MINUTE_TAKER_CONFIG_B64, "base64").toString("utf8"))
+  : {};
+
+mkdirSync(runDir, { recursive: true });
+if (config.reset_output) {
+  rmSync(path.join(runDir, "minutes.md"), { force: true });
+}
+
+const prompt = (config.user_prompt_body ?? "default").trim() || "default";
+const finalPrompt = (config.user_final_prompt_body ?? "").trim();
+const write = (label) => {
+  writeFileSync(path.join(runDir, "minutes.md"), "# Minutes\\n\\nPrompt: " + prompt + "\\n\\nFinal: " + finalPrompt + "\\n\\nState: " + label + "\\n");
+};
+
+setTimeout(() => write("running"), 50);
+const timer = setInterval(() => {}, 1000);
+process.on("SIGTERM", () => {
+  clearInterval(timer);
+  setTimeout(() => process.exit(0), 20);
+});
+`);
+
+  const app = new CoordinatorApp(buildTempConfig(tempDir));
+  const meetingRunId = "meeting-run-test";
+  const roomId = "zoom:2193058682";
+
+  const waitFor = async (predicate: () => Promise<boolean> | boolean, timeoutMs = 5000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await predicate()) {
+        return;
+      }
+      await Bun.sleep(50);
+    }
+    throw new Error("Timed out waiting for condition");
+  };
+
+  try {
+    await app.start();
+    const port = (app as any).server.port as number;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const now = Date.parse("2026-03-12T06:48:00.000Z");
+    const layout = await createMeetingRunLayout(tempDir, meetingRunId, now, false);
+    const storage = (app as any).storage;
+    storage.upsertRoom({
+      room_id: roomId,
+      provider_room_key: "2193058682",
+      display_name: "Zoom 2193058682",
+      normalized_join_url: "https://app.zoom.us/wc/join/2193058682",
+      now_unix_ms: now,
+    });
+    storage.insertMeetingRun({
+      meeting_run_id: meetingRunId,
+      room_id: roomId,
+      normalized_join_url: "https://app.zoom.us/wc/join/2193058682",
+      requested_by: null,
+      bot_name: "Meeting Bot",
+      state: "capturing",
+      data_dir: layout.data_dir,
+      created_at_unix_ms: now,
+      tags: [],
+      options: buildMeetingRun().options,
+      paths: layout,
+    });
+
+    const startResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        user_prompt_body: "Alpha minutes",
+        user_final_prompt_body: "Tighten action items",
+      }),
+    });
+    expect(startResponse.status).toBe(201);
+    const started = await startResponse.json() as { minute_job: { minute_job_id: string } };
+
+    await waitFor(async () => {
+      const response = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes.md`);
+      return response.ok && (await response.text()).includes("Alpha minutes");
+    });
+
+    await waitFor(async () => {
+      const response = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`);
+      const body = await response.json() as {
+        minute_job: { minute_job_id: string } | null;
+        latest_version: { content_markdown: string } | null;
+      };
+      return body.latest_version?.content_markdown.includes("Alpha minutes") ?? false;
+    });
+
+    const currentMinutes = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`).then((value) => value.json()) as {
+      minute_job: { minute_job_id: string } | null;
+      latest_version: { content_markdown: string } | null;
+    };
+    expect(currentMinutes.minute_job?.minute_job_id).toBe(started.minute_job.minute_job_id);
+    expect(currentMinutes.latest_version?.content_markdown).toContain("Alpha minutes");
+
+    const streamResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/stream`);
+    expect(streamResponse.ok).toBe(true);
+    const streamReader = streamResponse.body?.getReader();
+    const firstChunk = streamReader ? await streamReader.read() : null;
+    const streamText = firstChunk?.value ? Buffer.from(firstChunk.value).toString("utf8") : "";
+    expect(streamText).toContain("event: minutes");
+    expect(streamText).toContain("Alpha minutes");
+    await streamReader?.cancel();
+
+    const restartResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/restart`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        user_prompt_body: "Beta minutes",
+      }),
+    });
+    expect(restartResponse.status).toBe(200);
+    const restarted = await restartResponse.json() as { minute_job: { minute_job_id: string } };
+    expect(restarted.minute_job.minute_job_id).not.toBe(started.minute_job.minute_job_id);
+
+    await waitFor(async () => {
+      const response = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`);
+      const body = await response.json() as {
+        minute_job: { minute_job_id: string } | null;
+        latest_version: { content_markdown: string } | null;
+      };
+      return body.minute_job?.minute_job_id === restarted.minute_job.minute_job_id
+        && body.latest_version?.content_markdown.includes("Beta minutes");
+    });
+
+    const markdownAfterRestart = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes.md`).then((value) => value.text());
+    expect(markdownAfterRestart).toContain("Beta minutes");
+    expect(markdownAfterRestart).not.toContain("Alpha minutes");
+
+    const stopResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(stopResponse.status).toBe(200);
+
+    await waitFor(async () => {
+      const response = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`);
+      const body = await response.json() as { minute_job: { state: string } | null };
+      return body.minute_job?.state === "completed";
+    });
+  } finally {
+    await app.stop();
+    if (originalEntry === undefined) {
+      delete process.env.METER_MINUTE_TAKER_ENTRY;
+    } else {
+      process.env.METER_MINUTE_TAKER_ENTRY = originalEntry;
+    }
+    if (originalCwd === undefined) {
+      delete process.env.METER_MINUTE_TAKER_CWD;
+    } else {
+      process.env.METER_MINUTE_TAKER_CWD = originalCwd;
     }
     rmSync(tempDir, { recursive: true, force: true });
   }

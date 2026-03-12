@@ -1,5 +1,7 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 
 import dashboard from "../ui/index.html";
 
@@ -31,6 +33,12 @@ import type {
   AudioCaptureStartedPayload,
   AudioCaptureStoppedPayload,
   BrowserConsolePayload,
+  MinuteJobRecord,
+  MinutePromptConfig,
+  MinuteVersionRecord,
+  RestartMinuteJobRequest,
+  StartMinuteJobRequest,
+  StopMinuteJobRequest,
   TranscriptionSegmentPayload,
   TranscriptionSessionStartedPayload,
   ZoomChatMessagePayload,
@@ -114,9 +122,38 @@ interface SimulationHandle {
   promise: Promise<void> | null;
 }
 
+interface MinuteJobHandle {
+  minute_job_id: string;
+  meeting_run_id: string;
+  room_id: string;
+  tmux_session_name: string;
+  working_dir: string;
+  latest_minutes_path: string;
+  stop_requested: boolean;
+  completed: boolean;
+  child: Bun.Subprocess<"ignore", "ignore", "inherit"> | null;
+  child_pid: number | null;
+  watcher: FSWatcher | null;
+  debounce_timer: Timer | null;
+}
+
 interface SseSubscriber {
   send(record: EventRecord): void;
   matches(record: EventRecord): boolean;
+  close(): void;
+}
+
+interface MinuteSnapshotUpdate {
+  meeting_run_id: string;
+  room_id: string;
+  minute_job: MinuteJobRecord;
+  version: MinuteVersionRecord;
+  content_markdown: string;
+}
+
+interface MinuteSubscriber {
+  send(update: MinuteSnapshotUpdate): void;
+  matches(update: MinuteSnapshotUpdate): boolean;
   close(): void;
 }
 
@@ -136,6 +173,26 @@ class EventBus {
   }
 
   subscribe(subscriber: SseSubscriber): () => void {
+    this.subscribers.add(subscriber);
+    return () => {
+      this.subscribers.delete(subscriber);
+      subscriber.close();
+    };
+  }
+}
+
+class MinutesBus {
+  private subscribers = new Set<MinuteSubscriber>();
+
+  publish(update: MinuteSnapshotUpdate): void {
+    for (const subscriber of this.subscribers) {
+      if (subscriber.matches(update)) {
+        subscriber.send(update);
+      }
+    }
+  }
+
+  subscribe(subscriber: MinuteSubscriber): () => void {
     this.subscribers.add(subscriber);
     return () => {
       this.subscribers.delete(subscriber);
@@ -198,8 +255,11 @@ async function serveFileContent(request: Request, filePath: string, contentType:
 export class CoordinatorApp {
   private storage!: AppDatabase;
   private readonly eventBus = new EventBus();
+  private readonly minutesBus = new MinutesBus();
   private readonly workersByMeetingRunId = new Map<string, WorkerHandle>();
   private readonly workersByWorkerId = new Map<string, WorkerHandle>();
+  private readonly minuteJobsByMeetingRunId = new Map<string, MinuteJobHandle>();
+  private readonly minuteJobsByMinuteJobId = new Map<string, MinuteJobHandle>();
   private readonly simulationsByMeetingRunId = new Map<string, SimulationHandle>();
   private readonly rescueClaimsByMeetingRunId = new Map<string, RescueClaimState>();
   private readonly automatedRescueAttemptsByMeetingRunId = new Map<string, AutomatedRescueAttempt>();
@@ -235,6 +295,7 @@ export class CoordinatorApp {
     this.storage = new AppDatabase(this.config);
     this.storage.init();
     await this.reconcileRecoveredMeetingRuns();
+    await this.reconcileRecoveredMinuteJobs();
     this.server = Bun.serve({
       hostname: this.config.listen_host,
       port: this.config.listen_port,
@@ -273,6 +334,20 @@ export class CoordinatorApp {
         last_error_message: run.last_error?.message ?? message,
       });
       await appendLogLine(this.coordinatorLogPath, `recovered stale run ${run.meeting_run_id} -> aborted`);
+    }
+  }
+
+  private async reconcileRecoveredMinuteJobs(): Promise<void> {
+    const now = nowUnixMs();
+    const staleJobs = this.storage.listRecoverableMinuteJobs(10_000);
+    for (const job of staleJobs) {
+      this.storage.patchMinuteJob(job.minute_job_id, {
+        state: "failed",
+        ended_at_unix_ms: now,
+        last_error_code: job.last_error?.code ?? "startup_recovery",
+        last_error_message: job.last_error?.message ?? "Meter started with no live minute-taker process",
+      });
+      await appendLogLine(this.coordinatorLogPath, `recovered stale minute job ${job.minute_job_id} -> failed`);
     }
   }
 
@@ -322,6 +397,18 @@ export class CoordinatorApp {
       if (match && request.method === "GET") {
         return this.handleZoomMeetingTranscript(url, match[1]);
       }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingMinutes(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes\.md$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingMinutesMarkdown(url, match[1], request);
+      }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes\/stream$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingMinutesStream(request, url, match[1]);
+      }
       match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/attendees$/);
       if (match && request.method === "GET") {
         return this.handleZoomMeetingAttendees(url, match[1]);
@@ -354,6 +441,34 @@ export class CoordinatorApp {
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/transcript\.md$/);
       if (match && request.method === "GET") {
         return this.handleMarkdownTranscript(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes$/);
+      if (match && request.method === "GET") {
+        return this.handleGetMinutes(match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/start$/);
+      if (match && request.method === "POST") {
+        return await this.handleStartMinutes(request, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/restart$/);
+      if (match && request.method === "POST") {
+        return await this.handleRestartMinutes(request, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/stop$/);
+      if (match && request.method === "POST") {
+        return await this.handleStopMinutes(request, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\.md$/);
+      if (match && request.method === "GET") {
+        return this.handleMinutesMarkdown(match[1], request);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/versions$/);
+      if (match && request.method === "GET") {
+        return this.handleListMinuteVersions(match[1], url);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/stream$/);
+      if (match && request.method === "GET") {
+        return this.handleMinuteStream(request, { meeting_run_id: match[1], room_id: null });
       }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/rescue$/);
       if (match && request.method === "GET") {
@@ -450,12 +565,17 @@ export class CoordinatorApp {
 
   private async stopInternal(): Promise<void> {
     const activeHandles = Array.from(this.workersByMeetingRunId.values()).filter((handle) => !handle.completed);
+    const activeMinuteHandles = Array.from(this.minuteJobsByMeetingRunId.values()).filter((handle) => !handle.completed);
     for (const handle of activeHandles) {
+      handle.stop_requested = true;
+    }
+    for (const handle of activeMinuteHandles) {
       handle.stop_requested = true;
     }
     await this.persistWorkersState();
     await Promise.allSettled([
       ...activeHandles.map((handle) => this.terminateWorker(handle)),
+      ...activeMinuteHandles.map((handle) => this.terminateMinuteJob(handle)),
       ...Array.from(this.automatedRescueAttemptsByMeetingRunId.keys()).map((meetingRunId) =>
         this.stopAutomatedRescueForMeetingRun(meetingRunId, "coordinator stopping"),
       ),
@@ -490,6 +610,235 @@ export class CoordinatorApp {
     ]);
   }
 
+  private closeMinuteJobWatcher(handle: MinuteJobHandle): void {
+    if (handle.debounce_timer) {
+      clearTimeout(handle.debounce_timer);
+      handle.debounce_timer = null;
+    }
+    handle.watcher?.close();
+    handle.watcher = null;
+  }
+
+  private async terminateMinuteJob(handle: MinuteJobHandle): Promise<void> {
+    this.closeMinuteJobWatcher(handle);
+    const pid = handle.child?.pid ?? handle.child_pid;
+    if (!pid || !this.isProcessAlive(pid)) {
+      return;
+    }
+
+    process.kill(pid, "SIGTERM");
+    await Promise.race([
+      handle.child?.exited ?? new Promise<number>((resolve) => setTimeout(() => resolve(0), 2000)),
+      new Promise<number>((resolve) => setTimeout(() => resolve(0), 2000)),
+    ]);
+
+    if (!this.isProcessAlive(pid)) {
+      return;
+    }
+
+    process.kill(pid, "SIGKILL");
+    await Promise.race([
+      handle.child?.exited ?? new Promise<number>((resolve) => setTimeout(() => resolve(0), 500)),
+      new Promise<number>((resolve) => setTimeout(() => resolve(0), 500)),
+    ]);
+  }
+
+  private scheduleMinuteSnapshot(handle: MinuteJobHandle, status: "live" | "final" = "live"): void {
+    if (handle.debounce_timer) {
+      clearTimeout(handle.debounce_timer);
+    }
+    handle.debounce_timer = setTimeout(() => {
+      void this.captureMinuteSnapshot(handle, status);
+    }, 750);
+  }
+
+  private async captureMinuteSnapshot(handle: MinuteJobHandle, status: "live" | "final"): Promise<void> {
+    handle.debounce_timer = null;
+    const currentJob = this.storage.getMinuteJobRecord(handle.minute_job_id);
+    if (!currentJob || !existsSync(handle.latest_minutes_path)) {
+      return;
+    }
+    let content: string;
+    try {
+      content = readFileSync(handle.latest_minutes_path, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+    const sha = this.hashText(content);
+    if (sha === currentJob.latest_content_sha256) {
+      return;
+    }
+    const ts = nowUnixMs();
+    const seq = currentJob.latest_version_seq + 1;
+    this.storage.insertMinuteVersion({
+      minute_version_id: uuidv7(ts),
+      minute_job_id: handle.minute_job_id,
+      meeting_run_id: handle.meeting_run_id,
+      room_id: handle.room_id,
+      seq,
+      status,
+      content_markdown: content,
+      content_sha256: sha,
+      created_at_unix_ms: ts,
+    });
+    const minuteJob = this.storage.getMinuteJobRecord(handle.minute_job_id);
+    const version = this.storage.getLatestMinuteVersionForMinuteJob(handle.minute_job_id);
+    if (!minuteJob || !version) {
+      return;
+    }
+    const payload = {
+      minute_job_id: minuteJob.minute_job_id,
+      version_seq: version.seq,
+      status: version.status,
+      updated_at: version.created_at,
+    };
+    const appended = this.storage.appendEvents([
+      this.buildCoordinatorEvent(handle.meeting_run_id, handle.room_id, "minutes.updated", payload, ts),
+    ], ts);
+    this.eventBus.publish(appended.records);
+    this.minutesBus.publish({
+      meeting_run_id: handle.meeting_run_id,
+      room_id: handle.room_id,
+      minute_job: minuteJob,
+      version,
+      content_markdown: content,
+    });
+  }
+
+  private watchMinuteJob(handle: MinuteJobHandle): void {
+    this.closeMinuteJobWatcher(handle);
+    mkdirSync(handle.working_dir, { recursive: true });
+    handle.watcher = watch(handle.working_dir, { persistent: false }, (_eventType, filename) => {
+      if (!filename) {
+        this.scheduleMinuteSnapshot(handle, "live");
+        return;
+      }
+      const name = filename.toString();
+      if (name === "minutes.md") {
+        this.scheduleMinuteSnapshot(handle, "live");
+      }
+    });
+    handle.watcher.on("error", async (error) => {
+      await appendLogLine(this.coordinatorLogPath, `minute watcher error ${handle.minute_job_id}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (existsSync(handle.latest_minutes_path)) {
+      this.scheduleMinuteSnapshot(handle, "live");
+    }
+  }
+
+  private async spawnMinuteJob(
+    meetingRun: MeetingRunRecord,
+    promptConfig: MinutePromptConfig,
+    restartedFromMinuteJobId: string | null,
+  ): Promise<MinuteJobRecord> {
+    const now = nowUnixMs();
+    const minuteJobId = uuidv7(now);
+    const workingDir = this.minuteRunDir(meetingRun.meeting_run_id);
+    mkdirSync(workingDir, { recursive: true });
+    const latestMinutesPath = path.join(workingDir, "minutes.md");
+    const tmuxSessionName = `minutes-${meetingRun.meeting_run_id}`;
+    const promptHash = this.hashText(JSON.stringify(promptConfig));
+    const entryScript = this.minuteTakerEntryScript();
+    const command = `${process.execPath} ${entryScript} --meeting-run-id ${meetingRun.meeting_run_id} --base-url ${this.config.coordinator_base_url}`;
+
+    this.storage.insertMinuteJob({
+      minute_job_id: minuteJobId,
+      meeting_run_id: meetingRun.meeting_run_id,
+      room_id: meetingRun.room_id,
+      state: "starting",
+      tmux_session_name: tmuxSessionName,
+      command,
+      prompt_label: promptConfig.prompt_label,
+      prompt_hash: promptHash,
+      user_prompt_body: promptConfig.user_prompt_body,
+      user_final_prompt_body: promptConfig.user_final_prompt_body,
+      working_dir: workingDir,
+      latest_minutes_path: latestMinutesPath,
+      started_at_unix_ms: now,
+      restarted_from_minute_job_id: restartedFromMinuteJobId,
+    });
+
+    const child = Bun.spawn([process.execPath, entryScript, "--meeting-run-id", meetingRun.meeting_run_id, "--base-url", this.config.coordinator_base_url, "--minutes-root", this.minutesRootDir()], {
+      cwd: this.minuteTakerWorkingDir(),
+      stdout: "ignore",
+      stderr: "inherit",
+      env: {
+        ...process.env,
+        METER_MINUTE_TAKER_CONFIG_B64: encodeBase64Json({
+          ...promptConfig,
+          reset_output: true,
+          tmux_session: tmuxSessionName,
+        }),
+      },
+    });
+
+    const handle: MinuteJobHandle = {
+      minute_job_id: minuteJobId,
+      meeting_run_id: meetingRun.meeting_run_id,
+      room_id: meetingRun.room_id,
+      tmux_session_name: tmuxSessionName,
+      working_dir: workingDir,
+      latest_minutes_path: latestMinutesPath,
+      stop_requested: false,
+      completed: false,
+      child,
+      child_pid: child.pid ?? null,
+      watcher: null,
+      debounce_timer: null,
+    };
+    this.minuteJobsByMeetingRunId.set(meetingRun.meeting_run_id, handle);
+    this.minuteJobsByMinuteJobId.set(minuteJobId, handle);
+    this.watchMinuteJob(handle);
+
+    this.storage.patchMinuteJob(minuteJobId, { state: "running" });
+    const startTs = nowUnixMs();
+    const appended = this.storage.appendEvents([
+      this.buildCoordinatorEvent(meetingRun.meeting_run_id, meetingRun.room_id, restartedFromMinuteJobId ? "minutes.job.restarting" : "minutes.job.started", {
+        minute_job_id: minuteJobId,
+        tmux_session_name: tmuxSessionName,
+        prompt_label: promptConfig.prompt_label,
+      }, startTs),
+    ], startTs);
+    this.eventBus.publish(appended.records);
+
+    child.exited.then(async (code) => {
+      const current = this.minuteJobsByMinuteJobId.get(minuteJobId);
+      if (!current || current.completed) {
+        return;
+      }
+      current.completed = true;
+      current.child = null;
+      current.child_pid = null;
+      this.closeMinuteJobWatcher(current);
+      const exitTs = nowUnixMs();
+      await this.captureMinuteSnapshot(current, "final");
+      const state = current.stop_requested || code === 0 ? "completed" : "failed";
+      this.storage.patchMinuteJob(minuteJobId, {
+        state,
+        ended_at_unix_ms: exitTs,
+        last_error_code: state === "failed" ? "minute_taker_exit" : null,
+        last_error_message: state === "failed" ? `Minute-taker exited with code ${code}` : null,
+      });
+      const kind = state === "failed" ? "minutes.job.failed" : "minutes.job.stopped";
+      const exitEvent = this.storage.appendEvents([
+        this.buildCoordinatorEvent(meetingRun.meeting_run_id, meetingRun.room_id, kind, {
+          minute_job_id: minuteJobId,
+          code,
+        }, exitTs),
+      ], exitTs);
+      this.eventBus.publish(exitEvent.records);
+      if (this.minuteJobsByMeetingRunId.get(meetingRun.meeting_run_id)?.minute_job_id === minuteJobId) {
+        this.minuteJobsByMeetingRunId.delete(meetingRun.meeting_run_id);
+      }
+      this.minuteJobsByMinuteJobId.delete(minuteJobId);
+    });
+
+    return this.storage.getMinuteJobRecord(minuteJobId) as MinuteJobRecord;
+  }
+
   private isProcessAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
@@ -501,6 +850,41 @@ export class CoordinatorApp {
 
   private getMeetingRun(meetingRunId: string): MeetingRunRecord | null {
     return this.storage.getMeetingRunRecord(meetingRunId);
+  }
+
+  private getLatestMinuteJob(meetingRunId: string): MinuteJobRecord | null {
+    return this.storage.getLatestMinuteJobRecordForMeetingRun(meetingRunId);
+  }
+
+  private minutesRootDir(): string {
+    return path.resolve(process.env.METER_MINUTES_ROOT?.trim() || path.join(this.automatedRescueConfig.repo_root, "minutes"));
+  }
+
+  private minuteRunDir(meetingRunId: string): string {
+    return path.join(this.minutesRootDir(), meetingRunId);
+  }
+
+  private minuteTakerEntryScript(): string {
+    return path.resolve(process.env.METER_MINUTE_TAKER_ENTRY?.trim() || new URL("../minute-taker/index.ts", import.meta.url).pathname);
+  }
+
+  private minuteTakerWorkingDir(): string {
+    return path.resolve(process.env.METER_MINUTE_TAKER_CWD?.trim() || this.automatedRescueConfig.repo_root);
+  }
+
+  private hashText(text: string): string {
+    return createHash("sha256").update(text).digest("hex");
+  }
+
+  private buildMinutePromptConfig(input: StartMinuteJobRequest | RestartMinuteJobRequest | null | undefined): MinutePromptConfig {
+    const promptLabel = input?.prompt_label?.trim() || null;
+    const userPromptBody = input?.user_prompt_body?.trim() || null;
+    const userFinalPromptBody = input?.user_final_prompt_body?.trim() || null;
+    return {
+      prompt_label: promptLabel,
+      user_prompt_body: userPromptBody,
+      user_final_prompt_body: userFinalPromptBody,
+    };
   }
 
   private zoomRoomIdFromMeetingId(meetingId: string): string {
@@ -958,6 +1342,108 @@ export class CoordinatorApp {
       room_id: roomId,
       meeting_run,
     });
+  }
+
+  private handleGetMinutes(meetingRunId: string): Response {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const minuteJob = this.getLatestMinuteJob(meetingRunId);
+    const latestVersion = minuteJob ? this.storage.getLatestMinuteVersionForMinuteJob(minuteJob.minute_job_id) : null;
+    return jsonResponse({
+      meeting_run_id: meetingRunId,
+      minute_job: minuteJob,
+      latest_version: latestVersion,
+    });
+  }
+
+  private handleZoomMeetingMinutes(url: URL, meetingId: string): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    return this.handleGetMinutes(meetingRun.meeting_run_id);
+  }
+
+  private async handleStartMinutes(request: Request, meetingRunId: string): Promise<Response> {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const existing = this.minuteJobsByMeetingRunId.get(meetingRunId);
+    if (existing && !existing.completed) {
+      return errorResponse(409, "minutes_already_running", "Minutes are already running for this meeting run");
+    }
+    const body = await parseJsonBody<StartMinuteJobRequest>(request).catch(() => ({} as StartMinuteJobRequest));
+    const minuteJob = await this.spawnMinuteJob(meetingRun, this.buildMinutePromptConfig(body), null);
+    return jsonResponse({ minute_job: minuteJob }, { status: 201 });
+  }
+
+  private async handleRestartMinutes(request: Request, meetingRunId: string): Promise<Response> {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const body = await parseJsonBody<RestartMinuteJobRequest>(request).catch(() => ({} as RestartMinuteJobRequest));
+    const current = this.minuteJobsByMeetingRunId.get(meetingRunId);
+    let restartedFrom: string | null = null;
+    if (current && !current.completed) {
+      restartedFrom = current.minute_job_id;
+      this.storage.patchMinuteJob(current.minute_job_id, { state: "restarting" });
+      current.stop_requested = true;
+      await this.terminateMinuteJob(current);
+    }
+    const minuteJob = await this.spawnMinuteJob(meetingRun, this.buildMinutePromptConfig(body), restartedFrom);
+    return jsonResponse({ minute_job: minuteJob }, { status: restartedFrom ? 200 : 201 });
+  }
+
+  private async handleStopMinutes(request: Request, meetingRunId: string): Promise<Response> {
+    if (!this.getMeetingRun(meetingRunId)) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const body = await parseJsonBody<StopMinuteJobRequest>(request).catch(() => ({} as StopMinuteJobRequest));
+    const current = this.minuteJobsByMeetingRunId.get(meetingRunId);
+    if (!current || current.completed) {
+      return errorResponse(409, "minutes_not_running", "Minutes are not running for this meeting run");
+    }
+    current.stop_requested = true;
+    this.storage.patchMinuteJob(current.minute_job_id, {
+      state: "stopping",
+    });
+    await this.terminateMinuteJob(current);
+    return jsonResponse({ ok: true });
+  }
+
+  private handleMinutesMarkdown(meetingRunId: string, _request: Request): Response {
+    const minuteJob = this.getLatestMinuteJob(meetingRunId);
+    if (!minuteJob || !existsSync(minuteJob.latest_minutes_path)) {
+      return errorResponse(404, "not_found", "Minutes not found");
+    }
+    const markdown = readFileSync(minuteJob.latest_minutes_path, "utf-8");
+    return new Response(markdown, {
+      headers: {
+        "content-type": "text/markdown; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  private handleZoomMeetingMinutesMarkdown(url: URL, meetingId: string, request: Request): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    return this.handleMinutesMarkdown(meetingRun.meeting_run_id, request);
+  }
+
+  private handleListMinuteVersions(meetingRunId: string, url: URL): Response {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const limit = Math.min(parseInteger(url.searchParams.get("limit"), 50), 200);
+    return jsonResponse(this.listResponse(this.storage.listMinuteVersionRecordsForMeetingRun(meetingRunId, limit)));
   }
 
   private handleGetRescueStatus(request: Request, meetingRunId: string): Response {
@@ -2555,6 +3041,80 @@ export class CoordinatorApp {
     return await serveFileContent(request, row.path, row.content_type);
   }
 
+  private handleMinuteStream(
+    request: Request,
+    filters: {
+      meeting_run_id: string | null;
+      room_id: string | null;
+    },
+  ): Response {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start: (controller) => {
+        const writeFrame = (eventName: string, id: string, data: unknown) => {
+          const chunk = `id: ${id}\nevent: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
+          controller.enqueue(encoder.encode(chunk));
+        };
+
+        if (filters.meeting_run_id) {
+          const minuteJob = this.getLatestMinuteJob(filters.meeting_run_id);
+          const latestVersion = minuteJob ? this.storage.getLatestMinuteVersionForMinuteJob(minuteJob.minute_job_id) : null;
+          if (minuteJob && latestVersion) {
+            writeFrame("minutes", latestVersion.minute_version_id, {
+              minute_job: minuteJob,
+              version: latestVersion,
+              content_markdown: latestVersion.content_markdown,
+            });
+          }
+        }
+
+        const subscriber: MinuteSubscriber = {
+          matches: (update) => {
+            if (filters.meeting_run_id && update.meeting_run_id !== filters.meeting_run_id) {
+              return false;
+            }
+            if (filters.room_id && update.room_id !== filters.room_id) {
+              return false;
+            }
+            return true;
+          },
+          send: (update) => {
+            writeFrame("minutes", update.version.minute_version_id, update);
+          },
+          close: () => {},
+        };
+
+        const unsubscribe = this.minutesBus.subscribe(subscriber);
+        const heartbeatInterval = setInterval(() => {
+          writeFrame("heartbeat", "0", {
+            ts: new Date().toISOString(),
+          });
+        }, 15_000);
+
+        const abort = () => {
+          clearInterval(heartbeatInterval);
+          unsubscribe();
+          try {
+            controller.close();
+          } catch {
+            // ignored
+          }
+        };
+
+        request.signal.addEventListener("abort", abort, { once: true });
+      },
+      cancel: () => {},
+    });
+
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+      },
+    });
+  }
+
   private handleEventStream(
     request: Request,
     filters: {
@@ -2689,6 +3249,17 @@ export class CoordinatorApp {
       room_id: null,
       kind: url.searchParams.get("kind"),
       source: url.searchParams.get("source"),
+    });
+  }
+
+  private handleZoomMeetingMinutesStream(request: Request, url: URL, meetingId: string): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    return this.handleMinuteStream(request, {
+      meeting_run_id: meetingRun.meeting_run_id,
+      room_id: null,
     });
   }
 

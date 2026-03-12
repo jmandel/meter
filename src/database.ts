@@ -10,6 +10,9 @@ import type {
   ErrorRaisedPayload,
   EventEnvelope,
   EventRecord,
+  MinuteJobRecord,
+  MinuteJobState,
+  MinuteVersionRecord,
   MeetingRunOptions,
   MeetingRunPaths,
   MeetingRunRecord,
@@ -84,6 +87,86 @@ interface MeetingRunRow {
   options_json: string;
   paths_json: string;
   heartbeat_ts_unix_ms: number | null;
+}
+
+interface MinuteJobInsertInput {
+  minute_job_id: string;
+  meeting_run_id: string;
+  room_id: string;
+  state: MinuteJobState;
+  tmux_session_name: string | null;
+  command: string | null;
+  prompt_label: string | null;
+  prompt_hash: string | null;
+  user_prompt_body: string | null;
+  user_final_prompt_body: string | null;
+  working_dir: string;
+  latest_minutes_path: string;
+  started_at_unix_ms: number;
+  restarted_from_minute_job_id: string | null;
+}
+
+interface MinuteJobPatch {
+  state?: MinuteJobState;
+  tmux_session_name?: string | null;
+  command?: string | null;
+  prompt_label?: string | null;
+  prompt_hash?: string | null;
+  user_prompt_body?: string | null;
+  user_final_prompt_body?: string | null;
+  latest_content_sha256?: string | null;
+  latest_version_seq?: number;
+  ended_at_unix_ms?: number | null;
+  last_update_at_unix_ms?: number | null;
+  last_error_code?: string | null;
+  last_error_message?: string | null;
+}
+
+interface MinuteJobRow {
+  minute_job_id: string;
+  meeting_run_id: string;
+  room_id: string;
+  state: MinuteJobState;
+  tmux_session_name: string | null;
+  command: string | null;
+  prompt_label: string | null;
+  prompt_hash: string | null;
+  user_prompt_body: string | null;
+  user_final_prompt_body: string | null;
+  working_dir: string;
+  latest_minutes_path: string;
+  latest_content_sha256: string | null;
+  latest_version_seq: number;
+  started_at_unix_ms: number;
+  ended_at_unix_ms: number | null;
+  last_update_at_unix_ms: number | null;
+  restarted_from_minute_job_id: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
+}
+
+interface MinuteVersionInsertInput {
+  minute_version_id: string;
+  minute_job_id: string;
+  meeting_run_id: string;
+  room_id: string;
+  seq: number;
+  status: "live" | "final";
+  content_markdown: string;
+  content_sha256: string;
+  created_at_unix_ms: number;
+}
+
+interface MinuteVersionRow {
+  minute_version_id: string;
+  minute_job_id: string;
+  meeting_run_id: string;
+  room_id: string;
+  seq: number;
+  status: "live" | "final";
+  content_markdown: string;
+  content_sha256: string;
+  created_at_unix_ms: number;
 }
 
 export class AppDatabase {
@@ -238,6 +321,45 @@ export class AppDatabase {
         open_ws_connections INTEGER,
         updated_at_unix_ms INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS minute_jobs (
+        minute_job_id TEXT PRIMARY KEY,
+        meeting_run_id TEXT NOT NULL REFERENCES meeting_runs(meeting_run_id),
+        room_id TEXT NOT NULL REFERENCES rooms(room_id),
+        state TEXT NOT NULL,
+        tmux_session_name TEXT,
+        command TEXT,
+        prompt_label TEXT,
+        prompt_hash TEXT,
+        user_prompt_body TEXT,
+        user_final_prompt_body TEXT,
+        working_dir TEXT NOT NULL,
+        latest_minutes_path TEXT NOT NULL,
+        latest_content_sha256 TEXT,
+        latest_version_seq INTEGER NOT NULL DEFAULT 0,
+        started_at_unix_ms INTEGER NOT NULL,
+        ended_at_unix_ms INTEGER,
+        last_update_at_unix_ms INTEGER,
+        restarted_from_minute_job_id TEXT,
+        last_error_code TEXT,
+        last_error_message TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_minute_jobs_meeting_run_started ON minute_jobs(meeting_run_id, started_at_unix_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_minute_jobs_state ON minute_jobs(state);
+
+      CREATE TABLE IF NOT EXISTS minute_versions (
+        minute_version_id TEXT PRIMARY KEY,
+        minute_job_id TEXT NOT NULL REFERENCES minute_jobs(minute_job_id),
+        meeting_run_id TEXT NOT NULL REFERENCES meeting_runs(meeting_run_id),
+        room_id TEXT NOT NULL REFERENCES rooms(room_id),
+        seq INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        content_markdown TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL,
+        created_at_unix_ms INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_minute_versions_job_seq ON minute_versions(minute_job_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_minute_versions_meeting_created ON minute_versions(meeting_run_id, created_at_unix_ms DESC);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS speech_segments_fts USING fts5(
         speech_segment_id UNINDEXED,
@@ -866,6 +988,210 @@ export class AppDatabase {
     };
   }
 
+  private mapMinuteJobRow(row: MinuteJobRow): MinuteJobRecord {
+    return {
+      minute_job_id: row.minute_job_id,
+      meeting_run_id: row.meeting_run_id,
+      room_id: row.room_id,
+      state: row.state,
+      tmux_session_name: row.tmux_session_name,
+      command: row.command,
+      prompt_label: row.prompt_label,
+      prompt_hash: row.prompt_hash,
+      user_prompt_body: row.user_prompt_body,
+      user_final_prompt_body: row.user_final_prompt_body,
+      working_dir: row.working_dir,
+      latest_minutes_path: row.latest_minutes_path,
+      latest_content_sha256: row.latest_content_sha256,
+      latest_version_seq: Number(row.latest_version_seq ?? 0),
+      started_at: toIso(row.started_at_unix_ms) ?? new Date(row.started_at_unix_ms).toISOString(),
+      ended_at: toIso(row.ended_at_unix_ms),
+      last_update_at: toIso(row.last_update_at_unix_ms),
+      restarted_from_minute_job_id: row.restarted_from_minute_job_id,
+      last_error: row.last_error_code
+        ? {
+            code: row.last_error_code,
+            message: row.last_error_message ?? "",
+          }
+        : null,
+    };
+  }
+
+  private mapMinuteVersionRow(row: MinuteVersionRow): MinuteVersionRecord {
+    return {
+      minute_version_id: row.minute_version_id,
+      minute_job_id: row.minute_job_id,
+      meeting_run_id: row.meeting_run_id,
+      room_id: row.room_id,
+      seq: Number(row.seq),
+      status: row.status,
+      content_markdown: row.content_markdown,
+      content_sha256: row.content_sha256,
+      created_at: toIso(row.created_at_unix_ms) ?? new Date(row.created_at_unix_ms).toISOString(),
+    };
+  }
+
+  getLatestMinuteJobRecordForMeetingRun(meetingRunId: string): MinuteJobRecord | null {
+    const row = this.db
+      .query(`
+        SELECT *
+        FROM minute_jobs
+        WHERE meeting_run_id = ?
+        ORDER BY started_at_unix_ms DESC
+        LIMIT 1
+      `)
+      .get(meetingRunId) as MinuteJobRow | null;
+    return row ? this.mapMinuteJobRow(row) : null;
+  }
+
+  getMinuteJobRecord(minuteJobId: string): MinuteJobRecord | null {
+    const row = this.db.query("SELECT * FROM minute_jobs WHERE minute_job_id = ?").get(minuteJobId) as MinuteJobRow | null;
+    return row ? this.mapMinuteJobRow(row) : null;
+  }
+
+  listRecoverableMinuteJobs(limit: number): MinuteJobRecord[] {
+    const rows = this.db
+      .query(`
+        SELECT *
+        FROM minute_jobs
+        WHERE state IN ('starting', 'running', 'stopping', 'restarting')
+        ORDER BY started_at_unix_ms DESC
+        LIMIT ?
+      `)
+      .all(limit) as MinuteJobRow[];
+    return rows.map((row) => this.mapMinuteJobRow(row));
+  }
+
+  insertMinuteJob(input: MinuteJobInsertInput): void {
+    this.db
+      .query(`
+        INSERT INTO minute_jobs (
+          minute_job_id,
+          meeting_run_id,
+          room_id,
+          state,
+          tmux_session_name,
+          command,
+          prompt_label,
+          prompt_hash,
+          user_prompt_body,
+          user_final_prompt_body,
+          working_dir,
+          latest_minutes_path,
+          latest_content_sha256,
+          latest_version_seq,
+          started_at_unix_ms,
+          ended_at_unix_ms,
+          last_update_at_unix_ms,
+          restarted_from_minute_job_id,
+          last_error_code,
+          last_error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, NULL, NULL, ?, NULL, NULL)
+      `)
+      .run(
+        input.minute_job_id,
+        input.meeting_run_id,
+        input.room_id,
+        input.state,
+        input.tmux_session_name,
+        input.command,
+        input.prompt_label,
+        input.prompt_hash,
+        input.user_prompt_body,
+        input.user_final_prompt_body,
+        input.working_dir,
+        input.latest_minutes_path,
+        input.started_at_unix_ms,
+        input.restarted_from_minute_job_id,
+      );
+  }
+
+  patchMinuteJob(minuteJobId: string, patch: MinuteJobPatch): void {
+    const assignments: string[] = [];
+    const values: unknown[] = [];
+    for (const [column, value] of Object.entries(patch)) {
+      assignments.push(`${column} = ?`);
+      values.push(value);
+    }
+    if (assignments.length === 0) {
+      return;
+    }
+    values.push(minuteJobId);
+    this.db.query(`UPDATE minute_jobs SET ${assignments.join(", ")} WHERE minute_job_id = ?`).run(...values);
+  }
+
+  insertMinuteVersion(input: MinuteVersionInsertInput): void {
+    this.db
+      .query(`
+        INSERT INTO minute_versions (
+          minute_version_id,
+          minute_job_id,
+          meeting_run_id,
+          room_id,
+          seq,
+          status,
+          content_markdown,
+          content_sha256,
+          created_at_unix_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        input.minute_version_id,
+        input.minute_job_id,
+        input.meeting_run_id,
+        input.room_id,
+        input.seq,
+        input.status,
+        input.content_markdown,
+        input.content_sha256,
+        input.created_at_unix_ms,
+      );
+    this.patchMinuteJob(input.minute_job_id, {
+      latest_version_seq: input.seq,
+      latest_content_sha256: input.content_sha256,
+      last_update_at_unix_ms: input.created_at_unix_ms,
+    });
+  }
+
+  listMinuteVersionRecordsForMeetingRun(meetingRunId: string, limit = 100): MinuteVersionRecord[] {
+    const rows = this.db
+      .query(`
+        SELECT *
+        FROM minute_versions
+        WHERE meeting_run_id = ?
+        ORDER BY created_at_unix_ms DESC
+        LIMIT ?
+      `)
+      .all(meetingRunId, limit) as MinuteVersionRow[];
+    return rows.map((row) => this.mapMinuteVersionRow(row));
+  }
+
+  getLatestMinuteVersionForMeetingRun(meetingRunId: string): MinuteVersionRecord | null {
+    const row = this.db
+      .query(`
+        SELECT *
+        FROM minute_versions
+        WHERE meeting_run_id = ?
+        ORDER BY created_at_unix_ms DESC
+        LIMIT 1
+      `)
+      .get(meetingRunId) as MinuteVersionRow | null;
+    return row ? this.mapMinuteVersionRow(row) : null;
+  }
+
+  getLatestMinuteVersionForMinuteJob(minuteJobId: string): MinuteVersionRecord | null {
+    const row = this.db
+      .query(`
+        SELECT *
+        FROM minute_versions
+        WHERE minute_job_id = ?
+        ORDER BY created_at_unix_ms DESC
+        LIMIT 1
+      `)
+      .get(minuteJobId) as MinuteVersionRow | null;
+    return row ? this.mapMinuteVersionRow(row) : null;
+  }
+
   private mapMeetingRunRow(row: MeetingRunRow): MeetingRunRecord {
     const parsedPaths = JSON.parse(row.paths_json) as Record<string, string | null>;
     return {
@@ -892,6 +1218,7 @@ export class AppDatabase {
       },
       options: JSON.parse(row.options_json) as MeetingRunOptions,
       stats: this.computeStats(row.meeting_run_id),
+      minutes: this.getLatestMinuteJobRecordForMeetingRun(row.meeting_run_id),
       last_error: row.last_error_code
         ? {
             code: row.last_error_code,

@@ -37,6 +37,9 @@ Meter is therefore a bridge between raw capture and legible meeting state. It is
   - override with `FFMPEG_BIN`
 - Optional: `MISTRAL_API_KEY` for realtime transcription
   - if `METER_TRANSCRIPTION_PROVIDER` is unset and this key is present, Meter now defaults to `mistral`
+- Optional for integrated live minutes:
+  - `tmux`
+  - `claude` CLI on `PATH`
 
 ## Quick Start
 
@@ -88,6 +91,7 @@ In practice, that means the main surfaces are:
 - the live dashboard for active runs
 - the per-meeting SSE stream for incremental updates
 - the markdown transcript endpoint for a single readable transcript view
+- the integrated minute-taker controls and live minutes panel in the dashboard
 - stable recurring-meeting aliases keyed by Zoom meeting ID
 - the stored event log and SQLite projection for later querying
 
@@ -174,9 +178,19 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `GET /v1/meeting-runs/:id/speakers`
 - `GET /v1/meeting-runs/:id/audio`
 - `GET /v1/meeting-runs/:id/transcript.md`
+- `GET /v1/meeting-runs/:id/minutes`
+- `POST /v1/meeting-runs/:id/minutes/start`
+- `POST /v1/meeting-runs/:id/minutes/restart`
+- `POST /v1/meeting-runs/:id/minutes/stop`
+- `GET /v1/meeting-runs/:id/minutes.md`
+- `GET /v1/meeting-runs/:id/minutes/versions`
+- `GET /v1/meeting-runs/:id/minutes/stream`
 - `GET /v1/zoom-meetings/:meeting_id`
 - `GET /v1/zoom-meetings/:meeting_id/meeting-runs`
 - `GET /v1/zoom-meetings/:meeting_id/transcript.md`
+- `GET /v1/zoom-meetings/:meeting_id/minutes`
+- `GET /v1/zoom-meetings/:meeting_id/minutes.md`
+- `GET /v1/zoom-meetings/:meeting_id/minutes/stream`
 - `GET /v1/zoom-meetings/:meeting_id/attendees`
 - `GET /v1/zoom-meetings/:meeting_id/attendees.md`
 - `GET /v1/zoom-meetings/:meeting_id/stream`
@@ -259,6 +273,25 @@ Simulation CLI helper:
 ```bash
 bun run meter.ts simulate --script examples/simulations/weekly-sync.meter
 ```
+
+## Integrated Minutes
+
+Meter can now supervise the existing minute-taker from the main app instead of requiring it to be launched separately by hand.
+
+Current behavior:
+
+- each minute-taking job still runs in its own tmux session for transparency
+- Meter watches `minutes.md` for settled changes and exposes them through API/SSE
+- the main dashboard lets you opt into minutes at capture start, then stop, restart, and re-steer minutes with prompt edits while the meeting is live
+- prompt drafts currently live in browser local storage, while the running prompt snapshot is stored with the minute job
+- restarting minutes replaces the visible live `minutes.md` for that meeting run; older versions remain available only as debug history through `minute_versions`
+
+The user-editable prompt surface is intentionally broad:
+
+- users edit the substantive minute-taking prompt body and optional finalization prompt body
+- Meter keeps the low-level operational prompt contract locked
+
+The live minutes panel in the dashboard tails the rendered Markdown from the managed minute-taker job. `GET /v1/meeting-runs/:id/minutes.md` returns the latest rendered document, and `GET /v1/meeting-runs/:id/minutes/stream` streams settled snapshot updates keyed to the current minute job for that meeting run.
 
 ## Configuration
 

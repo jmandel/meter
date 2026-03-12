@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   findActiveRun,
@@ -33,6 +33,27 @@ interface RunMetadata {
   meeting_run_id: string;
   room_id: string;
   base_url: string;
+  prompt_label?: string | null;
+}
+
+interface InjectedMinuteTakerConfig {
+  prompt_label?: string | null;
+  user_prompt_body?: string | null;
+  user_final_prompt_body?: string | null;
+  reset_output?: boolean;
+  tmux_session?: string | null;
+}
+
+function readInjectedConfig(): InjectedMinuteTakerConfig {
+  const encoded = process.env.METER_MINUTE_TAKER_CONFIG_B64?.trim();
+  if (!encoded) {
+    return {};
+  }
+  try {
+    return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as InjectedMinuteTakerConfig;
+  } catch (error) {
+    throw new Error(`Invalid METER_MINUTE_TAKER_CONFIG_B64: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function parseArgs(argv: string[]): Config {
@@ -164,6 +185,7 @@ async function runPollingLoop(
   config: Config,
   runId: string,
   runDir: string,
+  injectedConfig: InjectedMinuteTakerConfig,
   tracker: CursorTracker,
   tmux: TmuxSession,
 ): Promise<void> {
@@ -184,10 +206,10 @@ async function runPollingLoop(
         const chunk = processResponse(tracker, response);
         if (chunk) {
           await writeChunk(runDir, chunk.segmentIndex, chunk.content);
-          const msg = buildFinalMessage(chunk);
+          const msg = buildFinalMessage(chunk, injectedConfig.user_final_prompt_body ?? null);
           await pasteMessage(tmux, msg);
         } else {
-          const msg = buildFinalMessage(null);
+          const msg = buildFinalMessage(null, injectedConfig.user_final_prompt_body ?? null);
           await sendMessage(tmux, msg);
         }
         console.log("Waiting for minutes.md to update and settle...");
@@ -242,6 +264,7 @@ async function runPollingLoop(
 
 async function main() {
   const config = parseArgs(Bun.argv.slice(2));
+  const injectedConfig = readInjectedConfig();
   const client: MeterClient = { baseUrl: config.baseUrl };
 
   // Resolve meeting run ID
@@ -257,11 +280,22 @@ async function main() {
     meeting_run_id: runId,
     room_id: meetingRun.room_id,
     base_url: config.baseUrl,
+    prompt_label: injectedConfig.prompt_label ?? null,
   };
+  if (injectedConfig.reset_output) {
+    rmSync(`${runDir}/minutes.md`, { force: true });
+    rmSync(`${runDir}/chunks`, { recursive: true, force: true });
+    rmSync(`${runDir}/.system-prompt.txt`, { force: true });
+    rmSync(`${runDir}/.launch-claude.sh`, { force: true });
+    rmSync(`${runDir}/.user-prompt.txt`, { force: true });
+    rmSync(`${runDir}/.final-user-prompt.txt`, { force: true });
+    mkdirSync(`${runDir}/chunks`, { recursive: true });
+  }
   await Bun.write(`${runDir}/run.json`, `${JSON.stringify(metadata, null, 2)}\n`);
   console.log(`Run directory: ${runDir}`);
 
   // Default tmux session name
+  config.tmuxSession = injectedConfig.tmux_session?.trim() || config.tmuxSession;
   if (!config.tmuxSession) {
     config.tmuxSession = `minutes-${runId}`;
   }
@@ -287,7 +321,13 @@ async function main() {
   process.on("SIGTERM", shutdown);
 
   // Launch Claude with run dir as cwd -- prompts use relative paths
-  const systemPrompt = buildSystemPrompt({ meetingId, meetingRunId: runId });
+  await Bun.write(`${runDir}/.user-prompt.txt`, `${injectedConfig.user_prompt_body?.trim() ?? ""}\n`);
+  await Bun.write(`${runDir}/.final-user-prompt.txt`, `${injectedConfig.user_final_prompt_body?.trim() ?? ""}\n`);
+  const systemPrompt = buildSystemPrompt({
+    meetingId,
+    meetingRunId: runId,
+    userPromptBody: injectedConfig.user_prompt_body ?? null,
+  });
   await launchClaude(tmux, systemPrompt);
   console.log("Launched Claude in tmux session. Waiting for initialization...");
   await sleep(5000);
@@ -303,7 +343,7 @@ async function main() {
 
   // Run the polling loop
   const tracker = createTracker();
-  await runPollingLoop(client, config, runId, runDir, tracker, tmux);
+  await runPollingLoop(client, config, runId, runDir, injectedConfig, tracker, tmux);
 
   console.log("Minute-taker finished.");
   await shutdown();

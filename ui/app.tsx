@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { marked } from "marked";
 
 import {
   appendTranscriptEvent,
@@ -47,7 +48,37 @@ interface MeetingRunRecord {
   updated_at: string;
   worker: WorkerSummary | null;
   stats: MeetingRunStats;
+  minutes?: MinuteJobRecord | null;
   last_error: ApiErrorBody | null;
+}
+
+interface MinuteJobRecord {
+  minute_job_id: string;
+  meeting_run_id: string;
+  room_id: string;
+  state: "idle" | "starting" | "running" | "stopping" | "restarting" | "completed" | "failed";
+  tmux_session_name: string | null;
+  prompt_label: string | null;
+  prompt_hash: string | null;
+  user_prompt_body: string | null;
+  user_final_prompt_body: string | null;
+  latest_version_seq: number;
+  started_at: string;
+  ended_at: string | null;
+  last_update_at: string | null;
+}
+
+interface MinuteVersionRecord {
+  minute_version_id: string;
+  seq: number;
+  status: "live" | "final";
+  created_at: string;
+}
+
+interface MinuteStreamMessage {
+  minute_job: MinuteJobRecord;
+  version: MinuteVersionRecord;
+  content_markdown: string;
 }
 
 interface HealthResponse {
@@ -141,6 +172,14 @@ function formatRoomLabel(roomId: string): string {
   return roomId;
 }
 
+function renderMinutesMarkdown(markdown: string): string {
+  return marked.parse(markdown, {
+    async: false,
+    breaks: true,
+    gfm: true,
+  }) as string;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -206,6 +245,31 @@ function summarizeEvent(event: EventRecord): { title: string; detail: string } {
       return {
         title: "Active speaker",
         detail: event.payload?.speaker_display_name ?? "Unknown speaker",
+      };
+    case "minutes.job.started":
+      return {
+        title: "Minutes started",
+        detail: event.payload?.tmux_session_name ?? "Minute-taker running",
+      };
+    case "minutes.job.restarting":
+      return {
+        title: "Minutes restarted",
+        detail: event.payload?.tmux_session_name ?? "Minute-taker restarting",
+      };
+    case "minutes.updated":
+      return {
+        title: "Minutes updated",
+        detail: `Version ${event.payload?.version_seq ?? "?"}`,
+      };
+    case "minutes.job.failed":
+      return {
+        title: "Minutes failed",
+        detail: event.payload?.code ? `Exit ${event.payload.code}` : "Minute-taker exited unexpectedly",
+      };
+    case "minutes.job.stopped":
+      return {
+        title: "Minutes stopped",
+        detail: "Minute-taker stopped",
       };
     case "error.raised":
       return {
@@ -303,10 +367,32 @@ function NewCapture({
 }: {
   onCreated: (run: MeetingRunRecord) => void;
 }) {
+  const storageKeyBase = "meter:new-capture:minutes";
   const [joinUrl, setJoinUrl] = useState("");
   const [botName, setBotName] = useState("");
+  const [minutesEnabled, setMinutesEnabled] = useState(false);
+  const [minutePromptBody, setMinutePromptBody] = useState("");
+  const [minuteFinalPromptBody, setMinuteFinalPromptBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMinutesEnabled(window.localStorage.getItem(`${storageKeyBase}:enabled`) === "1");
+    setMinutePromptBody(window.localStorage.getItem(`${storageKeyBase}:prompt`) ?? "");
+    setMinuteFinalPromptBody(window.localStorage.getItem(`${storageKeyBase}:final`) ?? "");
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(`${storageKeyBase}:enabled`, minutesEnabled ? "1" : "0");
+  }, [minutesEnabled, storageKeyBase]);
+
+  useEffect(() => {
+    window.localStorage.setItem(`${storageKeyBase}:prompt`, minutePromptBody);
+  }, [minutePromptBody, storageKeyBase]);
+
+  useEffect(() => {
+    window.localStorage.setItem(`${storageKeyBase}:final`, minuteFinalPromptBody);
+  }, [minuteFinalPromptBody, storageKeyBase]);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -320,9 +406,27 @@ function NewCapture({
         join_url: joinUrl.trim(),
         bot_name: botName.trim() || undefined,
       });
+      let createdRun = response.meeting_run;
+      let minuteStartError: string | null = null;
+      if (minutesEnabled) {
+        try {
+          await postJson(`/v1/meeting-runs/${createdRun.meeting_run_id}/minutes/start`, {
+            prompt_label: null,
+            user_prompt_body: minutePromptBody,
+            user_final_prompt_body: minuteFinalPromptBody,
+          });
+          const refreshed = await fetchJson<{ meeting_run: MeetingRunRecord }>(`/v1/meeting-runs/${createdRun.meeting_run_id}`);
+          createdRun = refreshed.meeting_run;
+        } catch (minuteError) {
+          minuteStartError = minuteError instanceof Error ? minuteError.message : "Failed to start minutes";
+        }
+      }
       setJoinUrl("");
       setBotName("");
-      onCreated(response.meeting_run);
+      onCreated(createdRun);
+      if (minuteStartError) {
+        setError(`Capture started, but minutes did not start: ${minuteStartError}`);
+      }
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Failed to create meeting run");
     } finally {
@@ -357,6 +461,39 @@ function NewCapture({
             onChange={(inputEvent) => setBotName(inputEvent.target.value)}
           />
         </label>
+        <label className="field-toggle">
+          <input
+            checked={minutesEnabled}
+            disabled={submitting}
+            onChange={(inputEvent) => setMinutesEnabled(inputEvent.target.checked)}
+            type="checkbox"
+          />
+          <span>Start live minutes too</span>
+        </label>
+        {minutesEnabled ? (
+          <>
+            <label className="field">
+              <span>Minute prompt</span>
+              <textarea
+                rows={6}
+                value={minutePromptBody}
+                disabled={submitting}
+                onChange={(inputEvent) => setMinutePromptBody(inputEvent.target.value)}
+                placeholder="Customize the minute-taking prompt for this capture."
+              />
+            </label>
+            <label className="field">
+              <span>Finalization prompt</span>
+              <textarea
+                rows={4}
+                value={minuteFinalPromptBody}
+                disabled={submitting}
+                onChange={(inputEvent) => setMinuteFinalPromptBody(inputEvent.target.value)}
+                placeholder="Optional end-of-meeting cleanup guidance."
+              />
+            </label>
+          </>
+        ) : null}
         <p className="field-hint">Starts immediately. Paste a Zoom link and choose the name shown in the meeting.</p>
         {error ? <div className="inline-error">{error}</div> : null}
         <button className="primary-button" disabled={submitting || !joinUrl.trim()} type="submit">
@@ -440,14 +577,205 @@ function ActivityFeed({ events }: { events: EventRecord[] }) {
   );
 }
 
+function MinutesPanel({
+  run,
+  onChanged,
+}: {
+  run: MeetingRunRecord;
+  onChanged: () => void;
+}) {
+  type MinuteStreamState = ConnectionState | "idle";
+  const storageKeyBase = `meter:minutes:${run.room_id}`;
+  const [promptBody, setPromptBody] = useState("");
+  const [finalPromptBody, setFinalPromptBody] = useState("");
+  const [content, setContent] = useState("");
+  const [requestState, setRequestState] = useState<"idle" | "starting" | "restarting" | "stopping">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [streamState, setStreamState] = useState<MinuteStreamState>("idle");
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const renderedContent = useMemo(() => (content ? renderMinutesMarkdown(content) : ""), [content]);
+
+  useEffect(() => {
+    const savedPrompt = window.localStorage.getItem(`${storageKeyBase}:prompt`);
+    const savedFinalPrompt = window.localStorage.getItem(`${storageKeyBase}:final`);
+    setPromptBody(savedPrompt ?? run.minutes?.user_prompt_body ?? "");
+    setFinalPromptBody(savedFinalPrompt ?? run.minutes?.user_final_prompt_body ?? "");
+  }, [run.meeting_run_id, storageKeyBase]);
+
+  useEffect(() => {
+    window.localStorage.setItem(`${storageKeyBase}:prompt`, promptBody);
+  }, [promptBody, storageKeyBase]);
+
+  useEffect(() => {
+    window.localStorage.setItem(`${storageKeyBase}:final`, finalPromptBody);
+  }, [finalPromptBody, storageKeyBase]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const currentMinutes = run.minutes;
+    if (!currentMinutes) {
+      setContent("");
+      setStreamState("idle");
+      return;
+    }
+
+    setContent("");
+    setStreamState("connecting");
+    const eventSource = new EventSource(`/v1/meeting-runs/${run.meeting_run_id}/minutes/stream`);
+    eventSource.onopen = () => {
+      if (!cancelled) {
+        setStreamState("live");
+      }
+    };
+    eventSource.onerror = () => {
+      if (!cancelled) {
+        setStreamState("reconnecting");
+      }
+    };
+
+    const handleMinutes = (message: MessageEvent) => {
+      if (cancelled) {
+        return;
+      }
+      const payload = JSON.parse(message.data) as MinuteStreamMessage;
+      const viewport = contentRef.current;
+      const wasNearBottom = viewport
+        ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 40
+        : false;
+      setContent(payload.content_markdown);
+      if (viewport && wasNearBottom) {
+        window.requestAnimationFrame(() => {
+          viewport.scrollTop = viewport.scrollHeight;
+        });
+      }
+      setStreamState("live");
+    };
+
+    eventSource.addEventListener("minutes", handleMinutes as EventListener);
+    return () => {
+      cancelled = true;
+      eventSource.removeEventListener("minutes", handleMinutes as EventListener);
+      eventSource.close();
+    };
+  }, [run.meeting_run_id, run.minutes?.minute_job_id]);
+
+  const activeMinuteState = run.minutes?.state;
+  const minutesRunning = activeMinuteState === "starting" || activeMinuteState === "running" || activeMinuteState === "stopping" || activeMinuteState === "restarting";
+  const draftMatchesRunning = (run.minutes?.user_prompt_body ?? "") === promptBody
+    && (run.minutes?.user_final_prompt_body ?? "") === finalPromptBody;
+
+  const submit = async (action: "start" | "restart" | "stop") => {
+    setError(null);
+    setRequestState(action === "start" ? "starting" : action === "restart" ? "restarting" : "stopping");
+    try {
+      if (action === "stop") {
+        await postJson(`/v1/meeting-runs/${run.meeting_run_id}/minutes/stop`, {});
+      } else {
+        await postJson(`/v1/meeting-runs/${run.meeting_run_id}/minutes/${action}`, {
+          prompt_label: null,
+          user_prompt_body: promptBody,
+          user_final_prompt_body: finalPromptBody,
+        });
+      }
+      onChanged();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : `Failed to ${action} minutes`);
+    } finally {
+      setRequestState("idle");
+    }
+  };
+
+  return (
+    <div className="minutes-panel">
+      <div className="minutes-head">
+        <div className="transcript-heading">Live minutes</div>
+        <div className="minutes-head-meta">
+          <span className={`minutes-state minutes-state-${run.minutes?.state ?? "idle"}`}>
+            {run.minutes?.state ?? "idle"}
+          </span>
+          {run.minutes ? (
+            <a
+              className="transcript-link"
+              href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open markdown
+            </a>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="minutes-controls">
+        <label className="minutes-field">
+          <span>Minute prompt</span>
+          <textarea
+            rows={6}
+            value={promptBody}
+            onChange={(event) => setPromptBody(event.target.value)}
+            placeholder="Customize the minute-taking prompt for this meeting."
+          />
+        </label>
+        <label className="minutes-field">
+          <span>Finalization prompt</span>
+          <textarea
+            rows={4}
+            value={finalPromptBody}
+            onChange={(event) => setFinalPromptBody(event.target.value)}
+            placeholder="Optional end-of-meeting cleanup instructions."
+          />
+        </label>
+        <div className="minutes-actions">
+          {!run.minutes || !minutesRunning ? (
+            <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit("start")} type="button">
+              {requestState === "starting" ? "Starting minutes..." : "Start minutes"}
+            </button>
+          ) : (
+            <>
+              <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit("restart")} type="button">
+                {requestState === "restarting" ? "Restarting..." : "Restart minutes"}
+              </button>
+              <button className="ghost-button" disabled={requestState !== "idle"} onClick={() => void submit("stop")} type="button">
+                {requestState === "stopping" ? "Stopping..." : "Stop minutes"}
+              </button>
+            </>
+          )}
+          <span className={`minutes-draft ${draftMatchesRunning ? "minutes-draft-clean" : "minutes-draft-dirty"}`}>
+            {draftMatchesRunning ? "Draft matches running prompt" : "Draft differs from running prompt"}
+          </span>
+        </div>
+        <div className="minutes-meta-row">
+          <span>Stream: {streamState === "live" ? "live" : streamState}</span>
+          <span>Last update: {formatTime(run.minutes?.last_update_at ?? null)}</span>
+          <span>TMUX: {run.minutes?.tmux_session_name ?? "--"}</span>
+        </div>
+      </div>
+
+      {error ? <div className="inline-error">{error}</div> : null}
+
+      <div className="minutes-preview" ref={contentRef}>
+        {content ? (
+          <div className="minutes-markdown" dangerouslySetInnerHTML={{ __html: renderedContent }} />
+        ) : (
+          <div className="transcript-empty">
+            {run.minutes ? "Waiting for rendered minutes." : "Minutes are off for this capture."}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LiveRunCard({
   run,
   transcript,
   onStopped,
+  onMinutesChanged,
 }: {
   run: MeetingRunRecord;
   transcript: TranscriptEntry[];
   onStopped: () => Promise<void>;
+  onMinutesChanged: () => void;
 }) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -576,6 +904,8 @@ function LiveRunCard({
               </div>
             )}
           </div>
+
+          <MinutesPanel run={run} onChanged={onMinutesChanged} />
         </div>
       </div>
     </article>
@@ -586,10 +916,12 @@ function LiveRuns({
   runs,
   transcriptsByRun,
   onStopRun,
+  onMinutesChanged,
 }: {
   runs: MeetingRunRecord[];
   transcriptsByRun: Record<string, TranscriptEntry[]>;
   onStopRun: (meetingRunId: string) => Promise<void>;
+  onMinutesChanged: (meetingRunId: string) => void;
 }) {
   return (
     <section className="content-section">
@@ -613,6 +945,7 @@ function LiveRuns({
               run={run}
               transcript={transcriptsByRun[run.meeting_run_id] ?? []}
               onStopped={() => onStopRun(run.meeting_run_id)}
+              onMinutesChanged={() => onMinutesChanged(run.meeting_run_id)}
             />
           ))}
         </div>
@@ -663,6 +996,16 @@ function HistoryTable({ runs }: { runs: MeetingRunRecord[] }) {
                       >
                         Open transcript
                       </a>
+                      {run.minutes ? (
+                        <a
+                          className="history-link"
+                          href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          Open minutes
+                        </a>
+                      ) : null}
                     </div>
                   </td>
                   <td>{run.bot_name}</td>
@@ -884,7 +1227,12 @@ function App() {
         </aside>
 
         <section className="main-column">
-          <LiveRuns runs={activeRuns} transcriptsByRun={transcriptsByRun} onStopRun={handleStopRun} />
+          <LiveRuns
+            runs={activeRuns}
+            transcriptsByRun={transcriptsByRun}
+            onStopRun={handleStopRun}
+            onMinutesChanged={queueRunRefresh}
+          />
           <HistoryTable runs={historyRuns} />
         </section>
       </main>

@@ -30,6 +30,11 @@ export type EventKind =
   | "system.worker.failed"
   | "system.operator_assistance.claimed"
   | "system.operator_assistance.released"
+  | "minutes.job.started"
+  | "minutes.job.stopped"
+  | "minutes.job.failed"
+  | "minutes.job.restarting"
+  | "minutes.updated"
   | "browser.console"
   | "browser.page.loaded"
   | "browser.capture.bootstrap_ready"
@@ -157,7 +162,71 @@ export interface MeetingRunRecord {
   paths: MeetingRunPaths;
   options: MeetingRunOptions;
   stats: MeetingRunStats;
+  minutes?: MinuteJobRecord | null;
   last_error: ApiErrorBody | null;
+}
+
+export type MinuteJobState =
+  | "idle"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "restarting"
+  | "completed"
+  | "failed";
+
+export interface MinutePromptConfig {
+  prompt_label: string | null;
+  user_prompt_body: string | null;
+  user_final_prompt_body: string | null;
+}
+
+export interface MinuteJobRecord {
+  minute_job_id: string;
+  meeting_run_id: string;
+  room_id: string;
+  state: MinuteJobState;
+  tmux_session_name: string | null;
+  command: string | null;
+  prompt_label: string | null;
+  prompt_hash: string | null;
+  user_prompt_body: string | null;
+  user_final_prompt_body: string | null;
+  working_dir: string;
+  latest_minutes_path: string;
+  latest_content_sha256: string | null;
+  latest_version_seq: number;
+  started_at: string;
+  ended_at: string | null;
+  last_update_at: string | null;
+  restarted_from_minute_job_id: string | null;
+  last_error: ApiErrorBody | null;
+}
+
+export interface MinuteVersionRecord {
+  minute_version_id: string;
+  minute_job_id: string;
+  meeting_run_id: string;
+  room_id: string;
+  seq: number;
+  status: "live" | "final";
+  content_markdown: string;
+  content_sha256: string;
+  created_at: string;
+}
+
+export interface StartMinuteJobRequest {
+  prompt_label?: string | null;
+  user_prompt_body?: string | null;
+  user_final_prompt_body?: string | null;
+}
+
+export interface RestartMinuteJobRequest extends StartMinuteJobRequest {
+  reason?: string | null;
+}
+
+export interface StopMinuteJobRequest {
+  reason?: string | null;
 }
 
 export interface EventRecord<TPayload = unknown> {

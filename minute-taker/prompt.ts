@@ -14,8 +14,14 @@ function loadPrompt(name: string, vars: Record<string, string> = {}): string {
 export function buildSystemPrompt(config: {
   meetingId: string;
   meetingRunId: string;
+  userPromptBody?: string | null;
 }): string {
-  return loadPrompt("system.md", config);
+  const base = loadPrompt("system.md", config);
+  const userPromptBody = config.userPromptBody?.trim();
+  if (!userPromptBody) {
+    return base;
+  }
+  return `${base}\n\n## User Customization\n\n${userPromptBody}`;
 }
 
 export function buildInitialPrompt(): string {
@@ -36,8 +42,11 @@ export function formatChunkMessage(
 
 export function buildFinalMessage(
   chunk: { segmentIndex: number; content: string } | null,
+  userFinalPromptBody?: string | null,
 ): string {
-  const finalPrompt = loadPrompt("final.md");
+  const base = loadPrompt("final.md");
+  const customization = userFinalPromptBody?.trim();
+  const finalPrompt = customization ? `${base}\n\n## User Customization\n\n${customization}` : base;
   if (chunk) {
     return `--- Final transcript chunk ${chunk.segmentIndex} (meeting ended) ---\n${chunk.content}\n--- end chunk ---\n${finalPrompt}`;
   }
