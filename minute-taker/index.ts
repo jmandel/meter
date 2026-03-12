@@ -1,22 +1,15 @@
 #!/usr/bin/env bun
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   findActiveRun,
-  fetchAttendees,
   fetchTranscriptMd,
   fetchAttendeesMd,
   fetchMeetingRun,
   type MeterClient,
 } from "./api-client";
 import { createTracker, processResponse, type CursorTracker } from "./diff-tracker";
-import {
-  initializeMinutesStore,
-  syncAttendeesIntoMinutesState,
-  syncRenderedMinutes,
-  type MinutesStorePaths,
-} from "./store";
 import { createSession, killSession, launchClaude, pasteMessage, sendMessage, type TmuxSession } from "./tmux";
 import {
   buildSystemPrompt,
@@ -106,17 +99,6 @@ async function writeChunk(runDir: string, segmentIndex: number, content: string)
   await Bun.write(filename, content);
 }
 
-function writeMinuteOpLauncher(runDir: string): string {
-  const launcherPath = `${runDir}/minute-op`;
-  const cliPath = resolve(dirname(import.meta.path), "op-cli.ts");
-  writeFileSync(
-    launcherPath,
-    `#!/bin/bash\nset -euo pipefail\nexec bun run ${JSON.stringify(cliPath)} \"$@\"\n`,
-  );
-  chmodSync(launcherPath, 0o755);
-  return launcherPath;
-}
-
 interface MinutesSnapshot {
   exists: boolean;
   content: string | null;
@@ -172,7 +154,6 @@ async function runPollingLoop(
   config: Config,
   runId: string,
   runDir: string,
-  storePaths: MinutesStorePaths,
   tracker: CursorTracker,
   tmux: TmuxSession,
 ): Promise<void> {
@@ -222,7 +203,6 @@ async function runPollingLoop(
       const chunk = processResponse(tracker, response);
 
       if (!chunk) {
-        syncRenderedMinutes(runDir);
         console.log(`  No new content.`);
         continue;
       }
@@ -237,10 +217,8 @@ async function runPollingLoop(
       // Refresh attendees every 5th poll
       if (pollCount % 5 === 0) {
         try {
-          const attendeeItems = await fetchAttendees(client, runId);
-          syncAttendeesIntoMinutesState(runDir, attendeeItems);
           const attendees = await fetchAttendeesMd(client, runId);
-          await Bun.write(storePaths.attendeesPath, attendees);
+          await Bun.write(`${runDir}/attendees.md`, attendees);
         } catch {
           // Non-critical
         }
@@ -249,7 +227,6 @@ async function runPollingLoop(
       // Paste chunk content directly into Claude's conversation
       const msg = formatChunkMessage(chunk);
       await pasteMessage(tmux, msg);
-      syncRenderedMinutes(runDir);
 
       consecutiveErrors = 0;
     } catch (error) {
@@ -269,8 +246,7 @@ async function main() {
 
   // Resolve meeting run ID
   const runId = await resolveRunId(client, config);
-  const run = await fetchMeetingRun(client, runId);
-  const meetingId = config.meetingId ?? (run.room_id.startsWith("zoom:") ? run.room_id.slice(5) : runId);
+  const meetingId = config.meetingId ?? runId;
   const shortRunId = runId.slice(0, 8);
 
   // Per-run directory: minutes/{meetingId}-{shortRunId}/
@@ -278,17 +254,6 @@ async function main() {
   const runDir = resolve(config.minutesRoot, runDirName);
   mkdirSync(`${runDir}/chunks`, { recursive: true });
   console.log(`Run directory: ${runDir}`);
-  const storePaths = initializeMinutesStore(runDir, {
-    meetingId,
-    meetingRunId: runId,
-    title: run.room_id,
-    startedAt: run.started_at ?? run.created_at ?? null,
-    status: ["completed", "failed", "aborted"].includes(run.state)
-      ? run.state
-      : "live",
-  });
-  const launcherPath = writeMinuteOpLauncher(runDir);
-  console.log(`Minute op CLI: ${launcherPath}`);
 
   // Default tmux session name
   if (!config.tmuxSession) {
@@ -297,10 +262,8 @@ async function main() {
 
   // Fetch initial attendees
   try {
-    const attendeeItems = await fetchAttendees(client, runId);
-    syncAttendeesIntoMinutesState(runDir, attendeeItems);
     const attendees = await fetchAttendeesMd(client, runId);
-    await Bun.write(storePaths.attendeesPath, attendees);
+    await Bun.write(`${runDir}/attendees.md`, attendees);
     console.log("Fetched initial attendees.");
   } catch {
     console.log("Could not fetch attendees (meeting may still be starting).");
@@ -343,7 +306,7 @@ async function main() {
 
   // Run the polling loop
   const tracker = createTracker();
-  await runPollingLoop(client, config, runId, runDir, storePaths, tracker, tmux);
+  await runPollingLoop(client, config, runId, runDir, tracker, tmux);
 
   console.log("Minute-taker finished.");
   await shutdown();

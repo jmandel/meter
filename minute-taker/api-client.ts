@@ -10,27 +10,6 @@ export interface MeetingRunRecord {
   requested_by: string;
   bot_name: string | null;
   created_at_unix_ms: number;
-  created_at?: string;
-  started_at?: string | null;
-  updated_at?: string;
-}
-
-export interface AttendeeSummaryRecord {
-  attendee_key: string;
-  meeting_run_id: string;
-  room_id: string;
-  display_name: string | null;
-  aliases: string[];
-  attendee_ids: string[];
-  user_ids: number[];
-  is_host: boolean;
-  is_co_host: boolean;
-  is_guest: boolean;
-  present: boolean;
-  join_count: number;
-  leave_count: number;
-  first_seen_at: string | null;
-  last_seen_at: string | null;
 }
 
 interface ListResponse<T> {
@@ -84,16 +63,6 @@ export async function fetchAttendeesMd(
   meetingRunId: string,
 ): Promise<string> {
   return fetchText(`${client.baseUrl}/v1/meeting-runs/${meetingRunId}/attendees.md`);
-}
-
-export async function fetchAttendees(
-  client: MeterClient,
-  meetingRunId: string,
-): Promise<AttendeeSummaryRecord[]> {
-  const body = await fetchJson<{ items: AttendeeSummaryRecord[] }>(
-    `${client.baseUrl}/v1/meeting-runs/${meetingRunId}/attendees`,
-  );
-  return body.items;
 }
 
 export async function fetchMeetingRun(
