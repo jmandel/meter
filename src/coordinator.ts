@@ -1415,8 +1415,13 @@ export class CoordinatorApp {
       return errorResponse(404, "not_found", "Meeting run not found");
     }
     const redirectUrl = new URL("/minutes-view", this.resolvePublicBaseUrl(request));
+    redirectUrl.searchParams.set("details", `/v1/meeting-runs/${meetingRunId}/minutes`);
     redirectUrl.searchParams.set("stream", `/v1/meeting-runs/${meetingRunId}/minutes/stream`);
     redirectUrl.searchParams.set("markdown", `/v1/meeting-runs/${meetingRunId}/minutes.md`);
+    redirectUrl.searchParams.set("transcript", `/v1/meeting-runs/${meetingRunId}/transcript.md`);
+    redirectUrl.searchParams.set("start", `/v1/meeting-runs/${meetingRunId}/minutes/start`);
+    redirectUrl.searchParams.set("restart", `/v1/meeting-runs/${meetingRunId}/minutes/restart`);
+    redirectUrl.searchParams.set("stop", `/v1/meeting-runs/${meetingRunId}/minutes/stop`);
     redirectUrl.searchParams.set("title", formatRoomLabel(meetingRun.room_id));
     return Response.redirect(redirectUrl.toString(), 302);
   }
@@ -1427,8 +1432,13 @@ export class CoordinatorApp {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
     const redirectUrl = new URL("/minutes-view", this.resolvePublicBaseUrl(request));
+    redirectUrl.searchParams.set("details", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes`);
     redirectUrl.searchParams.set("stream", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes/stream${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
     redirectUrl.searchParams.set("markdown", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes.md${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
+    redirectUrl.searchParams.set("transcript", `/v1/meeting-runs/${meetingRun.meeting_run_id}/transcript.md`);
+    redirectUrl.searchParams.set("start", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/start`);
+    redirectUrl.searchParams.set("restart", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/restart`);
+    redirectUrl.searchParams.set("stop", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/stop`);
     redirectUrl.searchParams.set("title", formatRoomLabel(meetingRun.room_id));
     return Response.redirect(redirectUrl.toString(), 302);
   }

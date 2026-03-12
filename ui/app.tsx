@@ -1290,7 +1290,6 @@ function LiveRunCard({
 }) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showMinuteSettings, setShowMinuteSettings] = useState(false);
 
   const handleStop = async () => {
     setStopping(true);
@@ -1308,12 +1307,6 @@ function LiveRunCard({
       setStopping(false);
     }
   }, [run.state]);
-
-  useEffect(() => {
-    if (!run.minutes) {
-      setShowMinuteSettings(false);
-    }
-  }, [run.minutes]);
 
   return (
     <article className="run-card">
@@ -1411,23 +1404,14 @@ function LiveRunCard({
                   </span>
                 </div>
                 <div className="record-link-actions">
-                  {run.minutes ? (
-                    <a
-                      className="action-link"
-                      href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      Open minutes
-                    </a>
-                  ) : null}
-                  <button
-                    className="ghost-button"
-                    onClick={() => setShowMinuteSettings((current) => !current)}
-                    type="button"
+                  <a
+                    className="action-link"
+                    href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
+                    rel="noreferrer"
+                    target="_blank"
                   >
-                    {showMinuteSettings ? "Hide settings" : run.minutes ? "Minute settings" : "Start minutes"}
-                  </button>
+                    {run.minutes ? "Open minute workspace" : "Start minutes"}
+                  </a>
                 </div>
               </div>
             </div>
@@ -1435,26 +1419,6 @@ function LiveRunCard({
 
         </div>
       </div>
-      {showMinuteSettings ? (
-        <div className="modal-scrim" onClick={() => setShowMinuteSettings(false)} role="presentation">
-          <div className="modal-card" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label="Minute settings">
-            <div className="modal-head">
-              <div>
-                <p className="eyebrow">Minutes</p>
-                <h3>Minute settings</h3>
-              </div>
-              <button className="ghost-button" onClick={() => setShowMinuteSettings(false)} type="button">
-                Close
-              </button>
-            </div>
-            <MinutesPanel
-              mode="settings"
-              run={run}
-              onChanged={onMinutesChanged}
-            />
-          </div>
-        </div>
-      ) : null}
     </article>
   );
 }
@@ -1500,63 +1464,45 @@ function LiveRuns({
 
 function HistoryRow({
   run,
-  expanded,
-  onToggleExpanded,
-  onMinutesChanged,
+  onMinutesChanged: _onMinutesChanged,
 }: {
   run: MeetingRunRecord;
-  expanded: boolean;
-  onToggleExpanded: () => void;
   onMinutesChanged: (meetingRunId: string) => void;
 }) {
   return (
-    <>
-      <tr>
-        <td>
-          <div className="history-cell">
-            <span>{formatRoomLabel(run.room_id)}</span>
-            <small>Capture {shortId(run.meeting_run_id)}</small>
-            <div className="history-actions">
-              <a
-                className="history-action"
-                href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
-                rel="noreferrer"
-                target="_blank"
-              >
-                Open transcript
-              </a>
-              {run.minutes ? (
-                <a
-                  className="history-action"
-                  href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
-                  rel="noreferrer"
-                  target="_blank"
-                >
-                  Open minutes
-                </a>
-              ) : null}
-              <button className="history-action history-button" onClick={onToggleExpanded} type="button">
-                {expanded ? "Hide minute controls" : run.minutes ? "Rerun minutes" : "Start minutes"}
-              </button>
-            </div>
+    <tr>
+      <td>
+        <div className="history-cell">
+          <span>{formatRoomLabel(run.room_id)}</span>
+          <small>Capture {shortId(run.meeting_run_id)}</small>
+          <div className="history-actions">
+            <a
+              className="history-action"
+              href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open transcript
+            </a>
+            <a
+              className="history-action"
+              href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
+              rel="noreferrer"
+              target="_blank"
+            >
+              {run.minutes ? "Open minute workspace" : "Start minutes"}
+            </a>
           </div>
-        </td>
-        <td>{run.bot_name}</td>
-        <td><StateBadge state={run.state} /></td>
-        <td>{formatTime(run.started_at ?? run.created_at)}</td>
-        <td>{formatDuration(run.started_at ?? run.created_at, run.ended_at)}</td>
-        <td>{run.stats.speech_segment_count}</td>
-        <td>{run.stats.chat_message_count}</td>
-        <td>{formatBytes(run.stats.archive_audio_bytes)}</td>
-      </tr>
-      {expanded ? (
-        <tr className="history-minutes-row">
-          <td colSpan={8}>
-            <MinutesPanel run={run} onChanged={() => onMinutesChanged(run.meeting_run_id)} />
-          </td>
-        </tr>
-      ) : null}
-    </>
+        </div>
+      </td>
+      <td>{run.bot_name}</td>
+      <td><StateBadge state={run.state} /></td>
+      <td>{formatTime(run.started_at ?? run.created_at)}</td>
+      <td>{formatDuration(run.started_at ?? run.created_at, run.ended_at)}</td>
+      <td>{run.stats.speech_segment_count}</td>
+      <td>{run.stats.chat_message_count}</td>
+      <td>{formatBytes(run.stats.archive_audio_bytes)}</td>
+    </tr>
   );
 }
 
@@ -1567,8 +1513,6 @@ function HistoryTable({
   runs: MeetingRunRecord[];
   onMinutesChanged: (meetingRunId: string) => void;
 }) {
-  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
-
   return (
     <section className="content-section">
       <div className="section-head">
@@ -1599,8 +1543,6 @@ function HistoryTable({
               {runs.map((run) => (
                 <HistoryRow
                   key={run.meeting_run_id}
-                  expanded={expandedRunId === run.meeting_run_id}
-                  onToggleExpanded={() => setExpandedRunId((current) => current === run.meeting_run_id ? null : run.meeting_run_id)}
                   onMinutesChanged={onMinutesChanged}
                   run={run}
                 />

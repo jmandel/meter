@@ -26,7 +26,8 @@ Formatting and style rules:
 - Try hard to recognize FHIR tracker references and normalize them to canonical HL7 Jira links like [FHIR-34735](https://jira.hl7.org/browse/FHIR-34735).
 - Normalize both plain issue mentions like \`FHIR-34735\` and messy Jira URLs or other noisy issue URLs to the same canonical per-issue link.
 - Attribute key statements and action items to speakers when identified.
-- Organize by topic. When discussion shifts, start a new topic section.`;
+- Organize by topic. When discussion shifts, start a new topic section.
+- Avoid vague section titles like \`Process\`, \`Discussion\`, \`Updates\`, or \`Miscellaneous\`. Prefer a concrete subject-matter title, or keep the content under the current section if no specific title fits.`;
 
 export const DEFAULT_MINUTE_FINAL_PROMPT_BODY = `Finalize \`minutes.md\` with these cleanup rules:
 
@@ -36,4 +37,5 @@ export const DEFAULT_MINUTE_FINAL_PROMPT_BODY = `Finalize \`minutes.md\` with th
 - Review the \`## Attendees\` section and keep it one person per bullet. Do not use a single comma-separated bullet of names.
 - Normalize specific FHIR issue references to canonical HL7 Jira links like [FHIR-34735](https://jira.hl7.org/browse/FHIR-34735).
 - If the draft contains a noisy Jira URL for a specific issue, replace it with the canonical per-issue link.
-- Do a final pass for clarity and organization, but keep the structure that was built during the meeting.`;
+- Do a final pass for clarity and organization, but keep the structure that was built during the meeting.
+- Rename vague section titles like \`Process\`, \`Discussion\`, \`Updates\`, or \`Miscellaneous\` to something concrete if the underlying topic is clear.`;
