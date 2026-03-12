@@ -9,13 +9,31 @@ import {
   type MeterClient,
 } from "./api-client";
 import { createTracker, processResponse, type CursorTracker } from "./diff-tracker";
-import { createSession, killSession, launchClaude, pasteMessage, sendMessage, type TmuxSession } from "./tmux";
+import {
+  createSession,
+  killSession,
+  launchClaude,
+  pasteMessage,
+  rescueQueuedMessages,
+  sendMessage,
+  type TmuxSession,
+} from "./tmux";
 import {
   buildSystemPrompt,
   buildInitialPrompt,
   formatChunkMessage,
   buildFinalMessage,
 } from "./prompt";
+import {
+  createMinuteRescueState,
+  getLargeQueueDepthThreshold,
+  getUnacknowledgedChunkDepth,
+  noteChunkSent,
+  noteMinutesSnapshot,
+  noteRescue,
+  shouldRescueQueuedMinutes,
+  type MinuteRescueState,
+} from "./stall-rescue";
 
 interface Config {
   meetingId: string | null;
@@ -204,10 +222,13 @@ async function runPollingLoop(
 ): Promise<void> {
   let consecutiveErrors = 0;
   let pollCount = 0;
+  let rescueState: MinuteRescueState = createMinuteRescueState(readMinutesSnapshot(runDir), Date.now());
+  const largeQueueDepthThreshold = getLargeQueueDepthThreshold(config.pollIntervalMs);
 
   while (true) {
     pollCount++;
     let shouldExit = false;
+    rescueState = noteMinutesSnapshot(rescueState, readMinutesSnapshot(runDir), Date.now());
 
     try {
       // Check meeting state
@@ -259,6 +280,7 @@ async function runPollingLoop(
           // Paste chunk content directly into Claude's conversation
           const msg = formatChunkMessage(chunk);
           await pasteMessage(tmux, msg);
+          rescueState = noteChunkSent(rescueState, chunk.segmentIndex);
 
           consecutiveErrors = 0;
         }
@@ -274,6 +296,20 @@ async function runPollingLoop(
 
     if (shouldExit) {
       break;
+    }
+
+    const nowMs = Date.now();
+    if (shouldRescueQueuedMinutes(rescueState, nowMs, config.pollIntervalMs)) {
+      const queueDepth = getUnacknowledgedChunkDepth(rescueState);
+      const staleSeconds = Math.round((nowMs - rescueState.lastMinutesChangeAtMs) / 1000);
+      console.warn(
+        `Minutes appear stalled; ${queueDepth} chunks are queued without a visible minutes.md update for ${staleSeconds}s. Sending Claude Code rescue Esc/Enter.`,
+      );
+      await rescueQueuedMessages(tmux);
+      rescueState = noteRescue(rescueState, nowMs);
+      console.warn(
+        `Rescue sent (queue threshold ${largeQueueDepthThreshold}). Watching for the next minutes.md update before attempting another rescue.`,
+      );
     }
 
     await sleep(config.pollIntervalMs);

@@ -124,3 +124,16 @@ export async function sendMessage(
   const escaped = message.replace(/"/g, '\\"').replace(/\$/g, "\\$");
   await run(["send-keys", "-t", session.sessionName, escaped, "Enter"]);
 }
+
+/**
+ * Claude Code-specific rescue path: when too many transcript chunks have queued
+ * up behind a stalled turn, sending Esc collapses the pending chunk messages
+ * into the current input box and Enter resubmits that consolidated input. This
+ * is intentionally a UI-level hack for the current Claude Code terminal UX,
+ * not a general tmux or LLM control primitive.
+ */
+export async function rescueQueuedMessages(session: TmuxSession): Promise<void> {
+  await run(["send-keys", "-t", session.sessionName, "Escape"]);
+  await new Promise((r) => setTimeout(r, 200));
+  await run(["send-keys", "-t", session.sessionName, "Enter"]);
+}
