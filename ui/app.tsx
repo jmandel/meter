@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { marked } from "marked";
 
+import { DEFAULT_MINUTE_FINAL_PROMPT_BODY, DEFAULT_MINUTE_PROMPT_BODY } from "../src/minute-prompts";
 import {
   appendTranscriptEvent,
   buildTranscriptPreview,
@@ -178,6 +179,22 @@ function renderMinutesMarkdown(markdown: string): string {
     breaks: true,
     gfm: true,
   }) as string;
+}
+
+function effectiveMinutePromptBody(value: string | null | undefined): string {
+  return value?.trim() ? value : DEFAULT_MINUTE_PROMPT_BODY;
+}
+
+function effectiveMinuteFinalPromptBody(value: string | null | undefined): string {
+  return value?.trim() ? value : DEFAULT_MINUTE_FINAL_PROMPT_BODY;
+}
+
+function serializeMinutePromptBody(value: string, fallback: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === fallback.trim()) {
+    return null;
+  }
+  return trimmed;
 }
 
 function formatBytes(bytes: number): string {
@@ -378,8 +395,8 @@ function NewCapture({
 
   useEffect(() => {
     setMinutesEnabled(window.localStorage.getItem(`${storageKeyBase}:enabled`) === "1");
-    setMinutePromptBody(window.localStorage.getItem(`${storageKeyBase}:prompt`) ?? "");
-    setMinuteFinalPromptBody(window.localStorage.getItem(`${storageKeyBase}:final`) ?? "");
+    setMinutePromptBody(window.localStorage.getItem(`${storageKeyBase}:prompt`) ?? DEFAULT_MINUTE_PROMPT_BODY);
+    setMinuteFinalPromptBody(window.localStorage.getItem(`${storageKeyBase}:final`) ?? DEFAULT_MINUTE_FINAL_PROMPT_BODY);
   }, []);
 
   useEffect(() => {
@@ -412,8 +429,8 @@ function NewCapture({
         try {
           await postJson(`/v1/meeting-runs/${createdRun.meeting_run_id}/minutes/start`, {
             prompt_label: null,
-            user_prompt_body: minutePromptBody,
-            user_final_prompt_body: minuteFinalPromptBody,
+            user_prompt_body: serializeMinutePromptBody(minutePromptBody, DEFAULT_MINUTE_PROMPT_BODY),
+            user_final_prompt_body: serializeMinutePromptBody(minuteFinalPromptBody, DEFAULT_MINUTE_FINAL_PROMPT_BODY),
           });
           const refreshed = await fetchJson<{ meeting_run: MeetingRunRecord }>(`/v1/meeting-runs/${createdRun.meeting_run_id}`);
           createdRun = refreshed.meeting_run;
@@ -479,7 +496,6 @@ function NewCapture({
                 value={minutePromptBody}
                 disabled={submitting}
                 onChange={(inputEvent) => setMinutePromptBody(inputEvent.target.value)}
-                placeholder="Customize the minute-taking prompt for this capture."
               />
             </label>
             <label className="field">
@@ -489,7 +505,6 @@ function NewCapture({
                 value={minuteFinalPromptBody}
                 disabled={submitting}
                 onChange={(inputEvent) => setMinuteFinalPromptBody(inputEvent.target.value)}
-                placeholder="Optional end-of-meeting cleanup guidance."
               />
             </label>
           </>
@@ -598,8 +613,8 @@ function MinutesPanel({
   useEffect(() => {
     const savedPrompt = window.localStorage.getItem(`${storageKeyBase}:prompt`);
     const savedFinalPrompt = window.localStorage.getItem(`${storageKeyBase}:final`);
-    setPromptBody(savedPrompt ?? run.minutes?.user_prompt_body ?? "");
-    setFinalPromptBody(savedFinalPrompt ?? run.minutes?.user_final_prompt_body ?? "");
+    setPromptBody(savedPrompt ?? effectiveMinutePromptBody(run.minutes?.user_prompt_body));
+    setFinalPromptBody(savedFinalPrompt ?? effectiveMinuteFinalPromptBody(run.minutes?.user_final_prompt_body));
   }, [run.meeting_run_id, storageKeyBase]);
 
   useEffect(() => {
@@ -661,8 +676,10 @@ function MinutesPanel({
 
   const activeMinuteState = run.minutes?.state;
   const minutesRunning = activeMinuteState === "starting" || activeMinuteState === "running" || activeMinuteState === "stopping" || activeMinuteState === "restarting";
-  const draftMatchesRunning = (run.minutes?.user_prompt_body ?? "") === promptBody
-    && (run.minutes?.user_final_prompt_body ?? "") === finalPromptBody;
+  const runningPromptBody = effectiveMinutePromptBody(run.minutes?.user_prompt_body);
+  const runningFinalPromptBody = effectiveMinuteFinalPromptBody(run.minutes?.user_final_prompt_body);
+  const draftMatchesRunning = runningPromptBody === promptBody
+    && runningFinalPromptBody === finalPromptBody;
   const primaryAction = !run.minutes
     ? { action: "start" as const, label: "Start minutes", busyLabel: "Starting minutes..." }
     : minutesRunning
@@ -678,8 +695,8 @@ function MinutesPanel({
       } else {
         await postJson(`/v1/meeting-runs/${run.meeting_run_id}/minutes/${action}`, {
           prompt_label: null,
-          user_prompt_body: promptBody,
-          user_final_prompt_body: finalPromptBody,
+          user_prompt_body: serializeMinutePromptBody(promptBody, DEFAULT_MINUTE_PROMPT_BODY),
+          user_final_prompt_body: serializeMinutePromptBody(finalPromptBody, DEFAULT_MINUTE_FINAL_PROMPT_BODY),
         });
       }
       onChanged();
@@ -718,7 +735,6 @@ function MinutesPanel({
             rows={6}
             value={promptBody}
             onChange={(event) => setPromptBody(event.target.value)}
-            placeholder="Customize the minute-taking prompt for this meeting."
           />
         </label>
         <label className="minutes-field">
@@ -727,7 +743,6 @@ function MinutesPanel({
             rows={4}
             value={finalPromptBody}
             onChange={(event) => setFinalPromptBody(event.target.value)}
-            placeholder="Optional end-of-meeting cleanup instructions."
           />
         </label>
         <div className="minutes-actions">
@@ -977,27 +992,29 @@ function HistoryRow({
           <div className="history-cell">
             <span>{formatRoomLabel(run.room_id)}</span>
             <small>Capture {shortId(run.meeting_run_id)}</small>
-            <a
-              className="history-link"
-              href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
-              rel="noreferrer"
-              target="_blank"
-            >
-              Open transcript
-            </a>
-            {run.minutes ? (
+            <div className="history-actions">
               <a
-                className="history-link"
-                href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
+                className="history-action"
+                href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
                 rel="noreferrer"
                 target="_blank"
               >
-                Open minutes
+                Open transcript
               </a>
-            ) : null}
-            <button className="history-link history-button" onClick={onToggleExpanded} type="button">
-              {expanded ? "Hide minute controls" : run.minutes ? "Rerun minutes" : "Start minutes"}
-            </button>
+              {run.minutes ? (
+                <a
+                  className="history-action"
+                  href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Open minutes
+                </a>
+              ) : null}
+              <button className="history-action history-button" onClick={onToggleExpanded} type="button">
+                {expanded ? "Hide minute controls" : run.minutes ? "Rerun minutes" : "Start minutes"}
+              </button>
+            </div>
           </div>
         </td>
         <td>{run.bot_name}</td>

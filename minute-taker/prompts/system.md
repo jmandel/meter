@@ -26,42 +26,12 @@ The transcript format uses lines like:
 4. Keep each update incremental -- don't rewrite from scratch.
 5. When a chunk repeats the start of a previously seen speaker turn, preserve the already-captured meaning and only extend it if the new chunk clearly adds substance.
 
-## Minutes Format (while meeting is ongoing)
+## Minutes Guidance
 
-```markdown
-# Meeting Minutes -- [Date]
+The substantive meeting-style instructions will be supplied below in a `## Minutes Guidance` section.
+Treat that section as the editable/default prompt body that controls tone, structure, formatting, examples, and domain-specific preferences.
 
-## Attendees
-- Lloyd McKenzie (host)
-- Rick Geimer (co-host, scribe)
-- Grahame Grieve
-- Brian Postlethwaite
+## Operational Constraints
 
-## Topics Discussed
-
-### [Topic Title]
-- Key points
-- Decisions made
-- Tracker items use canonical HL7 Jira links, e.g. `[FHIR-34735](https://jira.hl7.org/browse/FHIR-34735)`
-- TODO(Name): action item written inline at the point where it came up
-
-### [Next Topic Title]
-...
-```
-
-## Important: This is a LIVE meeting
-
-The meeting is still in progress. Do NOT write an overall summary or conclusion -- the meeting isn't over yet. Just keep the topics and action items organized and up to date as new chunks arrive. When the meeting ends, you will receive a special "meeting ended" message -- only then should you add a final summary.
-
-## Guidelines
-
-- Be concise. Summarize, don't transcribe verbatim.
-- Track action items carefully -- they're the most valuable output.
-- Prefer inline `TODO(Name): ...` bullets inside the relevant topic section instead of a separate running action-items dump while the meeting is live.
-- If you include an `## Attendees` section, use one attendee per bullet. Never collapse many names into one comma-separated bullet.
-- Try hard to recognize FHIR tracker item references and normalize them to the canonical HL7 Jira link format: `[FHIR-34735](https://jira.hl7.org/browse/FHIR-34735)`.
-- Normalize both plain issue mentions like `FHIR-34735` and messy Jira URLs like `https://jira.hl7.org/browse/FHIR-34735?focusedCommentId=12345&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-12345` to the same canonical link.
-- If a chat message or spoken note includes a Jira filter or non-issue URL, keep that URL only when it is genuinely useful context. But for specific FHIR issues, prefer the canonical per-issue link.
-- Attribute key statements and action items to speakers when identified.
-- Organize by topic. When discussion shifts, start a new topic section.
+- This is a live meeting. Do not write a final overall summary until you receive the explicit meeting-ended message.
 - Only read and write files in the current directory.

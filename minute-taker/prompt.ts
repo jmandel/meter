@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
+import { DEFAULT_MINUTE_FINAL_PROMPT_BODY, DEFAULT_MINUTE_PROMPT_BODY } from "../src/minute-prompts";
+
 const PROMPTS_DIR = join(dirname(import.meta.path), "prompts");
 
 function loadPrompt(name: string, vars: Record<string, string> = {}): string {
@@ -17,11 +19,8 @@ export function buildSystemPrompt(config: {
   userPromptBody?: string | null;
 }): string {
   const base = loadPrompt("system.md", config);
-  const userPromptBody = config.userPromptBody?.trim();
-  if (!userPromptBody) {
-    return base;
-  }
-  return `${base}\n\n## User Customization\n\n${userPromptBody}`;
+  const userPromptBody = config.userPromptBody?.trim() || DEFAULT_MINUTE_PROMPT_BODY;
+  return `${base}\n\n## Minutes Guidance\n\n${userPromptBody}`;
 }
 
 export function buildInitialPrompt(): string {
@@ -45,8 +44,8 @@ export function buildFinalMessage(
   userFinalPromptBody?: string | null,
 ): string {
   const base = loadPrompt("final.md");
-  const customization = userFinalPromptBody?.trim();
-  const finalPrompt = customization ? `${base}\n\n## User Customization\n\n${customization}` : base;
+  const customization = userFinalPromptBody?.trim() || DEFAULT_MINUTE_FINAL_PROMPT_BODY;
+  const finalPrompt = `${base}\n\n## Finalization Guidance\n\n${customization}`;
   if (chunk) {
     return `--- Final transcript chunk ${chunk.segmentIndex} (meeting ended) ---\n${chunk.content}\n--- end chunk ---\n${finalPrompt}`;
   }

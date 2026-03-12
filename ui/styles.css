@@ -952,6 +952,13 @@ button {
   gap: 4px;
 }
 
+.history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .history-cell span {
   color: var(--surface-ink);
   font-size: 14px;
@@ -963,7 +970,15 @@ button {
   font-family: var(--mono);
 }
 
-.history-link {
+.history-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(211, 106, 46, 0.22);
+  background: rgba(255, 255, 255, 0.78);
   color: var(--accent-deep);
   font-size: 12px;
   font-weight: 700;
@@ -974,14 +989,15 @@ button {
   appearance: none;
   background: none;
   border: none;
-  padding: 0;
+  padding: 6px 10px;
   font: inherit;
   cursor: pointer;
   text-align: left;
 }
 
-.history-link:hover {
-  text-decoration: underline;
+.history-action:hover {
+  background: rgba(235, 221, 202, 0.96);
+  text-decoration: none;
 }
 
 .history-minutes-row td {
