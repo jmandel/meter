@@ -208,7 +208,7 @@ Automated rescue hooks:
   - if set, the coordinator may spawn this local command when rescue heuristics say a run looks stuck
   - example: `codex exec --yolo`
   - launched locally via `bash -lc "$METER_AUTOMATED_RESCUE_COMMAND"` from the repo root
-  - the rendered rescue prompt is streamed to the child over `stdin`
+  - the fully rendered rescue prompt, including run-specific context, is streamed to the child over `stdin`
 - `METER_AUTOMATED_RESCUE_ENABLED`
   - defaults to `true` when `METER_AUTOMATED_RESCUE_COMMAND` is set
 - `METER_AUTOMATED_RESCUE_TIMEOUT_MS`
@@ -223,17 +223,8 @@ Automated rescue hooks:
 Each automated rescue attempt also gets:
 
 - prompt/context/log files under `<meeting-run>/rescue/attempt-N.{prompt.md,context.json,log}`
-- injected environment variables:
-  - `METER_BASE_URL`
-  - `METER_MEETING_RUN_ID`
-  - `METER_ROOM_ID`
-  - `METER_OPERATOR_NAME`
-  - `METER_TIMEOUT_BUDGET`
-  - `METER_JOIN_URL`
-  - `METER_RESCUE_STATUS_JSON`
-  - `METER_RESCUE_PROMPT_PATH`
-  - `METER_RESCUE_CONTEXT_PATH`
-  - `METER_RESCUE_LOG_PATH`
+- no run-specific environment variables are required by the child command
+- the stdin prompt is intended to be self-contained for tools like `codex exec --yolo`
 
 ## Development
 

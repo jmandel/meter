@@ -18,24 +18,15 @@ Recommended automated contract:
 - the Meter server or a supervisor decides a run may need assistance
 - if automated rescue is enabled, it spawns an external agent CLI locally
 - this prompt is streamed to that agent over `stdin`
-- session-specific context is appended after this template or provided through CLI args / environment variables
+- session-specific context is rendered directly into this prompt before launch
 - the spawned agent has local access to the repo checkout and local network access to Meter and Chromium CDP
 - the spawned agent stays alive until it succeeds, fails, or times out
 
-Recommended injected values:
+Important constraint:
 
-- `METER_BASE_URL`
-- `METER_MEETING_RUN_ID`
-- `METER_ROOM_ID`
-- `METER_OPERATOR_NAME`
-- `METER_TIMEOUT_BUDGET`
-- `METER_JOIN_URL`
-- `METER_RESCUE_STATUS_JSON`
-- `METER_RESCUE_PROMPT_PATH`
-- `METER_RESCUE_CONTEXT_PATH`
-- `METER_RESCUE_LOG_PATH`
-
-If both environment variables and inline context are present, prefer the explicit run-specific context bundled with the rescue request.
+- do not assume any run-specific environment variables or CLI args are available
+- treat the fully rendered `stdin` prompt as the source of truth for run-specific context
+- if prompt/context files are mentioned below, those paths will also be rendered inline here
 
 ## What Meter Is
 
@@ -110,6 +101,14 @@ Anything the caller already knows about why rescue was triggered:
 
 ```text
 {{EXTRA_CONTEXT}}
+```
+
+### Local Rescue Artifacts
+
+If the coordinator persisted prompt/context/log files for this attempt, their paths should appear here:
+
+```json
+{{RESCUE_ARTIFACTS_JSON}}
 ```
 
 ## Useful Meter Surfaces

@@ -448,12 +448,19 @@ test("renderAutomatedRescuePrompt injects meeting context into the prompt", asyn
 
     const meetingRun = buildRescueMeetingRun();
     const rescue = app.buildRescueStatus(meetingRun, "http://127.0.0.1:3100");
-    const prompt = await app.renderAutomatedRescuePrompt(meetingRun, rescue);
+    const prompt = await app.renderAutomatedRescuePrompt(meetingRun, rescue, {
+      rescue_artifacts: {
+        prompt_path: "/tmp/prompt.md",
+        context_path: "/tmp/context.json",
+        log_path: "/tmp/attempt.log",
+      },
+    });
 
     expect(prompt).toContain("Meeting run ID: `meeting-run-test`");
     expect(prompt).toContain("Operator name: `codex-auto`");
     expect(prompt).toContain("Suggested reason: join_flow_stalled");
     expect(prompt).toContain("\"suggested_reason\": \"join_flow_stalled\"");
+    expect(prompt).toContain("\"prompt_path\": \"/tmp/prompt.md\"");
   } finally {
     if (originalCommand === undefined) {
       delete process.env.METER_AUTOMATED_RESCUE_COMMAND;
@@ -468,13 +475,12 @@ test("renderAutomatedRescuePrompt injects meeting context into the prompt", asyn
   }
 });
 
-test("launchAutomatedRescue streams stdin and injects env into the child process", async () => {
+test("launchAutomatedRescue streams a self-contained prompt over stdin", async () => {
   const originalCommand = process.env.METER_AUTOMATED_RESCUE_COMMAND;
   const originalOperator = process.env.METER_AUTOMATED_RESCUE_OPERATOR;
   const tempDir = mkdtempSync(path.join("/tmp", "meter-auto-rescue-test-"));
   const stdinPath = path.join(tempDir, "stdin.txt");
-  const envPath = path.join(tempDir, "env.txt");
-  process.env.METER_AUTOMATED_RESCUE_COMMAND = `cat > '${stdinPath}'; printf '%s\\n' "$METER_MEETING_RUN_ID" "$METER_BASE_URL" "$METER_RESCUE_PROMPT_PATH" "$METER_RESCUE_CONTEXT_PATH" "$METER_RESCUE_LOG_PATH" > '${envPath}'`;
+  process.env.METER_AUTOMATED_RESCUE_COMMAND = `cat > '${stdinPath}'`;
   process.env.METER_AUTOMATED_RESCUE_OPERATOR = "codex-auto";
 
   try {
@@ -495,26 +501,24 @@ test("launchAutomatedRescue streams stdin and injects env into the child process
 
     await app.launchAutomatedRescue(meetingRun, rescue, 1);
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      if (existsSync(stdinPath) && existsSync(envPath)) {
+      if (existsSync(stdinPath)) {
         break;
       }
       await Bun.sleep(50);
     }
 
     expect(existsSync(stdinPath)).toBe(true);
-    expect(existsSync(envPath)).toBe(true);
 
     const stdinText = readFileSync(stdinPath, "utf8");
-    const envLines = readFileSync(envPath, "utf8").trim().split("\n");
     const rescueDir = path.join(tempDir, "rescue");
 
     expect(stdinText).toContain("Meeting run ID: `meeting-run-test`");
-    expect(envLines[0]).toBe("meeting-run-test");
-    expect(envLines[1]).toBe("http://127.0.0.1:3100");
-    expect(envLines[2]).toBe(path.join(rescueDir, "attempt-1.prompt.md"));
-    expect(envLines[3]).toBe(path.join(rescueDir, "attempt-1.context.json"));
-    expect(envLines[4]).toBe(path.join(rescueDir, "attempt-1.log"));
+    expect(stdinText).toContain("Meter base URL: `http://127.0.0.1:3100`");
+    expect(stdinText).toContain(`"prompt_path": "${path.join(rescueDir, "attempt-1.prompt.md")}"`);
+    expect(stdinText).toContain(`"context_path": "${path.join(rescueDir, "attempt-1.context.json")}"`);
+    expect(stdinText).toContain(`"log_path": "${path.join(rescueDir, "attempt-1.log")}"`);
     expect(await Bun.file(path.join(rescueDir, "attempt-1.log")).exists()).toBe(true);
+    expect(await Bun.file(path.join(rescueDir, "attempt-1.context.json")).exists()).toBe(true);
   } finally {
     if (originalCommand === undefined) {
       delete process.env.METER_AUTOMATED_RESCUE_COMMAND;

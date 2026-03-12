@@ -1036,8 +1036,13 @@ export class CoordinatorApp {
     return await this.rescuePromptTemplatePromise;
   }
 
-  private async renderAutomatedRescuePrompt(meetingRun: MeetingRunRecord, rescueStatus: RescueStatusResponse): Promise<string> {
+  private async renderAutomatedRescuePrompt(
+    meetingRun: MeetingRunRecord,
+    rescueStatus: RescueStatusResponse,
+    runtimeContext?: Record<string, unknown>,
+  ): Promise<string> {
     const template = await this.loadRescuePromptTemplate();
+    const rescueArtifacts = (runtimeContext?.rescue_artifacts ?? null) as Record<string, unknown> | null;
     const extraContext = [
       "Automated rescue was triggered by the Meter coordinator.",
       rescueStatus.suggested_reason ? `Suggested reason: ${rescueStatus.suggested_reason}` : null,
@@ -1056,6 +1061,7 @@ export class CoordinatorApp {
       "{{OPERATOR_NAME}}": this.automatedRescueConfig.operator_name,
       "{{TIMEOUT_BUDGET}}": `${this.automatedRescueConfig.timeout_ms}ms`,
       "{{RESCUE_STATUS_JSON}}": JSON.stringify(rescueStatus, null, 2),
+      "{{RESCUE_ARTIFACTS_JSON}}": JSON.stringify(rescueArtifacts, null, 2),
       "{{EXTRA_CONTEXT}}": extraContext,
     };
     let rendered = template;
@@ -1070,8 +1076,11 @@ export class CoordinatorApp {
       "```json",
       JSON.stringify({
         generated_at: new Date().toISOString(),
+        base_url: this.rescueBaseUrl(),
+        operator_name: this.automatedRescueConfig.operator_name,
         rescue_status: rescueStatus,
         meeting_run: meetingRun,
+        ...(runtimeContext ?? {}),
       }, null, 2),
       "```",
       "",
@@ -1126,14 +1135,22 @@ export class CoordinatorApp {
     const promptPath = path.join(rescueDir, `attempt-${attemptNumber}.prompt.md`);
     const contextPath = path.join(rescueDir, `attempt-${attemptNumber}.context.json`);
     const logPath = path.join(rescueDir, `attempt-${attemptNumber}.log`);
-    const prompt = await this.renderAutomatedRescuePrompt(meetingRun, rescueStatus);
     const context = {
       generated_at: new Date().toISOString(),
       command: this.automatedRescueConfig.command,
       operator_name: this.automatedRescueConfig.operator_name,
+      base_url: this.rescueBaseUrl(),
+      rescue_artifacts: {
+        prompt_path: promptPath,
+        context_path: contextPath,
+        log_path: logPath,
+      },
       rescue_status: rescueStatus,
       meeting_run: meetingRun,
     };
+    const prompt = await this.renderAutomatedRescuePrompt(meetingRun, rescueStatus, {
+      rescue_artifacts: context.rescue_artifacts,
+    });
     await Bun.write(promptPath, prompt, { createPath: true });
     await Bun.write(contextPath, `${JSON.stringify(context, null, 2)}\n`, { createPath: true });
     await appendLogLine(logPath, `launching automated rescue attempt=${attemptNumber} reason=${rescueStatus.suggested_reason}`);
@@ -1155,19 +1172,6 @@ export class CoordinatorApp {
     try {
       const child = spawn("bash", ["-lc", this.automatedRescueConfig.command], {
         cwd: this.automatedRescueConfig.repo_root,
-        env: {
-          ...process.env,
-          METER_BASE_URL: this.rescueBaseUrl(),
-          METER_MEETING_RUN_ID: meetingRun.meeting_run_id,
-          METER_ROOM_ID: meetingRun.room_id,
-          METER_OPERATOR_NAME: this.automatedRescueConfig.operator_name,
-          METER_TIMEOUT_BUDGET: String(this.automatedRescueConfig.timeout_ms),
-          METER_JOIN_URL: meetingRun.normalized_join_url,
-          METER_RESCUE_STATUS_JSON: JSON.stringify(rescueStatus),
-          METER_RESCUE_PROMPT_PATH: promptPath,
-          METER_RESCUE_CONTEXT_PATH: contextPath,
-          METER_RESCUE_LOG_PATH: logPath,
-        },
         stdio: ["pipe", "pipe", "pipe"],
       });
       attempt.child = child;
