@@ -116,9 +116,16 @@ const styles = `
 
   .workspace {
     display: grid;
-    grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
     gap: 18px;
     align-items: start;
+  }
+
+  .workspace.with-settings {
+    grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
+  }
+
+  .workspace.viewer-only {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .panel {
@@ -135,6 +142,17 @@ const styles = `
     gap: 14px;
     position: sticky;
     top: 18px;
+  }
+
+  .controls-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .controls-head .section-title {
+    margin-bottom: 0;
   }
 
   .section-title {
@@ -382,7 +400,9 @@ const styles = `
   }
 
   @media (max-width: 980px) {
-    .workspace {
+    .workspace,
+    .workspace.with-settings,
+    .workspace.viewer-only {
       grid-template-columns: 1fr;
     }
 
@@ -613,6 +633,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [updatedLabel, setUpdatedLabel] = useState("Waiting for first minute snapshot…");
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(true);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const previousLeafTextsRef = useRef(new Set<string>());
   const lastMarkdownRef = useRef("");
@@ -632,6 +653,9 @@ function App() {
     const payload = await response.json() as MinuteDetailsResponse;
     setMinuteJob(payload.minute_job);
     setVersion(payload.latest_version);
+    if (forceDraftReset) {
+      setSettingsOpen(!payload.minute_job);
+    }
     if (payload.minute_job && (forceDraftReset || !formInitializedRef.current)) {
       setPromptBody(normalizePromptBody(payload.minute_job.user_prompt_body));
       setFinalPromptBody(normalizeFinalPromptBody(payload.minute_job.user_final_prompt_body));
@@ -791,6 +815,8 @@ function App() {
   const currentState = minuteJob?.state ?? "idle";
   const primaryAction = minuteJob ? "restart" : "start";
   const primaryLabel = minuteJob ? "Restart minutes" : "Start minutes";
+  const workspaceClassName = `workspace ${settingsOpen ? "with-settings" : "viewer-only"}`;
+  const settingsToggleLabel = settingsOpen ? "Hide settings" : minuteJob ? "Minute settings" : "Configure minutes";
 
   return (
     <main className="shell">
@@ -809,6 +835,9 @@ function App() {
             <a className="action-link" href={paths.transcriptPath} target="_blank" rel="noreferrer">Open transcript</a>
           ) : null}
           <a className="action-link" href={paths.markdownPath} target="_blank" rel="noreferrer">Open raw markdown</a>
+          <button className="ghost-button" onClick={() => setSettingsOpen((open) => !open)} type="button">
+            {settingsToggleLabel}
+          </button>
           <button className="ghost-button" disabled={!minuteJob?.tmux_session_name} onClick={() => void copyTmuxCommand()} type="button">
             Copy tmux attach
           </button>
@@ -819,9 +848,15 @@ function App() {
         </div>
       </header>
 
-      <section className="workspace">
+      <section className={workspaceClassName}>
+        {settingsOpen ? (
         <aside className="panel controls">
-          <p className="section-title">Minute settings</p>
+          <div className="controls-head">
+            <p className="section-title">Minute settings</p>
+            <button className="ghost-button" onClick={() => setSettingsOpen(false)} type="button">
+              Hide
+            </button>
+          </div>
           <label className="field">
             <span>Minute prompt</span>
             <AutoGrowTextarea value={promptBody} onChange={setPromptBody} />
@@ -872,6 +907,7 @@ function App() {
           </div>
           {error ? <div className="inline-error">{error}</div> : null}
         </aside>
+        ) : null}
 
         <section className="panel viewer-shell">
           <div className="viewer-head">
