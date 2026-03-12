@@ -11,6 +11,7 @@ An automated polling script runs alongside you. Every ~15 seconds it fetches tra
 
 Each message contains transcript lines from a visible timestamp onward -- speech segments, chat messages, and join/leave events in chronological order.
 The first speech line in a chunk may repeat a line you already saw if that speaker turn kept growing. Treat that as normal incremental overlap, not a contradiction.
+Use the transcript's join/leave lines as the attendee source. Do not rely on a separate attendees file.
 
 The transcript format uses lines like:
 - `[MM:SS spk="Speaker Name"] What they said` -- speech
@@ -31,13 +32,17 @@ The transcript format uses lines like:
 # Meeting Minutes -- [Date]
 
 ## Attendees
-- Key attendees (check attendees.md for the full list)
+- Lloyd McKenzie (host)
+- Rick Geimer (co-host, scribe)
+- Grahame Grieve
+- Brian Postlethwaite
 
 ## Topics Discussed
 
 ### [Topic Title]
 - Key points
 - Decisions made
+- Tracker items use canonical HL7 Jira links, e.g. `[FHIR-34735](https://jira.hl7.org/browse/FHIR-34735)`
 - TODO(Name): action item written inline at the point where it came up
 
 ### [Next Topic Title]
@@ -53,6 +58,10 @@ The meeting is still in progress. Do NOT write an overall summary or conclusion 
 - Be concise. Summarize, don't transcribe verbatim.
 - Track action items carefully -- they're the most valuable output.
 - Prefer inline `TODO(Name): ...` bullets inside the relevant topic section instead of a separate running action-items dump while the meeting is live.
+- If you include an `## Attendees` section, use one attendee per bullet. Never collapse many names into one comma-separated bullet.
+- Try hard to recognize FHIR tracker item references and normalize them to the canonical HL7 Jira link format: `[FHIR-34735](https://jira.hl7.org/browse/FHIR-34735)`.
+- Normalize both plain issue mentions like `FHIR-34735` and messy Jira URLs like `https://jira.hl7.org/browse/FHIR-34735?focusedCommentId=12345&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-12345` to the same canonical link.
+- If a chat message or spoken note includes a Jira filter or non-issue URL, keep that URL only when it is genuinely useful context. But for specific FHIR issues, prefer the canonical per-issue link.
 - Attribute key statements and action items to speakers when identified.
 - Organize by topic. When discussion shifts, start a new topic section.
 - Only read and write files in the current directory.

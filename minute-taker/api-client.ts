@@ -58,13 +58,6 @@ export async function fetchTranscriptMd(
   return fetchText(url);
 }
 
-export async function fetchAttendeesMd(
-  client: MeterClient,
-  meetingRunId: string,
-): Promise<string> {
-  return fetchText(`${client.baseUrl}/v1/meeting-runs/${meetingRunId}/attendees.md`);
-}
-
 export async function fetchMeetingRun(
   client: MeterClient,
   meetingRunId: string,

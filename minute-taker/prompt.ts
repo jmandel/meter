@@ -19,7 +19,7 @@ export function buildSystemPrompt(config: {
 }
 
 export function buildInitialPrompt(): string {
-  return "I'm ready to take meeting minutes. Transcript chunks will be pasted directly into this conversation. I'll maintain minutes.md incrementally, tolerate repeated growing speaker turns, and record action items inline as TODO(Name): ...";
+  return "I'm ready to take meeting minutes. Transcript chunks will be pasted directly into this conversation. I'll maintain minutes.md incrementally, use the transcript's join/leave lines as the attendee source, tolerate repeated growing speaker turns, and record action items inline as TODO(Name): ...";
 }
 
 export function formatChunkMessage(
@@ -29,7 +29,7 @@ export function formatChunkMessage(
     ? `--- Transcript chunk ${chunk.segmentIndex} (initial) ---`
     : `--- Transcript chunk ${chunk.segmentIndex} ---`;
   const instruction = chunk.isFirst
-    ? "Create minutes.md with initial minutes. Also check attendees.md for the attendee list."
+    ? "Create minutes.md with initial minutes. Use join/leave lines in the transcript to maintain attendees. If you include an attendees section, use one bullet per person, never one comma-separated mega-bullet."
     : "Update minutes.md with this content. The first line may repeat a previously seen growing speaker turn.";
   return `${header}\n${chunk.content}\n--- end chunk ---\n${instruction}`;
 }

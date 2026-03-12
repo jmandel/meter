@@ -5,7 +5,6 @@ import { resolve } from "node:path";
 import {
   findActiveRun,
   fetchTranscriptMd,
-  fetchAttendeesMd,
   fetchMeetingRun,
   type MeterClient,
 } from "./api-client";
@@ -27,6 +26,13 @@ interface Config {
   finalizationSettleMs: number;
   minutesRoot: string;
   tmuxSession: string;
+}
+
+interface RunMetadata {
+  meeting_id: string | null;
+  meeting_run_id: string;
+  room_id: string;
+  base_url: string;
 }
 
 function parseArgs(argv: string[]): Config {
@@ -90,6 +96,10 @@ async function resolveRunId(client: MeterClient, config: Config): Promise<string
   }
 
   throw new Error(`Timed out waiting for an active capture of meeting ${config.meetingId}`);
+}
+
+function extractZoomMeetingId(roomId: string): string | null {
+  return roomId.startsWith("zoom:") ? roomId.slice(5) : null;
 }
 
 async function writeChunk(runDir: string, segmentIndex: number, content: string): Promise<void> {
@@ -214,16 +224,6 @@ async function runPollingLoop(
       // Save chunk to disk for audit trail
       await writeChunk(runDir, chunk.segmentIndex, chunk.content);
 
-      // Refresh attendees every 5th poll
-      if (pollCount % 5 === 0) {
-        try {
-          const attendees = await fetchAttendeesMd(client, runId);
-          await Bun.write(`${runDir}/attendees.md`, attendees);
-        } catch {
-          // Non-critical
-        }
-      }
-
       // Paste chunk content directly into Claude's conversation
       const msg = formatChunkMessage(chunk);
       await pasteMessage(tmux, msg);
@@ -246,27 +246,24 @@ async function main() {
 
   // Resolve meeting run ID
   const runId = await resolveRunId(client, config);
-  const meetingId = config.meetingId ?? runId;
-  const shortRunId = runId.slice(0, 8);
+  const meetingRun = await fetchMeetingRun(client, runId);
+  const meetingId = config.meetingId ?? extractZoomMeetingId(meetingRun.room_id) ?? runId;
 
-  // Per-run directory: minutes/{meetingId}-{shortRunId}/
-  const runDirName = `${meetingId}-${shortRunId}`;
-  const runDir = resolve(config.minutesRoot, runDirName);
+  // Per-run directory: minutes/{meeting_run_id}/
+  const runDir = resolve(config.minutesRoot, runId);
   mkdirSync(`${runDir}/chunks`, { recursive: true });
+  const metadata: RunMetadata = {
+    meeting_id: meetingId,
+    meeting_run_id: runId,
+    room_id: meetingRun.room_id,
+    base_url: config.baseUrl,
+  };
+  await Bun.write(`${runDir}/run.json`, `${JSON.stringify(metadata, null, 2)}\n`);
   console.log(`Run directory: ${runDir}`);
 
   // Default tmux session name
   if (!config.tmuxSession) {
-    config.tmuxSession = `minutes-${meetingId}-${shortRunId}`;
-  }
-
-  // Fetch initial attendees
-  try {
-    const attendees = await fetchAttendeesMd(client, runId);
-    await Bun.write(`${runDir}/attendees.md`, attendees);
-    console.log("Fetched initial attendees.");
-  } catch {
-    console.log("Could not fetch attendees (meeting may still be starting).");
+    config.tmuxSession = `minutes-${runId}`;
   }
 
   // Create tmux session with run dir as cwd
@@ -301,7 +298,7 @@ async function main() {
   console.log(`Polling every ${config.pollIntervalMs / 1000}s...`);
   console.log(`Attach to session: tmux attach -t ${config.tmuxSession}`);
   console.log(`Output: ${runDir}/minutes.md`);
-  console.log(`Preview: bun run minute-taker/preview.ts --meeting-id ${meetingId}`);
+  console.log(`Preview: bun run minute-taker/preview.ts --meeting-run-id ${runId}`);
   console.log("");
 
   // Run the polling loop

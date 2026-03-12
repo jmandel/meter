@@ -19,6 +19,30 @@ for (let i = 2; i < Bun.argv.length; i++) {
 const minutesRoot = resolve(args.get("--minutes-root") ?? "./minutes");
 const port = parseInt(args.get("--port") ?? "3200", 10);
 
+interface RunMetadata {
+  meeting_id?: string | null;
+  meeting_run_id?: string | null;
+  room_id?: string | null;
+  base_url?: string | null;
+}
+
+function listRunDirNames(): string[] {
+  if (!existsSync(minutesRoot)) return [];
+  return readdirSync(minutesRoot)
+    .filter((d) => statSync(join(minutesRoot, d)).isDirectory())
+    .sort((a, b) => statSync(join(minutesRoot, b)).mtimeMs - statSync(join(minutesRoot, a)).mtimeMs);
+}
+
+function readRunMetadata(runDir: string): RunMetadata | null {
+  const metadataPath = join(runDir, "run.json");
+  if (!existsSync(metadataPath)) return null;
+  try {
+    return JSON.parse(readFileSync(metadataPath, "utf-8")) as RunMetadata;
+  } catch {
+    return null;
+  }
+}
+
 // Find run dir by meeting-id (latest matching), meeting-run-id, or explicit path
 function findRunDir(): string | null {
   const meetingId = args.get("--meeting-id");
@@ -27,24 +51,25 @@ function findRunDir(): string | null {
 
   if (explicit) return resolve(explicit);
 
-  if (!existsSync(minutesRoot)) return null;
-
-  const dirs = readdirSync(minutesRoot)
-    .filter((d) => {
-      const full = join(minutesRoot, d);
-      return statSync(full).isDirectory();
-    })
-    .sort()
-    .reverse(); // newest first (dirs contain run ID prefix which sorts chronologically)
+  const dirs = listRunDirNames();
 
   if (runId) {
-    const shortId = runId.slice(0, 8);
-    const match = dirs.find((d) => d.includes(shortId));
+    const exactDir = join(minutesRoot, runId);
+    if (existsSync(exactDir) && statSync(exactDir).isDirectory()) {
+      return exactDir;
+    }
+    const match = dirs.find((dirName) => {
+      const metadata = readRunMetadata(join(minutesRoot, dirName));
+      return metadata?.meeting_run_id === runId;
+    });
     return match ? join(minutesRoot, match) : null;
   }
 
   if (meetingId) {
-    const match = dirs.find((d) => d.startsWith(`${meetingId}-`));
+    const match = dirs.find((dirName) => {
+      const metadata = readRunMetadata(join(minutesRoot, dirName));
+      return metadata?.meeting_id === meetingId;
+    });
     return match ? join(minutesRoot, match) : null;
   }
 
@@ -52,12 +77,11 @@ function findRunDir(): string | null {
   return dirs[0] ? join(minutesRoot, dirs[0]) : null;
 }
 
-function listRuns(): { name: string; hasMinutes: boolean; mtime: Date }[] {
-  if (!existsSync(minutesRoot)) return [];
-  return readdirSync(minutesRoot)
-    .filter((d) => statSync(join(minutesRoot, d)).isDirectory())
+function listRuns(): { name: string; meetingId: string | null; hasMinutes: boolean; mtime: Date }[] {
+  return listRunDirNames()
     .map((d) => ({
       name: d,
+      meetingId: readRunMetadata(join(minutesRoot, d))?.meeting_id ?? null,
       hasMinutes: existsSync(join(minutesRoot, d, "minutes.md")),
       mtime: statSync(join(minutesRoot, d)).mtime,
     }))
@@ -71,6 +95,7 @@ function renderListPage(): string {
       (r) =>
         `<tr>
       <td><a href="/run/${r.name}">${r.name}</a></td>
+      <td>${r.meetingId ?? ""}</td>
       <td>${r.hasMinutes ? "yes" : "waiting..."}</td>
       <td>${r.mtime.toLocaleString()}</td>
     </tr>`,
@@ -87,7 +112,7 @@ function renderListPage(): string {
   a:hover { text-decoration: underline; }
 </style></head><body>
 <h1>Meeting Minutes</h1>
-${runs.length === 0 ? "<p>No runs yet.</p>" : `<table><tr><th>Run</th><th>Minutes</th><th>Last Modified</th></tr>${rows}</table>`}
+${runs.length === 0 ? "<p>No runs yet.</p>" : `<table><tr><th>Run</th><th>Meeting</th><th>Minutes</th><th>Last Modified</th></tr>${rows}</table>`}
 <script>setTimeout(() => location.reload(), 5000);</script>
 </body></html>`;
 }
