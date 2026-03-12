@@ -628,98 +628,8 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function appendRecentEvent(events: EventRecord[], nextEvent: EventRecord): EventRecord[] {
-  const deduped = [nextEvent, ...events.filter((event) => event.event_id !== nextEvent.event_id)];
-  return deduped.slice(0, 14);
-}
-
 function speakerFromEvent(event: EventRecord): string | null {
   return normalizeTranscriptSpeaker(event.payload?.speaker_label ?? event.payload?.speaker_display_name ?? null);
-}
-
-function summarizeEvent(event: EventRecord): { title: string; detail: string } {
-  switch (event.kind) {
-    case "system.meeting_run.created":
-      return {
-        title: "Capture requested",
-        detail: event.payload?.join_url ?? formatRoomLabel(event.room_id),
-      };
-    case "system.worker.started":
-      return {
-        title: "Capture starting",
-        detail: formatRoomLabel(event.room_id),
-      };
-    case "system.worker.completed":
-      return {
-        title: "Capture finished",
-        detail: formatRoomLabel(event.room_id),
-      };
-    case "system.worker.failed":
-      return {
-        title: "Capture failed",
-        detail: event.payload?.message ?? formatRoomLabel(event.room_id),
-      };
-    case "audio.capture.started":
-      return {
-        title: "Capture live",
-        detail: formatRoomLabel(event.room_id),
-      };
-    case "audio.capture.stopped":
-      return {
-        title: "Capture stopped",
-        detail: event.payload?.reason ?? formatRoomLabel(event.room_id),
-      };
-    case "transcription.segment.final":
-      return {
-        title: event.payload?.speaker_label ? `${event.payload.speaker_label}` : "Transcript update",
-        detail: event.payload?.text ?? "",
-      };
-    case "zoom.chat.message":
-      return {
-        title: event.payload?.sender_display_name ? `${event.payload.sender_display_name}` : "Chat",
-        detail: event.payload?.text ?? "",
-      };
-    case "zoom.speaker.active":
-      return {
-        title: "Active speaker",
-        detail: event.payload?.speaker_display_name ?? "Unknown speaker",
-      };
-    case "minutes.job.started":
-      return {
-        title: "Minutes started",
-        detail: event.payload?.tmux_session_name ?? "Minute-taker running",
-      };
-    case "minutes.job.restarting":
-      return {
-        title: "Minutes restarted",
-        detail: event.payload?.tmux_session_name ?? "Minute-taker restarting",
-      };
-    case "minutes.updated":
-      return {
-        title: "Minutes updated",
-        detail: `Version ${event.payload?.version_seq ?? "?"}`,
-      };
-    case "minutes.job.failed":
-      return {
-        title: "Minutes failed",
-        detail: event.payload?.code ? `Exit ${event.payload.code}` : "Minute-taker exited unexpectedly",
-      };
-    case "minutes.job.stopped":
-      return {
-        title: "Minutes stopped",
-        detail: "Minute-taker stopped",
-      };
-    case "error.raised":
-      return {
-        title: event.payload?.code ?? "Issue",
-        detail: event.payload?.message ?? "Worker reported an error",
-      };
-    default:
-      return {
-        title: event.kind.replaceAll(".", " "),
-        detail: shortId(event.meeting_run_id),
-      };
-  }
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -1086,42 +996,16 @@ function OverviewPanel({
   );
 }
 
-function ActivityFeed({ events }: { events: EventRecord[] }) {
-  return (
-    <section className="panel activity-panel">
-      <div className="panel-heading">
-        <p className="eyebrow">Live feed</p>
-        <h2>Recent activity</h2>
-      </div>
-      {events.length === 0 ? (
-        <div className="empty-panel">No recent activity yet.</div>
-      ) : (
-        <div className="activity-list">
-          {events.map((event) => {
-            const summary = summarizeEvent(event);
-            return (
-              <article className="activity-item" key={event.event_id}>
-                <div className="activity-meta">
-                  <span className="activity-kind">{summary.title}</span>
-                  <span className="activity-time">{formatTime(event.ts)}</span>
-                </div>
-                <p className="activity-detail">{summary.detail}</p>
-                <span className="activity-run">Capture {shortId(event.meeting_run_id)}</span>
-              </article>
-            );
-          })}
-        </div>
-      )}
-    </section>
-  );
-}
-
 function MinutesPanel({
   run,
   onChanged,
+  mode = "preview",
+  hidden = false,
 }: {
   run: MeetingRunRecord;
   onChanged: () => void;
+  mode?: "preview" | "settings";
+  hidden?: boolean;
 }) {
   type MinuteStreamState = ConnectionState | "idle";
   const [content, setContent] = useState("");
@@ -1237,7 +1121,7 @@ function MinutesPanel({
   };
 
   return (
-    <div className="minutes-panel">
+    <div className={`minutes-panel minutes-panel-${mode}`} hidden={hidden}>
       <div className="minutes-head">
         <div className="transcript-heading">Live minutes</div>
         <div className="minutes-head-meta">
@@ -1247,143 +1131,180 @@ function MinutesPanel({
         </div>
       </div>
 
-      <div className="minutes-controls">
-        <div className="minutes-preset-row">
-          <label className="minutes-field minutes-preset-picker">
-            <span>Prompt preset</span>
-            <select
-              value={minuteDraft.selectedSource}
-              onChange={(inputEvent) => minuteDraft.selectSource(inputEvent.target.value as MinutePresetSource)}
-            >
-              {run.minutes ? <option value="run">This run's saved settings</option> : null}
-              <option value="default">Meter default</option>
-              {minuteDraft.presets.map((preset) => (
-                <option key={preset.name} value={minutePresetSourceForName(preset.name)}>
-                  {preset.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <span className={`minutes-draft ${minuteDraft.hasUnsavedChanges ? "minutes-draft-dirty" : "minutes-draft-clean"}`}>
-            {minuteDraft.hasUnsavedChanges ? "Unsaved local preset changes" : `Using ${minuteDraft.selectedLabel}`}
-          </span>
-          {minuteDraft.selectedPresetName && !minuteDraft.hasUnsavedChanges ? (
-            <button className="ghost-button" disabled={requestState !== "idle"} onClick={minuteDraft.deleteSelectedPreset} type="button">
-              Delete preset
-            </button>
+      {mode === "preview" ? (
+        <>
+          <div className="minutes-actions">
+            {!minutesRunning ? (
+              <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit(primaryAction.action)} type="button">
+                {requestState === (primaryAction.action === "start" ? "starting" : "restarting") ? primaryAction.busyLabel : primaryAction.label}
+              </button>
+            ) : (
+              <>
+                <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit("restart")} type="button">
+                  {requestState === "restarting" ? "Restarting..." : "Restart minutes"}
+                </button>
+                <button className="ghost-button" disabled={requestState !== "idle"} onClick={() => void submit("stop")} type="button">
+                  {requestState === "stopping" ? "Stopping..." : "Stop minutes"}
+                </button>
+              </>
+            )}
+            <div className="minutes-link-row">
+              {run.minutes ? (
+                <>
+                  <a
+                    className="action-link"
+                    href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Open live view
+                  </a>
+                  <a
+                    className="action-link"
+                    href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Open raw markdown
+                  </a>
+                </>
+              ) : null}
+            </div>
+          </div>
+          <div className="minutes-meta-row">
+            <span>Stream: {streamState === "live" ? "live" : streamState}</span>
+            <span>Last update: {formatTime(run.minutes?.last_update_at ?? null)}</span>
+            <span>Model: {run.minutes?.claude_model ?? "default"}</span>
+            <span>Effort: {run.minutes?.claude_effort ?? "default"}</span>
+          </div>
+          {error ? <div className="inline-error">{error}</div> : null}
+          <div className="minutes-preview" ref={contentRef}>
+            {content ? (
+              <div className="minutes-markdown" dangerouslySetInnerHTML={{ __html: renderedContent }} />
+            ) : (
+              <div className="transcript-empty">
+                {run.minutes ? "Waiting for rendered minutes." : "Minutes are off for this capture."}
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="minutes-controls">
+          <div className="minutes-preset-row">
+            <label className="minutes-field minutes-preset-picker">
+              <span>Prompt preset</span>
+              <select
+                value={minuteDraft.selectedSource}
+                onChange={(inputEvent) => minuteDraft.selectSource(inputEvent.target.value as MinutePresetSource)}
+              >
+                {run.minutes ? <option value="run">This run's saved settings</option> : null}
+                <option value="default">Meter default</option>
+                {minuteDraft.presets.map((preset) => (
+                  <option key={preset.name} value={minutePresetSourceForName(preset.name)}>
+                    {preset.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className={`minutes-draft ${minuteDraft.hasUnsavedChanges ? "minutes-draft-dirty" : "minutes-draft-clean"}`}>
+              {minuteDraft.hasUnsavedChanges ? "Unsaved local preset changes" : `Using ${minuteDraft.selectedLabel}`}
+            </span>
+            {minuteDraft.selectedPresetName && !minuteDraft.hasUnsavedChanges ? (
+              <button className="ghost-button" disabled={requestState !== "idle"} onClick={minuteDraft.deleteSelectedPreset} type="button">
+                Delete preset
+              </button>
+            ) : null}
+          </div>
+          {minuteDraft.hasUnsavedChanges ? (
+            <div className="minutes-preset-save">
+              <label className="minutes-field minutes-preset-name">
+                <span>Save local preset as</span>
+                <input
+                  type="text"
+                  placeholder="Weekly FHIR WG"
+                  value={minuteDraft.presetNameDraft}
+                  onChange={(inputEvent) => minuteDraft.setPresetNameDraft(inputEvent.target.value)}
+                />
+              </label>
+              <div className="minutes-preset-actions">
+                <button className="secondary-button" disabled={requestState !== "idle"} onClick={minuteDraft.savePreset} type="button">
+                  Save preset
+                </button>
+                <button className="ghost-button" disabled={requestState !== "idle"} onClick={minuteDraft.resetDraftToSelected} type="button">
+                  Revert draft
+                </button>
+              </div>
+              {minuteDraft.presetError ? <div className="inline-error">{minuteDraft.presetError}</div> : null}
+            </div>
           ) : null}
-        </div>
-        {minuteDraft.hasUnsavedChanges ? (
-          <div className="minutes-preset-save">
-            <label className="minutes-field minutes-preset-name">
-              <span>Save local preset as</span>
-              <input
-                type="text"
-                placeholder="Weekly FHIR WG"
-                value={minuteDraft.presetNameDraft}
-                onChange={(inputEvent) => minuteDraft.setPresetNameDraft(inputEvent.target.value)}
+          <div className="minutes-settings-grid">
+            <label className="minutes-field">
+              <span>Minute prompt</span>
+              <AutoGrowTextarea
+                className="auto-grow-textarea"
+                value={minuteDraft.promptBody}
+                onChange={minuteDraft.setPromptBody}
               />
             </label>
-            <div className="minutes-preset-actions">
-              <button className="secondary-button" disabled={requestState !== "idle"} onClick={minuteDraft.savePreset} type="button">
-                Save preset
-              </button>
-              <button className="ghost-button" disabled={requestState !== "idle"} onClick={minuteDraft.resetDraftToSelected} type="button">
-                Revert draft
-              </button>
-            </div>
-            {minuteDraft.presetError ? <div className="inline-error">{minuteDraft.presetError}</div> : null}
+            <label className="minutes-field">
+              <span>Finalization prompt</span>
+              <AutoGrowTextarea
+                className="auto-grow-textarea"
+                value={minuteDraft.finalPromptBody}
+                onChange={minuteDraft.setFinalPromptBody}
+              />
+            </label>
           </div>
-        ) : null}
-        <label className="minutes-field">
-          <span>Minute prompt</span>
-          <AutoGrowTextarea
-            className="auto-grow-textarea"
-            value={minuteDraft.promptBody}
-            onChange={minuteDraft.setPromptBody}
-          />
-        </label>
-        <label className="minutes-field">
-          <span>Finalization prompt</span>
-          <AutoGrowTextarea
-            className="auto-grow-textarea"
-            value={minuteDraft.finalPromptBody}
-            onChange={minuteDraft.setFinalPromptBody}
-          />
-        </label>
-        <div className="minutes-config-grid">
-          <label className="minutes-field">
-            <span>Claude model</span>
-            <input
-              type="text"
-              placeholder="claude-sonnet-4-5"
-              value={minuteDraft.claudeModel}
-              onChange={(inputEvent) => minuteDraft.setClaudeModel(inputEvent.target.value)}
-            />
-          </label>
-          <label className="minutes-field">
-            <span>Claude effort</span>
-            <select
-              value={minuteDraft.claudeEffort}
-              onChange={(inputEvent) => minuteDraft.setClaudeEffort(inputEvent.target.value as UiMinuteClaudeEffort)}
-            >
-              <option value="">Server default</option>
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="max">Max</option>
-            </select>
-          </label>
-        </div>
-        <div className="minutes-actions">
-          {!minutesRunning ? (
-            <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit(primaryAction.action)} type="button">
-              {requestState === (primaryAction.action === "start" ? "starting" : "restarting") ? primaryAction.busyLabel : primaryAction.label}
-            </button>
-          ) : (
-            <>
-              <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit("restart")} type="button">
-                {requestState === "restarting" ? "Restarting..." : "Restart minutes"}
-              </button>
-              <button className="ghost-button" disabled={requestState !== "idle"} onClick={() => void submit("stop")} type="button">
-                {requestState === "stopping" ? "Stopping..." : "Stop minutes"}
-              </button>
-            </>
-          )}
-          {run.minutes ? (
-            <a
-              className="ghost-button action-link-button"
-              href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
-              rel="noreferrer"
-              target="_blank"
-            >
-              Open live view
-            </a>
-          ) : null}
-          <span className={`minutes-draft ${draftMatchesRunning ? "minutes-draft-clean" : "minutes-draft-dirty"}`}>
-            {draftMatchesRunning ? "Draft matches running prompt" : "Draft differs from running prompt"}
-          </span>
-        </div>
-        <div className="minutes-meta-row">
-          <span>Stream: {streamState === "live" ? "live" : streamState}</span>
-          <span>Last update: {formatTime(run.minutes?.last_update_at ?? null)}</span>
-          <span>Model: {run.minutes?.claude_model ?? "default"}</span>
-          <span>Effort: {run.minutes?.claude_effort ?? "default"}</span>
-          <span>TMUX: {run.minutes?.tmux_session_name ?? "--"}</span>
-        </div>
-      </div>
-
-      {error ? <div className="inline-error">{error}</div> : null}
-
-      <div className="minutes-preview" ref={contentRef}>
-        {content ? (
-          <div className="minutes-markdown" dangerouslySetInnerHTML={{ __html: renderedContent }} />
-        ) : (
-          <div className="transcript-empty">
-            {run.minutes ? "Waiting for rendered minutes." : "Minutes are off for this capture."}
+          <div className="minutes-config-grid">
+            <label className="minutes-field">
+              <span>Claude model</span>
+              <input
+                type="text"
+                placeholder="claude-sonnet-4-5"
+                value={minuteDraft.claudeModel}
+                onChange={(inputEvent) => minuteDraft.setClaudeModel(inputEvent.target.value)}
+              />
+            </label>
+            <label className="minutes-field">
+              <span>Claude effort</span>
+              <select
+                value={minuteDraft.claudeEffort}
+                onChange={(inputEvent) => minuteDraft.setClaudeEffort(inputEvent.target.value as UiMinuteClaudeEffort)}
+              >
+                <option value="">Server default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="max">Max</option>
+              </select>
+            </label>
           </div>
-        )}
-      </div>
+          <div className="minutes-actions">
+            {!minutesRunning ? (
+              <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit(primaryAction.action)} type="button">
+                {requestState === (primaryAction.action === "start" ? "starting" : "restarting") ? primaryAction.busyLabel : primaryAction.label}
+              </button>
+            ) : (
+              <>
+                <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit("restart")} type="button">
+                  {requestState === "restarting" ? "Restarting..." : "Restart minutes"}
+                </button>
+                <button className="ghost-button" disabled={requestState !== "idle"} onClick={() => void submit("stop")} type="button">
+                  {requestState === "stopping" ? "Stopping..." : "Stop minutes"}
+                </button>
+              </>
+            )}
+            <span className={`minutes-draft ${draftMatchesRunning ? "minutes-draft-clean" : "minutes-draft-dirty"}`}>
+              {draftMatchesRunning ? "Draft matches running prompt" : "Draft differs from running prompt"}
+            </span>
+          </div>
+          <div className="minutes-meta-row">
+            <span>TMUX: {run.minutes?.tmux_session_name ?? "--"}</span>
+            <span>Last update: {formatTime(run.minutes?.last_update_at ?? null)}</span>
+          </div>
+          {error ? <div className="inline-error">{error}</div> : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -1401,6 +1322,7 @@ function LiveRunCard({
 }) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [workspaceTab, setWorkspaceTab] = useState<"transcript" | "minutes" | "settings">("transcript");
 
   const handleStop = async () => {
     setStopping(true);
@@ -1418,6 +1340,12 @@ function LiveRunCard({
       setStopping(false);
     }
   }, [run.state]);
+
+  useEffect(() => {
+    if (!run.minutes && workspaceTab !== "transcript") {
+      setWorkspaceTab("transcript");
+    }
+  }, [run.minutes, workspaceTab]);
 
   return (
     <article className="run-card">
@@ -1488,46 +1416,91 @@ function LiveRunCard({
           ) : null}
           {error ? <div className="inline-error">{error}</div> : null}
 
-          <div className="transcript-panel">
-            <div className="transcript-head">
-              <div className="transcript-heading">Live transcript</div>
-              <a
-                className="transcript-link"
-                href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
-                rel="noreferrer"
-                target="_blank"
-              >
-                Open markdown
-              </a>
-            </div>
-            {transcript.length === 0 ? (
-              <div className="transcript-empty">Waiting for transcript activity.</div>
-            ) : (
-              <div className="transcript-stream">
-                {transcript.map((entry) => (
-                  <article
-                    className={`transcript-entry transcript-${entry.status}`}
-                    key={entry.row_id}
-                  >
-                    <div className="transcript-meta">
-                      <span className="transcript-time">
-                        {formatTranscriptTime(entry.started_at ?? entry.updated_at)}
-                      </span>
-                      <span className="transcript-speaker">
-                        {entry.speaker_label ?? "Unknown speaker"}
-                      </span>
-                      <span className={`transcript-status transcript-status-${entry.status}`}>
-                        {entry.status === "streaming" ? "live" : "done"}
-                      </span>
-                    </div>
-                    <p>{transcriptEntryText(entry)}</p>
-                  </article>
-                ))}
+          <div className="workspace-panel">
+            <div className="workspace-head">
+              <div className="workspace-tabs" role="tablist" aria-label="Capture workspace">
+                <button
+                  className={`workspace-tab ${workspaceTab === "transcript" ? "workspace-tab-active" : ""}`}
+                  onClick={() => setWorkspaceTab("transcript")}
+                  role="tab"
+                  type="button"
+                >
+                  Transcript
+                </button>
+                <button
+                  className={`workspace-tab ${workspaceTab === "minutes" ? "workspace-tab-active" : ""}`}
+                  onClick={() => setWorkspaceTab("minutes")}
+                  role="tab"
+                  type="button"
+                >
+                  Minutes
+                </button>
+                <button
+                  className={`workspace-tab ${workspaceTab === "settings" ? "workspace-tab-active" : ""}`}
+                  onClick={() => setWorkspaceTab("settings")}
+                  role="tab"
+                  type="button"
+                >
+                  Minute settings
+                </button>
               </div>
-            )}
-          </div>
+              <div className="workspace-links">
+                <a
+                  className="action-link"
+                  href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  Open transcript
+                </a>
+                {run.minutes ? (
+                  <a
+                    className="action-link"
+                    href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Open minutes
+                  </a>
+                ) : null}
+              </div>
+            </div>
 
-          <MinutesPanel run={run} onChanged={onMinutesChanged} />
+            <div className="transcript-panel" hidden={workspaceTab !== "transcript"}>
+              {transcript.length === 0 ? (
+                <div className="transcript-empty">Waiting for transcript activity.</div>
+              ) : (
+                <div className="transcript-stream">
+                  {transcript.map((entry) => (
+                    <article
+                      className={`transcript-entry transcript-${entry.status}`}
+                      key={entry.row_id}
+                    >
+                      <div className="transcript-meta">
+                        <span className="transcript-time">
+                          {formatTranscriptTime(entry.started_at ?? entry.updated_at)}
+                        </span>
+                        <span className="transcript-speaker">
+                          {entry.speaker_label ?? "Unknown speaker"}
+                        </span>
+                        <span className={`transcript-status transcript-status-${entry.status}`}>
+                          {entry.status === "streaming" ? "live" : "done"}
+                        </span>
+                      </div>
+                      <p>{transcriptEntryText(entry)}</p>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <MinutesPanel
+              hidden={workspaceTab === "transcript"}
+              mode={workspaceTab === "settings" ? "settings" : "preview"}
+              run={run}
+              onChanged={onMinutesChanged}
+            />
+          </div>
         </div>
       </div>
     </article>
@@ -1694,7 +1667,6 @@ function HistoryTable({
 function App() {
   const [runs, setRuns] = useState<MeetingRunRecord[]>([]);
   const [transcriptsByRun, setTranscriptsByRun] = useState<Record<string, TranscriptEntry[]>>({});
-  const [recentEvents, setRecentEvents] = useState<EventRecord[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [pageError, setPageError] = useState<string | null>(null);
@@ -1797,7 +1769,6 @@ function App() {
       setConnectionState("live");
       const payload = JSON.parse(message.data) as { event_id: number; event: EventRecord };
       const event = payload.event;
-      setRecentEvents((current) => appendRecentEvent(current, event));
       if (event.kind === "zoom.speaker.active") {
         activeSpeakerByRunRef.current[event.meeting_run_id] = speakerFromEvent(event);
       }
@@ -1889,7 +1860,6 @@ function App() {
             activeCount={activeRuns.length}
             totalCount={runs.length}
           />
-          <ActivityFeed events={recentEvents} />
         </aside>
 
         <section className="main-column">

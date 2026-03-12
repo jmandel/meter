@@ -303,8 +303,18 @@ function start(): void {
   let lastLeafTexts = new Set<string>();
   let lastMarkdown = "";
   let initialLoadComplete = false;
+  let shouldStickToBottom = true;
+
+  const isNearBottom = () => window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 48;
+  const scrollToBottom = () => {
+    window.scrollTo({
+      top: document.documentElement.scrollHeight,
+      behavior: "smooth",
+    });
+  };
 
   const renderMarkdown = (markdown: string, updatedLabel: string) => {
+    const wasNearBottom = shouldStickToBottom || isNearBottom();
     if (markdown === lastMarkdown) {
       return false;
     }
@@ -312,6 +322,11 @@ function start(): void {
     lastMarkdown = markdown;
     lastLeafTexts = applyMarkdown(contentEl, markdown, previous);
     updatedEl.textContent = updatedLabel;
+    if (wasNearBottom) {
+      window.requestAnimationFrame(() => {
+        scrollToBottom();
+      });
+    }
     return true;
   };
 
@@ -347,6 +362,11 @@ function start(): void {
     void fetchLatestMarkdown("poll");
   }, 3000);
 
+  const handleScroll = () => {
+    shouldStickToBottom = isNearBottom();
+  };
+  window.addEventListener("scroll", handleScroll, { passive: true });
+
   const eventSource = new EventSource(streamPath);
 
   eventSource.onopen = () => {
@@ -369,6 +389,7 @@ function start(): void {
   });
 
   window.addEventListener("beforeunload", () => {
+    window.removeEventListener("scroll", handleScroll);
     window.clearInterval(pollTimer);
     eventSource.close();
   }, { once: true });

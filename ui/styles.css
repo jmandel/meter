@@ -553,12 +553,15 @@ button {
 
 .run-card-body {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
   gap: 18px;
+  align-items: start;
 }
 
 .screenshot-frame {
-  min-height: 220px;
+  width: 100%;
+  max-width: 260px;
+  aspect-ratio: 9 / 16;
   border-radius: 18px;
   overflow: hidden;
   background:
@@ -568,6 +571,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
+  align-self: start;
 }
 
 .screenshot-frame img {
@@ -581,6 +585,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-width: 0;
 }
 
 .detail-list {
@@ -641,12 +646,73 @@ button {
   letter-spacing: -0.04em;
 }
 
-.transcript-panel {
+.workspace-panel {
   padding: 14px;
   border-radius: var(--radius-lg);
   background: rgba(250, 245, 237, 0.9);
   border: 1px solid rgba(69, 51, 33, 0.1);
-  min-height: 332px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.workspace-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.workspace-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.workspace-tab {
+  appearance: none;
+  border: 1px solid rgba(69, 51, 33, 0.08);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--text-muted);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.workspace-tab-active {
+  background: rgba(235, 221, 202, 0.95);
+  color: var(--accent-deep);
+  border-color: rgba(211, 106, 46, 0.18);
+}
+
+.workspace-links,
+.minutes-link-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.action-link {
+  color: var(--accent-deep);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.action-link:hover {
+  text-decoration: underline;
+}
+
+.transcript-panel {
+  padding: 14px;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.52);
+  border: 1px solid rgba(69, 51, 33, 0.08);
+  min-height: 360px;
   display: flex;
   flex-direction: column;
 }
@@ -683,7 +749,7 @@ button {
   flex-direction: column;
   gap: 10px;
   min-height: 0;
-  max-height: 304px;
+  max-height: 420px;
   overflow: auto;
   padding-right: 4px;
 }
@@ -745,13 +811,10 @@ button {
 }
 
 .minutes-panel {
-  padding: 14px;
-  border-radius: var(--radius-lg);
-  background: rgba(248, 242, 232, 0.94);
-  border: 1px solid rgba(69, 51, 33, 0.1);
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-height: 360px;
 }
 
 .minutes-head,
@@ -823,7 +886,7 @@ button {
 .minutes-controls {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
 }
 
 .minutes-preset-row {
@@ -853,6 +916,12 @@ button {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.minutes-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .minutes-config-grid {
@@ -890,6 +959,14 @@ button {
   overflow: hidden;
 }
 
+.minutes-field select {
+  min-height: 52px;
+}
+
+.minutes-field input {
+  min-height: 52px;
+}
+
 .minutes-field input:focus,
 .minutes-field textarea:focus,
 .minutes-field select:focus {
@@ -901,17 +978,14 @@ button {
   field-sizing: content;
 }
 
-.action-link-button {
-  text-decoration: none;
-}
-
 .minutes-meta-row {
   color: var(--text-muted);
   font-size: 12px;
 }
 
 .minutes-preview {
-  max-height: 360px;
+  min-height: 320px;
+  max-height: 420px;
   overflow: auto;
   border-radius: 14px;
   border: 1px solid rgba(69, 51, 33, 0.08);
@@ -1041,6 +1115,9 @@ button {
   padding: 0;
   font-family: inherit;
   line-height: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
   cursor: pointer;
   text-align: left;
 }
@@ -1073,6 +1150,11 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .screenshot-frame {
+    max-width: 100%;
+  }
+
+  .minutes-settings-grid,
   .minutes-config-grid {
     grid-template-columns: 1fr;
   }
@@ -1082,6 +1164,21 @@ button {
   .status-grid,
   .metric-grid {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .workspace-head,
+  .minutes-actions,
+  .minutes-meta-row {
+    align-items: flex-start;
+  }
+
+  .detail-list,
+  .run-kpis,
+  .status-grid,
+  .metric-grid {
+    grid-template-columns: 1fr;
   }
 }
 
