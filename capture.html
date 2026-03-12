@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head><title>Audio Capture Helper</title></head>
+<body>
+<h3 id="status">Waiting for capture command...</h3>
+<script>
+const WS_URL = `ws://${location.host}/ws/capture`;
+const TARGET_RATE = 16000;
+const CHUNK_MS = 480;
+
+// Called from CDP via Runtime.evaluate
+async function startCapture() {
+  const statusEl = document.getElementById('status');
+  statusEl.textContent = 'Starting capture...';
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true,
+      preferCurrentTab: false,
+    });
+  } catch (e) {
+    statusEl.textContent = 'getDisplayMedia failed: ' + e.message;
+    console.error('[capture] getDisplayMedia failed:', e);
+    return 'error: ' + e.message;
+  }
+
+  const audioTracks = stream.getAudioTracks();
+  const videoTracks = stream.getVideoTracks();
+  console.log('[capture] Got stream: audio=' + audioTracks.length + ' video=' + videoTracks.length);
+
+  // Stop video track - we only need audio
+  videoTracks.forEach(t => t.stop());
+
+  if (audioTracks.length === 0) {
+    statusEl.textContent = 'No audio tracks in captured stream';
+    return 'error: no audio';
+  }
+
+  // Connect WebSocket
+  const ws = new WebSocket(WS_URL);
+  await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+  console.log('[capture] WebSocket connected');
+
+  // Audio processing
+  const audioCtx = new AudioContext();
+  const source = audioCtx.createMediaStreamSource(new MediaStream(audioTracks));
+
+  const workletCode = `
+    class PCMExtractor extends AudioWorkletProcessor {
+      process(inputs) {
+        const ch = inputs[0]?.[0];
+        if (ch?.length > 0) this.port.postMessage(ch);
+        return true;
+      }
+    }
+    registerProcessor('pcm-extractor', PCMExtractor);
+  `;
+  const blob = new Blob([workletCode], { type: 'application/javascript' });
+  await audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
+
+  const pcmNode = new AudioWorkletNode(audioCtx, 'pcm-extractor');
+  source.connect(pcmNode);
+
+  // Tell server audio format
+  ws.send(JSON.stringify({ type: 'audio-config', sampleRate: TARGET_RATE }));
+
+  const sourceRate = audioCtx.sampleRate;
+  const samplesPerChunk = Math.floor(TARGET_RATE * CHUNK_MS / 1000);
+  let buf = [];
+
+  pcmNode.port.onmessage = (e) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const samples = e.data;
+    const ratio = TARGET_RATE / sourceRate;
+    const outLen = Math.floor(samples.length * ratio);
+    for (let i = 0; i < outLen; i++) {
+      const s = i / ratio;
+      const lo = Math.floor(s);
+      const hi = Math.min(lo + 1, samples.length - 1);
+      const f = s - lo;
+      buf.push(samples[lo] * (1 - f) + samples[hi] * f);
+    }
+    while (buf.length >= samplesPerChunk) {
+      const chunk = buf.splice(0, samplesPerChunk);
+      const pcm = new Int16Array(chunk.length);
+      for (let i = 0; i < chunk.length; i++) {
+        const v = Math.max(-1, Math.min(1, chunk[i]));
+        pcm[i] = v < 0 ? v * 0x8000 : v * 0x7FFF;
+      }
+      ws.send(pcm.buffer);
+    }
+  };
+
+  // Handle stream ending
+  audioTracks[0].addEventListener('ended', () => {
+    statusEl.textContent = 'Capture ended';
+    ws.close();
+  });
+
+  statusEl.textContent = 'Capturing audio...';
+  console.log('[capture] Streaming audio at ' + TARGET_RATE + 'Hz');
+  return 'capture-started';
+}
+</script>
+</body>
+</html>

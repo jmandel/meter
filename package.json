@@ -1,0 +1,19 @@
+{
+  "name": "cdp-spike-codex",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run server.ts --mode all",
+    "api": "bun run server.ts --mode api",
+    "worker": "bun run server.ts --mode worker",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3"
+  }
+}

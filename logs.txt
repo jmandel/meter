@@ -1,0 +1,37 @@
+[config] Web client URL: https://app.zoom.us/wc/join/2193058682?pwd=PNM1igEYyrZOhlqJ6gV3kFd2jSlLNW
+[server] Listening on http://localhost:3003
+[chrome] Launching Chromium...
+[chrome] CDP ready
+[cdp] Granted permissions
+[cdp] Navigating to Zoom...
+[cdp] Page loaded
+[browser] [CustomChunkLoader] Loading chunk: 557 from: https://us05st1.zoom.us/web-media/l0gtm9h/wmsc.min.js
+[cdp] Looking for join form...
+[cdp] Muted mic
+[cdp] Filled name: "Meeting Bot"
+[cdp] Clicked Join
+[cdp] Waiting for meeting...
+[browser] Using matchMedia for dark mode detection  MediaQueryList false
+[cdp] Meeting loaded
+[cdp] Injecting capture + observer code into Zoom tab...
+[browser] [capture] Button injected, ready for CDP click
+[cdp] Dispatching trusted click to trigger getDisplayMedia...
+[browser] [capture] Button clicked (trusted=true), calling getDisplayMedia...
+[cdp] Waiting for capture to start...
+[browser] [capture] Got stream: audio=1
+[browser] [capture] Audio track settings: {"autoGainControl":false,"channelCount":2,"deviceId":"web-contents-media-stream://7:8","echoCancellation":false,"latency":0.021333,"noiseSuppression":false,"restrictOwnAudio":false,"sampleRate":48000,"sampleSize":16,"voiceIsolation":false}
+[server] Capture client connected
+[browser] [capture] WebSocket connected
+[server] Audio config received, connecting to Mistral...
+[browser] [capture] Streaming audio at 16000Hz
+[cdp] Audio capture active!
+[cdp] Injecting DOM observers...
+[cdp] Observers: observers-started
+
+[ready] Monitoring meeting. Press Ctrl+C to stop.
+
+[server] Mistral connected
+[server] Mistral: session.created
+[server] Mistral: session.updated
+any different in behavior, we're doing it again now. Okay, and we're getting transcripts. That's pretty cool. I'm interested and excited to see that. I don't know that we're getting any speakers currently. But I'm going to try switching speakers. So we're going to have a... Judge mobile. It's mobile. Mobile's talking now. And now we have Josh Mandel again. Josh Mandel is talking now. Have a look at this project there and all the files in it. My goal is to be able to run this basically in the background of all the Zoom meetings happening[server] Capture client disconnected
+[server] Mistral closed
