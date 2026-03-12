@@ -57,7 +57,10 @@ export async function launchClaude(
   const launcherPath = `${session.workingDir}/.launch-claude.sh`;
   await Bun.write(
     launcherPath,
-    `#!/bin/bash\nexec claude --dangerously-skip-permissions --tools "Read,Write,Glob" --append-system-prompt "$(cat '${promptPath}')"\n`,
+    `#!/bin/bash
+set -euo pipefail
+exec claude --tools "Bash,Read,Glob" --allowedTools "Bash(./minute-op:*) Read Glob" --append-system-prompt "$(cat '${promptPath}')"
+`,
   );
   const { exitCode } = await run([
     "send-keys",
