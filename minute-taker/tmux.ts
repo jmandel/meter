@@ -6,6 +6,11 @@ export interface TmuxSession {
   workingDir: string;
 }
 
+interface ClaudeLaunchOptions {
+  model?: string | null;
+  effort?: "low" | "medium" | "high" | "max" | null;
+}
+
 async function run(args: string[]): Promise<{ exitCode: number; stdout: string }> {
   const proc = Bun.spawn(["tmux", ...args], {
     stdout: "pipe",
@@ -47,9 +52,27 @@ export async function killSession(session: TmuxSession): Promise<void> {
   await run(["kill-session", "-t", session.sessionName]);
 }
 
+export function buildClaudeLaunchCommand(promptPath: string, options: ClaudeLaunchOptions = {}): string {
+  const args = [
+    "claude",
+    "--dangerously-skip-permissions",
+    "--tools",
+    `"Read,Write,Glob"`,
+  ];
+  if (options.model?.trim()) {
+    args.push("--model", `"${options.model.trim().replace(/"/g, '\\"')}"`);
+  }
+  if (options.effort?.trim()) {
+    args.push("--effort", options.effort.trim());
+  }
+  args.push("--append-system-prompt", `"$(cat '${promptPath}')"`);
+  return args.join(" ");
+}
+
 export async function launchClaude(
   session: TmuxSession,
   systemPrompt: string,
+  options: ClaudeLaunchOptions = {},
 ): Promise<void> {
   const promptPath = `${session.workingDir}/.system-prompt.txt`;
   await Bun.write(promptPath, systemPrompt);
@@ -57,7 +80,7 @@ export async function launchClaude(
   const launcherPath = `${session.workingDir}/.launch-claude.sh`;
   await Bun.write(
     launcherPath,
-    `#!/bin/bash\nexec claude --dangerously-skip-permissions --tools "Read,Write,Glob" --append-system-prompt "$(cat '${promptPath}')"\n`,
+    `#!/bin/bash\nexec ${buildClaudeLaunchCommand(promptPath, options)}\n`,
   );
   const { exitCode } = await run([
     "send-keys",

@@ -175,10 +175,14 @@ export type MinuteJobState =
   | "completed"
   | "failed";
 
+export type MinuteClaudeEffort = "low" | "medium" | "high" | "max";
+
 export interface MinutePromptConfig {
   prompt_label: string | null;
   user_prompt_body: string | null;
   user_final_prompt_body: string | null;
+  claude_model: string | null;
+  claude_effort: MinuteClaudeEffort | null;
 }
 
 export interface MinuteJobRecord {
@@ -192,6 +196,8 @@ export interface MinuteJobRecord {
   prompt_hash: string | null;
   user_prompt_body: string | null;
   user_final_prompt_body: string | null;
+  claude_model: string | null;
+  claude_effort: MinuteClaudeEffort | null;
   working_dir: string;
   latest_minutes_path: string;
   latest_content_sha256: string | null;
@@ -219,6 +225,8 @@ export interface StartMinuteJobRequest {
   prompt_label?: string | null;
   user_prompt_body?: string | null;
   user_final_prompt_body?: string | null;
+  claude_model?: string | null;
+  claude_effort?: MinuteClaudeEffort | null;
 }
 
 export interface RestartMinuteJobRequest extends StartMinuteJobRequest {

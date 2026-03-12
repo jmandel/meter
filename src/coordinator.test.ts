@@ -724,8 +724,10 @@ if (config.reset_output) {
 
 const prompt = (config.user_prompt_body ?? "default").trim() || "default";
 const finalPrompt = (config.user_final_prompt_body ?? "").trim();
+const claudeModel = (config.claude_model ?? "").trim();
+const claudeEffort = (config.claude_effort ?? "").trim();
 const write = (label) => {
-  writeFileSync(path.join(runDir, "minutes.md"), "# Minutes\\n\\nPrompt: " + prompt + "\\n\\nFinal: " + finalPrompt + "\\n\\nState: " + label + "\\n");
+  writeFileSync(path.join(runDir, "minutes.md"), "# Minutes\\n\\nPrompt: " + prompt + "\\n\\nFinal: " + finalPrompt + "\\n\\nModel: " + claudeModel + "\\n\\nEffort: " + claudeEffort + "\\n\\nState: " + label + "\\n");
 };
 
 setTimeout(() => write("running"), 50);
@@ -785,6 +787,8 @@ process.on("SIGTERM", () => {
       body: JSON.stringify({
         user_prompt_body: "Alpha minutes",
         user_final_prompt_body: "Tighten action items",
+        claude_model: "claude-3-5-haiku-latest",
+        claude_effort: "medium",
       }),
     });
     expect(startResponse.status).toBe(201);
@@ -805,11 +809,15 @@ process.on("SIGTERM", () => {
     });
 
     const currentMinutes = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`).then((value) => value.json()) as {
-      minute_job: { minute_job_id: string } | null;
+      minute_job: { minute_job_id: string; claude_model: string | null; claude_effort: string | null } | null;
       latest_version: { content_markdown: string } | null;
     };
     expect(currentMinutes.minute_job?.minute_job_id).toBe(started.minute_job.minute_job_id);
+    expect(currentMinutes.minute_job?.claude_model).toBe("claude-3-5-haiku-latest");
+    expect(currentMinutes.minute_job?.claude_effort).toBe("medium");
     expect(currentMinutes.latest_version?.content_markdown).toContain("Alpha minutes");
+    expect(currentMinutes.latest_version?.content_markdown).toContain("Model: claude-3-5-haiku-latest");
+    expect(currentMinutes.latest_version?.content_markdown).toContain("Effort: medium");
 
     const streamResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/stream`);
     expect(streamResponse.ok).toBe(true);
@@ -830,6 +838,8 @@ process.on("SIGTERM", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         user_prompt_body: "Beta minutes",
+        claude_model: "claude-3-7-sonnet-latest",
+        claude_effort: "low",
       }),
     });
     expect(restartResponse.status).toBe(200);
@@ -839,15 +849,19 @@ process.on("SIGTERM", () => {
     await waitFor(async () => {
       const response = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`);
       const body = await response.json() as {
-        minute_job: { minute_job_id: string } | null;
+        minute_job: { minute_job_id: string; claude_model: string | null; claude_effort: string | null } | null;
         latest_version: { content_markdown: string } | null;
       };
       return body.minute_job?.minute_job_id === restarted.minute_job.minute_job_id
+        && body.minute_job?.claude_model === "claude-3-7-sonnet-latest"
+        && body.minute_job?.claude_effort === "low"
         && body.latest_version?.content_markdown.includes("Beta minutes");
     });
 
     const markdownAfterRestart = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes.md`).then((value) => value.text());
     expect(markdownAfterRestart).toContain("Beta minutes");
+    expect(markdownAfterRestart).toContain("Model: claude-3-7-sonnet-latest");
+    expect(markdownAfterRestart).toContain("Effort: low");
     expect(markdownAfterRestart).not.toContain("Alpha minutes");
 
     const stopResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/stop`, {

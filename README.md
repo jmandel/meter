@@ -295,6 +295,14 @@ The user-editable prompt surface is intentionally broad:
 
 The live minutes panel in the dashboard tails the rendered Markdown from the managed minute-taker job. `GET /v1/meeting-runs/:id/minutes/view` opens a streaming viewer in a new tab, `GET /v1/meeting-runs/:id/minutes.md` returns the raw markdown, and `GET /v1/meeting-runs/:id/minutes/stream` streams settled snapshot updates keyed to the current minute job for that meeting run.
 
+Minute-taker launch defaults:
+
+- `METER_MINUTE_TAKER_MODEL`
+  - optional default Claude model for managed minute jobs
+- `METER_MINUTE_TAKER_EFFORT`
+  - optional default Claude effort level for managed minute jobs: `low`, `medium`, `high`, or `max`
+- the dashboard can override both per minute job, and browser-local prompt/model defaults can carry across meetings until reverted
+
 ## Configuration
 
 Core settings:

@@ -260,7 +260,8 @@ button {
 }
 
 .field input,
-.field textarea {
+.field textarea,
+.field select {
   width: 100%;
   border: 1px solid rgba(88, 69, 46, 0.18);
   background: rgba(255, 255, 255, 0.86);
@@ -278,7 +279,8 @@ button {
 }
 
 .field input:focus,
-.field textarea:focus {
+.field textarea:focus,
+.field select:focus {
   border-color: rgba(211, 106, 46, 0.52);
   box-shadow: 0 0 0 4px rgba(211, 106, 46, 0.14);
   transform: translateY(-1px);
@@ -824,6 +826,20 @@ button {
   gap: 10px;
 }
 
+.minutes-defaults-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.minutes-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .minutes-field {
   display: flex;
   flex-direction: column;
@@ -838,7 +854,9 @@ button {
   font-weight: 700;
 }
 
-.minutes-field textarea {
+.minutes-field input,
+.minutes-field textarea,
+.minutes-field select {
   width: 100%;
   border: 1px solid rgba(88, 69, 46, 0.18);
   background: rgba(255, 255, 255, 0.9);
@@ -851,7 +869,9 @@ button {
   overflow: hidden;
 }
 
-.minutes-field textarea:focus {
+.minutes-field input:focus,
+.minutes-field textarea:focus,
+.minutes-field select:focus {
   border-color: rgba(211, 106, 46, 0.52);
   box-shadow: 0 0 0 4px rgba(211, 106, 46, 0.14);
 }
@@ -1025,6 +1045,10 @@ button {
 
 @media (max-width: 920px) {
   .run-card-body {
+    grid-template-columns: 1fr;
+  }
+
+  .minutes-config-grid {
     grid-template-columns: 1fr;
   }
 

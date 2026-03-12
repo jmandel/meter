@@ -773,6 +773,8 @@ export class CoordinatorApp {
       prompt_hash: promptHash,
       user_prompt_body: promptConfig.user_prompt_body,
       user_final_prompt_body: promptConfig.user_final_prompt_body,
+      claude_model: promptConfig.claude_model,
+      claude_effort: promptConfig.claude_effort,
       working_dir: workingDir,
       latest_minutes_path: latestMinutesPath,
       started_at_unix_ms: now,
@@ -818,6 +820,8 @@ export class CoordinatorApp {
         minute_job_id: minuteJobId,
         tmux_session_name: tmuxSessionName,
         prompt_label: promptConfig.prompt_label,
+        claude_model: promptConfig.claude_model,
+        claude_effort: promptConfig.claude_effort,
       }, startTs),
     ], startTs);
     this.eventBus.publish(appended.records);
@@ -898,10 +902,17 @@ export class CoordinatorApp {
     const promptLabel = input?.prompt_label?.trim() || null;
     const userPromptBody = input?.user_prompt_body?.trim() || null;
     const userFinalPromptBody = input?.user_final_prompt_body?.trim() || null;
+    const claudeModel = input?.claude_model?.trim() || process.env.METER_MINUTE_TAKER_MODEL?.trim() || null;
+    const requestedEffort = input?.claude_effort?.trim() || process.env.METER_MINUTE_TAKER_EFFORT?.trim() || null;
+    const claudeEffort = requestedEffort && ["low", "medium", "high", "max"].includes(requestedEffort)
+      ? requestedEffort as MinutePromptConfig["claude_effort"]
+      : null;
     return {
       prompt_label: promptLabel,
       user_prompt_body: userPromptBody,
       user_final_prompt_body: userFinalPromptBody,
+      claude_model: claudeModel,
+      claude_effort: claudeEffort,
     };
   }
 

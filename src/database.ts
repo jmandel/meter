@@ -10,6 +10,7 @@ import type {
   ErrorRaisedPayload,
   EventEnvelope,
   EventRecord,
+  MinuteClaudeEffort,
   MinuteJobRecord,
   MinuteJobState,
   MinuteVersionRecord,
@@ -100,6 +101,8 @@ interface MinuteJobInsertInput {
   prompt_hash: string | null;
   user_prompt_body: string | null;
   user_final_prompt_body: string | null;
+  claude_model: string | null;
+  claude_effort: MinuteClaudeEffort | null;
   working_dir: string;
   latest_minutes_path: string;
   started_at_unix_ms: number;
@@ -114,6 +117,8 @@ interface MinuteJobPatch {
   prompt_hash?: string | null;
   user_prompt_body?: string | null;
   user_final_prompt_body?: string | null;
+  claude_model?: string | null;
+  claude_effort?: MinuteClaudeEffort | null;
   latest_content_sha256?: string | null;
   latest_version_seq?: number;
   ended_at_unix_ms?: number | null;
@@ -133,6 +138,8 @@ interface MinuteJobRow {
   prompt_hash: string | null;
   user_prompt_body: string | null;
   user_final_prompt_body: string | null;
+  claude_model: string | null;
+  claude_effort: MinuteClaudeEffort | null;
   working_dir: string;
   latest_minutes_path: string;
   latest_content_sha256: string | null;
@@ -333,6 +340,8 @@ export class AppDatabase {
         prompt_hash TEXT,
         user_prompt_body TEXT,
         user_final_prompt_body TEXT,
+        claude_model TEXT,
+        claude_effort TEXT,
         working_dir TEXT NOT NULL,
         latest_minutes_path TEXT NOT NULL,
         latest_content_sha256 TEXT,
@@ -384,6 +393,8 @@ export class AppDatabase {
     this.ensureColumn("chat_messages", "is_edited", "INTEGER");
     this.ensureColumn("chat_messages", "chat_type", "TEXT");
     this.ensureColumn("chat_messages", "details_json", "TEXT");
+    this.ensureColumn("minute_jobs", "claude_model", "TEXT");
+    this.ensureColumn("minute_jobs", "claude_effort", "TEXT");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_chat_messages_main_chat_message_id ON chat_messages(main_chat_message_id);");
   }
 
@@ -1000,6 +1011,8 @@ export class AppDatabase {
       prompt_hash: row.prompt_hash,
       user_prompt_body: row.user_prompt_body,
       user_final_prompt_body: row.user_final_prompt_body,
+      claude_model: row.claude_model,
+      claude_effort: row.claude_effort,
       working_dir: row.working_dir,
       latest_minutes_path: row.latest_minutes_path,
       latest_content_sha256: row.latest_content_sha256,
@@ -1076,6 +1089,8 @@ export class AppDatabase {
           prompt_hash,
           user_prompt_body,
           user_final_prompt_body,
+          claude_model,
+          claude_effort,
           working_dir,
           latest_minutes_path,
           latest_content_sha256,
@@ -1086,7 +1101,7 @@ export class AppDatabase {
           restarted_from_minute_job_id,
           last_error_code,
           last_error_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, NULL, NULL, ?, NULL, NULL)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, NULL, NULL, ?, NULL, NULL)
       `)
       .run(
         input.minute_job_id,
@@ -1099,6 +1114,8 @@ export class AppDatabase {
         input.prompt_hash,
         input.user_prompt_body,
         input.user_final_prompt_body,
+        input.claude_model,
+        input.claude_effort,
         input.working_dir,
         input.latest_minutes_path,
         input.started_at_unix_ms,

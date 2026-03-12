@@ -26,6 +26,8 @@ interface Config {
   finalizationSettleMs: number;
   minutesRoot: string;
   tmuxSession: string;
+  claudeModel: string | null;
+  claudeEffort: "low" | "medium" | "high" | "max" | null;
 }
 
 interface RunMetadata {
@@ -34,12 +36,16 @@ interface RunMetadata {
   room_id: string;
   base_url: string;
   prompt_label?: string | null;
+  claude_model?: string | null;
+  claude_effort?: "low" | "medium" | "high" | "max" | null;
 }
 
 interface InjectedMinuteTakerConfig {
   prompt_label?: string | null;
   user_prompt_body?: string | null;
   user_final_prompt_body?: string | null;
+  claude_model?: string | null;
+  claude_effort?: "low" | "medium" | "high" | "max" | null;
   reset_output?: boolean;
   tmux_session?: string | null;
 }
@@ -89,6 +95,13 @@ function parseArgs(argv: string[]): Config {
     finalizationSettleMs: parseInt(args.get("--final-settle") ?? "8", 10) * 1000,
     minutesRoot: resolve(args.get("--minutes-root") ?? "./minutes"),
     tmuxSession: args.get("--tmux-session") ?? "", // resolved later
+    claudeModel: args.get("--claude-model")?.trim() || process.env.METER_MINUTE_TAKER_MODEL?.trim() || null,
+    claudeEffort: (() => {
+      const effort = args.get("--claude-effort")?.trim() || process.env.METER_MINUTE_TAKER_EFFORT?.trim() || null;
+      return effort && ["low", "medium", "high", "max"].includes(effort)
+        ? effort as Config["claudeEffort"]
+        : null;
+    })(),
   };
 }
 
@@ -286,6 +299,8 @@ async function main() {
     room_id: meetingRun.room_id,
     base_url: config.baseUrl,
     prompt_label: injectedConfig.prompt_label ?? null,
+    claude_model: injectedConfig.claude_model?.trim() || config.claudeModel,
+    claude_effort: injectedConfig.claude_effort?.trim() || config.claudeEffort,
   };
   if (injectedConfig.reset_output) {
     rmSync(`${runDir}/minutes.md`, { force: true });
@@ -333,7 +348,10 @@ async function main() {
     meetingRunId: runId,
     userPromptBody: injectedConfig.user_prompt_body ?? null,
   });
-  await launchClaude(tmux, systemPrompt);
+  await launchClaude(tmux, systemPrompt, {
+    model: metadata.claude_model,
+    effort: metadata.claude_effort,
+  });
   console.log("Launched Claude in tmux session. Waiting for initialization...");
   await sleep(2000);
 
