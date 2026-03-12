@@ -92,6 +92,7 @@ export class MistralRealtimeTranscriptionAdapter implements TranscriptionAdapter
   private donePromise: Promise<void> | null = null;
   private doneResolve: (() => void) | null = null;
   private lastFlushAtUnixMs = 0;
+  private inboundMessageQueue = Promise.resolve();
 
   constructor(options: MistralAdapterOptions) {
     this.apiKey = options.apiKey;
@@ -140,7 +141,15 @@ export class MistralRealtimeTranscriptionAdapter implements TranscriptionAdapter
 
       ws.addEventListener("message", (event: MessageEvent) => {
         const rawText = typeof event.data === "string" ? event.data : Buffer.from(event.data as ArrayBuffer).toString("utf8");
-        void this.handleMessage(rawText);
+        this.inboundMessageQueue = this.inboundMessageQueue
+          .then(() => this.handleMessage(rawText))
+          .catch(async (error) => {
+            await this.callbacks.raiseError({
+              code: "mistral_message_handler_failed",
+              message: error instanceof Error ? error.message : String(error),
+              fatal: false,
+            });
+          });
       });
 
       ws.addEventListener("error", () => {

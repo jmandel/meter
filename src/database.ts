@@ -253,6 +253,16 @@ export class AppDatabase {
         text
       );
     `);
+
+    this.ensureColumn("chat_messages", "sender_user_id", "INTEGER");
+    this.ensureColumn("chat_messages", "receiver_user_id", "INTEGER");
+    this.ensureColumn("chat_messages", "main_chat_message_id", "TEXT");
+    this.ensureColumn("chat_messages", "thread_reply_count", "INTEGER");
+    this.ensureColumn("chat_messages", "is_thread_reply", "INTEGER");
+    this.ensureColumn("chat_messages", "is_edited", "INTEGER");
+    this.ensureColumn("chat_messages", "chat_type", "TEXT");
+    this.ensureColumn("chat_messages", "details_json", "TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_chat_messages_main_chat_message_id ON chat_messages(main_chat_message_id);");
   }
 
   close(): void {
@@ -262,6 +272,14 @@ export class AppDatabase {
   getJournalMode(): string {
     const row = this.db.query("PRAGMA journal_mode;").get() as { journal_mode: string } | null;
     return row?.journal_mode ?? "unknown";
+  }
+
+  private ensureColumn(tableName: string, columnName: string, columnSql: string): void {
+    const columns = this.db.query(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === columnName)) {
+      return;
+    }
+    this.db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnSql};`);
   }
 
   upsertRoom(input: RoomInsertInput): void {
@@ -605,33 +623,76 @@ export class AppDatabase {
           room_id,
           event_id,
           sender_display_name,
+          sender_user_id,
           receiver_display_name,
+          receiver_user_id,
           visibility,
           text,
           normalized_text,
-          sent_at_unix_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sent_at_unix_ms,
+          main_chat_message_id,
+          thread_reply_count,
+          is_thread_reply,
+          is_edited,
+          chat_type,
+          details_json
+        ) VALUES (
+          $chat_message_id,
+          $meeting_run_id,
+          $room_id,
+          $event_id,
+          $sender_display_name,
+          $sender_user_id,
+          $receiver_display_name,
+          $receiver_user_id,
+          $visibility,
+          $text,
+          $normalized_text,
+          $sent_at_unix_ms,
+          $main_chat_message_id,
+          $thread_reply_count,
+          $is_thread_reply,
+          $is_edited,
+          $chat_type,
+          $details_json
+        )
         ON CONFLICT(chat_message_id) DO UPDATE SET
           event_id = excluded.event_id,
           sender_display_name = excluded.sender_display_name,
+          sender_user_id = excluded.sender_user_id,
           receiver_display_name = excluded.receiver_display_name,
+          receiver_user_id = excluded.receiver_user_id,
           visibility = excluded.visibility,
           text = excluded.text,
           normalized_text = excluded.normalized_text,
-          sent_at_unix_ms = excluded.sent_at_unix_ms
+          sent_at_unix_ms = excluded.sent_at_unix_ms,
+          main_chat_message_id = excluded.main_chat_message_id,
+          thread_reply_count = excluded.thread_reply_count,
+          is_thread_reply = excluded.is_thread_reply,
+          is_edited = excluded.is_edited,
+          chat_type = excluded.chat_type,
+          details_json = excluded.details_json
       `)
-      .run(
-        payload.chat_message_id,
-        event.meeting_run_id,
-        event.room_id,
-        eventId,
-        payload.sender_display_name,
-        payload.receiver_display_name,
-        payload.visibility,
-        payload.text,
-        normalizeText(payload.text),
-        payload.sent_at_unix_ms,
-      );
+      .run({
+        $chat_message_id: payload.chat_message_id,
+        $meeting_run_id: event.meeting_run_id,
+        $room_id: event.room_id,
+        $event_id: eventId,
+        $sender_display_name: payload.sender_display_name,
+        $sender_user_id: payload.sender_user_id ?? null,
+        $receiver_display_name: payload.receiver_display_name,
+        $receiver_user_id: payload.receiver_user_id ?? null,
+        $visibility: payload.visibility,
+        $text: payload.text,
+        $normalized_text: normalizeText(payload.text),
+        $sent_at_unix_ms: payload.sent_at_unix_ms,
+        $main_chat_message_id: payload.main_chat_message_id ?? null,
+        $thread_reply_count: payload.thread_reply_count ?? null,
+        $is_thread_reply: payload.is_thread_reply ? 1 : 0,
+        $is_edited: payload.is_edited ? 1 : 0,
+        $chat_type: payload.chat_type ?? null,
+        $details_json: payload.details ? JSON.stringify(payload.details) : null,
+      });
     this.db.query("DELETE FROM chat_messages_fts WHERE chat_message_id = ?").run(payload.chat_message_id);
     this.db
       .query("INSERT INTO chat_messages_fts (chat_message_id, meeting_run_id, room_id, text) VALUES (?, ?, ?, ?)")
@@ -853,6 +914,23 @@ export class AppDatabase {
     limit: number;
   }): MeetingRunRecord[] {
     return this.listMeetingRunRows(filters).map((row) => this.mapMeetingRunRow(row));
+  }
+
+  listRecoverableMeetingRuns(limit: number): MeetingRunRecord[] {
+    const rows = this.db
+      .query(`
+        SELECT
+          mr.*,
+          wh.ts_unix_ms AS heartbeat_ts_unix_ms
+        FROM meeting_runs mr
+        LEFT JOIN worker_heartbeats wh
+          ON wh.worker_id = mr.worker_id
+        WHERE mr.state IN ('pending', 'starting', 'joining', 'capturing', 'stopping')
+        ORDER BY mr.created_at_unix_ms DESC
+        LIMIT ?
+      `)
+      .all(limit) as MeetingRunRow[];
+    return rows.map((row) => this.mapMeetingRunRow(row));
   }
 
   listRoomRecords(limit: number): RoomRecord[] {
@@ -1096,10 +1174,18 @@ export class AppDatabase {
       meeting_run_id: string;
       room_id: string;
       sender_display_name: string | null;
+      sender_user_id: number | null;
       receiver_display_name: string | null;
+      receiver_user_id: number | null;
       visibility: ChatMessageRecord["visibility"];
       text: string;
       sent_at_unix_ms: number;
+      main_chat_message_id: string | null;
+      thread_reply_count: number | null;
+      is_thread_reply: number | null;
+      is_edited: number | null;
+      chat_type: string | null;
+      details_json: string | null;
     }>;
     return rows.map((row) => ({
       chat_message_id: row.chat_message_id,
@@ -1107,10 +1193,18 @@ export class AppDatabase {
       meeting_run_id: row.meeting_run_id,
       room_id: row.room_id,
       sender_display_name: row.sender_display_name,
+      sender_user_id: row.sender_user_id,
       receiver_display_name: row.receiver_display_name,
+      receiver_user_id: row.receiver_user_id,
       visibility: row.visibility,
       text: row.text,
       sent_at: toIso(row.sent_at_unix_ms) ?? new Date(row.sent_at_unix_ms).toISOString(),
+      main_chat_message_id: row.main_chat_message_id,
+      thread_reply_count: row.thread_reply_count,
+      is_thread_reply: Boolean(row.is_thread_reply),
+      is_edited: Boolean(row.is_edited),
+      chat_type: row.chat_type,
+      details: row.details_json ? JSON.parse(row.details_json) : null,
     }));
   }
 

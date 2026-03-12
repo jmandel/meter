@@ -655,10 +655,11 @@ button {
 }
 
 .transcript-entry {
+  flex: 0 0 auto;
   padding: 12px 13px;
   border-radius: 14px;
   border: 1px solid rgba(69, 51, 33, 0.08);
-  background: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.94);
   min-height: 82px;
 }
 
@@ -705,6 +706,7 @@ button {
   margin: 0;
   line-height: 1.6;
   color: var(--text);
+  overflow-wrap: anywhere;
   text-wrap: pretty;
 }
 

@@ -895,7 +895,7 @@ export class WorkerProcess {
     }
     this.flushing = true;
     while (this.pendingEvents.length > 0) {
-      const events = [...this.pendingEvents];
+      const events = [...this.pendingEvents].sort((left, right) => left.seq - right.seq);
       const batch: AppendEventsBatchRequest = {
         worker_id: this.workerId,
         first_seq: events[0].seq,
@@ -917,11 +917,13 @@ export class WorkerProcess {
         continue;
       }
       if (!response.ok) {
-        await this.log(`event flush failed with ${response.status}`);
+        const body = await response.text().catch(() => "");
+        await this.log(`event flush failed with ${response.status}${body ? ` body=${body}` : ""}`);
         await sleep(1000);
         continue;
       }
-      this.pendingEvents.splice(0, events.length);
+      const highestSeq = events[events.length - 1].seq;
+      this.pendingEvents = this.pendingEvents.filter((event) => event.seq > highestSeq);
     }
     this.flushing = false;
   }

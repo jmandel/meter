@@ -5,6 +5,7 @@ import dashboard from "../ui/index.html";
 import type {
   AppendEventsBatchRequest,
   AppConfig,
+  ChatMessageRecord,
   CompleteMeetingRunRequest,
   CreateMeetingRunRequest,
   EventEnvelope,
@@ -34,6 +35,7 @@ import {
   errorResponse,
   jsonResponse,
   nowUnixMs,
+  parseBoolean,
   parseInteger,
   parseJsonBody,
   parseTimestamp,
@@ -148,6 +150,7 @@ export class CoordinatorApp {
     this.coordinatorLogPath = layout.coordinator_log_path;
     this.storage = new AppDatabase(this.config);
     this.storage.init();
+    await this.reconcileRecoveredMeetingRuns();
     this.server = Bun.serve({
       hostname: this.config.listen_host,
       port: this.config.listen_port,
@@ -167,6 +170,26 @@ export class CoordinatorApp {
     }
     this.stopPromise = this.stopInternal();
     await this.stopPromise;
+  }
+
+  private async reconcileRecoveredMeetingRuns(): Promise<void> {
+    const now = nowUnixMs();
+    const staleRuns = this.storage.listRecoverableMeetingRuns(10_000);
+    for (const run of staleRuns) {
+      const message = `Meter started with no live worker for prior ${run.state} run`;
+      this.storage.patchMeetingRun(run.meeting_run_id, {
+        state: "aborted",
+        ended_at_unix_ms: now,
+        worker_id: null,
+        worker_pid: null,
+        ingest_port: null,
+        cdp_port: null,
+        updated_at_unix_ms: now,
+        last_error_code: run.last_error?.code ?? "startup_recovery",
+        last_error_message: run.last_error?.message ?? message,
+      });
+      await appendLogLine(this.coordinatorLogPath, `recovered stale run ${run.meeting_run_id} -> aborted`);
+    }
   }
 
   private async handleRequest(request: Request): Promise<Response> {
@@ -218,7 +241,7 @@ export class CoordinatorApp {
       }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/transcript\.md$/);
       if (match && request.method === "GET") {
-        return this.handleMarkdownTranscript(match[1]);
+        return this.handleMarkdownTranscript(url, match[1]);
       }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/chat$/);
       if (match && request.method === "GET") {
@@ -708,18 +731,30 @@ export class CoordinatorApp {
     return jsonResponse(this.listResponse(items));
   }
 
-  private handleMarkdownTranscript(meetingRunId: string): Response {
+  private handleMarkdownTranscript(url: URL, meetingRunId: string): Response {
     const meetingRun = this.getMeetingRun(meetingRunId);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "Meeting run not found");
     }
 
+    const includeParams = url.searchParams
+      .getAll("include")
+      .flatMap((value) => value.split(","))
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean);
+    const includeChat = parseBoolean(url.searchParams.get("chat") ?? undefined, false) || includeParams.includes("chat");
     const speech = this.storage.listSpeechRecords({
       meeting_run_id: meetingRunId,
       status: "final",
       limit: 10_000,
     });
-    const markdown = this.renderMarkdownTranscript(meetingRun, speech);
+    const chat = includeChat
+      ? this.storage.listChatRecords({
+          meeting_run_id: meetingRunId,
+          limit: 10_000,
+        })
+      : [];
+    const markdown = this.renderMarkdownTranscript(meetingRun, speech, chat, includeChat);
     return new Response(markdown, {
       headers: {
         "content-type": "text/markdown; charset=utf-8",
@@ -728,7 +763,12 @@ export class CoordinatorApp {
     });
   }
 
-  private renderMarkdownTranscript(meetingRun: MeetingRunRecord, speech: SpeechSegmentRecord[]): string {
+  private renderMarkdownTranscript(
+    meetingRun: MeetingRunRecord,
+    speech: SpeechSegmentRecord[],
+    chat: ChatMessageRecord[] = [],
+    includeChat = false,
+  ): string {
     const heading = meetingRun.room_id.startsWith("zoom:") ? meetingRun.room_id.slice(5) : meetingRun.room_id;
     const startedAt = meetingRun.started_at ?? meetingRun.created_at;
     const formatTimestamp = (iso: string | null) => {
@@ -773,18 +813,73 @@ export class CoordinatorApp {
     ];
 
     if (grouped.length === 0) {
-      lines.push("_No finalized transcript yet._");
+      if (!includeChat || chat.length === 0) {
+        lines.push("_No finalized transcript yet._");
+        lines.push("");
+        return lines.join("\n");
+      }
+    }
+
+    if (!includeChat) {
+      for (const item of grouped) {
+        lines.push(`### ${formatTimestamp(item.started_at)} · ${item.speaker}`);
+        lines.push("");
+        lines.push(item.text);
+        lines.push("");
+      }
+      return lines.join("\n");
+    }
+
+    const transcriptItems = [
+      ...grouped.map((item, index) => ({
+        kind: "speech" as const,
+        sort_ts: Date.parse(item.started_at ?? startedAt) || 0,
+        sort_index: index,
+        speaker: item.speaker,
+        started_at: item.started_at,
+        text: item.text,
+      })),
+      ...chat
+        .filter((item) => item.text.trim())
+        .map((item, index) => ({
+          kind: "chat" as const,
+          sort_ts: Date.parse(item.sent_at) || 0,
+          sort_index: index,
+          chat: item,
+        })),
+    ].sort((left, right) => left.sort_ts - right.sort_ts || left.sort_index - right.sort_index || (left.kind === "speech" ? -1 : 1));
+
+    if (transcriptItems.length === 0) {
+      lines.push("_No finalized transcript or chat yet._");
       lines.push("");
       return lines.join("\n");
     }
 
-    for (const item of grouped) {
-      lines.push(`### ${formatTimestamp(item.started_at)} · ${item.speaker}`);
+    for (const item of transcriptItems) {
+      if (item.kind === "speech") {
+        lines.push(`### ${formatTimestamp(item.started_at)} · ${item.speaker}`);
+        lines.push("");
+        lines.push(item.text);
+        lines.push("");
+        continue;
+      }
+      const receiver = item.chat.receiver_display_name?.trim() || null;
+      const chatLabel = receiver ? `${item.chat.sender_display_name ?? "Unknown chatter"} -> ${receiver}` : (item.chat.sender_display_name ?? "Unknown chatter");
+      const chatNotes: string[] = [];
+      if (item.chat.is_thread_reply && item.chat.main_chat_message_id) {
+        chatNotes.push(`reply to ${item.chat.main_chat_message_id}`);
+      } else if ((item.chat.thread_reply_count ?? 0) > 0) {
+        const count = item.chat.thread_reply_count ?? 0;
+        chatNotes.push(`${count} ${count === 1 ? "reply" : "replies"}`);
+      }
+      if (item.chat.is_edited) {
+        chatNotes.push("edited");
+      }
+      lines.push(`### ${formatTimestamp(item.chat.sent_at)} · [Chat] ${chatLabel}${chatNotes.length ? ` (${chatNotes.join(", ")})` : ""}`);
       lines.push("");
-      lines.push(item.text);
+      lines.push(item.chat.text);
       lines.push("");
     }
-
     return lines.join("\n");
   }
 

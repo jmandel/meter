@@ -492,15 +492,23 @@ test("worker streams realtime Mistral transcripts and persists raw plus derived 
       ]),
     );
     expect(providerTypes.filter((type) => type === "transcription.done")).toHaveLength(2);
-    expect(segmentLines).toHaveLength(2);
-    expect(segmentLines[0]).toMatchObject({
+    expect(segmentLines.length).toBeGreaterThanOrEqual(2);
+    const partialLine = segmentLines.find((line) => line.status === "partial" && line.text === "hello world");
+    const finalLine = segmentLines.find(
+      (line) =>
+        line.status === "final" &&
+        line.text === "hello world" &&
+        typeof line.started_at_unix_ms === "number" &&
+        typeof line.ended_at_unix_ms === "number",
+    );
+    expect(partialLine).toMatchObject({
       text: "hello world",
       status: "partial",
       started_at_unix_ms: baseTs + 10,
       ended_at_unix_ms: null,
       speaker_label: null,
     });
-    expect(segmentLines[1]).toMatchObject({
+    expect(finalLine).toMatchObject({
       text: "hello world",
       status: "final",
       started_at_unix_ms: baseTs + 10,

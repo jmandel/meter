@@ -59,7 +59,12 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
     }
     for (const button of document.querySelectorAll("button")) {
       const label = (button.getAttribute("aria-label") || button.textContent || "").trim().toLowerCase();
-      if (label === "chat" || label.includes("open chat")) {
+      if (
+        label === "chat"
+        || label.includes("open chat")
+        || label.includes("open the chat panel")
+        || label.includes("close the chat panel")
+      ) {
         button.click();
         return;
       }
@@ -106,6 +111,83 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
     return captureButtonId;
   }
 
+  function toJsonSafe(value, depth = 0) {
+    if (depth > 8) {
+      return null;
+    }
+    if (
+      value === null
+      || value === undefined
+      || typeof value === "string"
+      || typeof value === "number"
+      || typeof value === "boolean"
+    ) {
+      return value;
+    }
+    if (typeof value === "bigint") {
+      return Number(value);
+    }
+    if (Array.isArray(value)) {
+      return value.map((entry) => toJsonSafe(entry, depth + 1));
+    }
+    if (value instanceof Map) {
+      return Array.from(value.entries()).map(([key, entry]) => [
+        typeof key === "string" ? key : String(key),
+        toJsonSafe(entry, depth + 1),
+      ]);
+    }
+    if (value instanceof Set) {
+      return Array.from(value.values()).map((entry) => toJsonSafe(entry, depth + 1));
+    }
+    if (typeof value === "object") {
+      const json = {};
+      for (const [key, entry] of Object.entries(value)) {
+        json[key] = toJsonSafe(entry, depth + 1);
+      }
+      return json;
+    }
+    return String(value);
+  }
+
+  function toFiniteNumber(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  function resolveReduxStore() {
+    const roots = [document.getElementById("root"), document.getElementById("meeting-app")].filter(Boolean);
+    for (const rootNode of roots) {
+      const reactKeys = Object.getOwnPropertyNames(rootNode).filter((key) => key.startsWith("__reactContainer") || key.startsWith("__reactFiber"));
+      for (const reactKey of reactKeys) {
+        const initialFiber = rootNode[reactKey];
+        const queue = [initialFiber];
+        const seen = new Set();
+        while (queue.length) {
+          const fiber = queue.shift();
+          if (!fiber || seen.has(fiber)) {
+            continue;
+          }
+          seen.add(fiber);
+          const directStore = fiber.memoizedProps?.store;
+          if (directStore && typeof directStore.getState === "function" && typeof directStore.subscribe === "function") {
+            return directStore;
+          }
+          const contextStore = fiber.memoizedProps?.value?.store;
+          if (contextStore && typeof contextStore.getState === "function" && typeof contextStore.subscribe === "function") {
+            return contextStore;
+          }
+          if (fiber.child) {
+            queue.push(fiber.child);
+          }
+          if (fiber.sibling) {
+            queue.push(fiber.sibling);
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   async function start() {
     if (state.runPromise) {
       return state.runPromise;
@@ -148,8 +230,6 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           user_agent: navigator.userAgent,
           ts_unix_ms: Date.now(),
         }));
-
-        await openChatPanel();
 
         const archiveStreamId = crypto.randomUUID();
         const liveStreamId = crypto.randomUUID();
@@ -219,12 +299,13 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
         }));
 
         let currentSpeaker = null;
-        function emitDomEvent(kind, payload) {
+        function emitDomEvent(kind, payload, raw) {
           if (session.readyState !== WebSocket.OPEN) {
             return;
           }
           session.send(JSON.stringify({
             type: "dom.event",
+            raw: raw === undefined ? undefined : toJsonSafe(raw),
             event: {
               meeting_run_id: config.meetingRunId,
               room_id: config.roomId,
@@ -264,40 +345,342 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           }
         }
 
-        const seenChat = new Set();
+        const seenChatState = new Map();
+        function parseChatRowLabel(rowLabel) {
+          if (!rowLabel) {
+            return null;
+          }
+          const match = rowLabel.match(/^(.*?) to (.*?), (\d{1,2}:\d{2} [AP]M), (.*)$/);
+          if (!match) {
+            return null;
+          }
+          return {
+            sender: match[1]?.trim() || null,
+            receiver: match[2]?.trim() || null,
+            timeLabel: match[3]?.trim() || null,
+            text: match[4]?.trim() || "",
+          };
+        }
+
+        function extractChatRecord(element) {
+          const container = element.matches("[class*='chat-item-container']")
+            ? element
+            : element.closest("[class*='chat-item-container']");
+          if (!(container instanceof HTMLElement)) {
+            return null;
+          }
+          const rowLabel = container.querySelector("[class*='new-chat-message__container'][role='row']")?.getAttribute("aria-label") || null;
+          const parsedRow = parseChatRowLabel(rowLabel);
+          const sender = container.querySelector("[class*='chat-item__sender']")?.textContent?.trim() || parsedRow?.sender || null;
+          const receiver = container.querySelector("[class*='chat-item__receiver']")?.textContent?.trim() || parsedRow?.receiver || null;
+          const text = (
+            container.querySelector("[class*='new-chat-message__text-box']")?.textContent
+            || container.querySelector("[class*='chat-rtf-box__display']")?.textContent
+            || container.querySelector("[class*='message__text']")?.textContent
+            || parsedRow?.text
+            || ""
+          ).trim();
+          const timeLabel = container.querySelector("[class*='time-stamp']")?.textContent?.trim() || parsedRow?.timeLabel || null;
+          if (!text) {
+            return null;
+          }
+          const dedupeKey = rowLabel || [sender || "", receiver || "", timeLabel || "", text].join("|");
+          return {
+            chatMessageId: dedupeKey,
+            signature: JSON.stringify({
+              sender,
+              receiver,
+              timeLabel,
+              text,
+            }),
+            payload: {
+              chat_message_id: dedupeKey,
+              sender_display_name: sender,
+              receiver_display_name: receiver,
+              visibility: receiver && receiver.toLowerCase() !== "everyone" ? "direct" : "everyone",
+              text,
+              sent_at_unix_ms: Date.now(),
+            },
+            raw: {
+              row_label: rowLabel,
+              sender,
+              receiver,
+              time_label: timeLabel,
+              text,
+              capture_strategy: "dom_fallback",
+            },
+          };
+        }
+
+        function extractStoreChatRecord(message) {
+          if (!message || typeof message !== "object") {
+            return null;
+          }
+          const content = message.content && typeof message.content === "object" ? message.content : {};
+          const chatMessageId = (
+            message.msgId
+            || message.xmppMsgId
+            || content.msgId
+            || content.xmppMsgId
+            || null
+          );
+          const text = (
+            content.text
+            || content.snsBody
+            || message.text
+            || ""
+          ).trim();
+          if (!chatMessageId || !text) {
+            return null;
+          }
+          const senderDisplayName = (
+            message.sender
+            || content.senderName
+            || message.chatSender?.displayName
+            || null
+          );
+          const receiverDisplayName = (
+            message.receiver
+            || message.chatReceiver?.displayName
+            || null
+          );
+          const senderUserId = toFiniteNumber(message.senderId ?? message.chatSender?.userId);
+          const receiverUserId = toFiniteNumber(message.receiverId ?? message.chatReceiver?.userId);
+          const mainChatMessageId = typeof message.mainMsgId === "string" && message.mainMsgId.trim() ? message.mainMsgId.trim() : null;
+          const threadReplyCount = toFiniteNumber(message.threadCount) ?? 0;
+          const sentAtUnixMs = toFiniteNumber(message.t ?? content.t) ?? Date.now();
+          const isThreadReply = Boolean(message.isThread || mainChatMessageId);
+          const isEdited = Boolean(message.isEdited || content.isEdited);
+          const chatType = typeof content.chatType === "string" ? content.chatType : null;
+          const details = {
+            capture_strategy: "redux_store",
+            sender_user_id: senderUserId,
+            receiver_user_id: receiverUserId,
+            sender_screen_name: typeof message.senderSN === "string" ? message.senderSN : null,
+            receiver_jid: typeof message.receiverJid === "string" ? message.receiverJid : null,
+            channel_id: typeof content.toChannel === "string" ? content.toChannel : null,
+            chat_type: chatType,
+            msg_type: typeof content.msgType === "string" ? content.msgType : null,
+            msg_feature: typeof content.msgFeature === "string" ? content.msgFeature : null,
+            main_chat_message_id: mainChatMessageId,
+            thread_reply_count: threadReplyCount,
+            truncate_count: toFiniteNumber(message.truncateCount),
+            fold: toFiniteNumber(message.fold),
+            is_thread_reply: isThreadReply,
+            is_thread_root: !mainChatMessageId && threadReplyCount > 0,
+            is_edited: isEdited,
+            is_my_message: Boolean(message.isMyMessage || message.isSenderMe),
+            is_to_my_message: Boolean(message.isToMyMessage),
+            is_at_me: Boolean(message.isAtMe),
+            is_at_all: Boolean(message.isAtAll),
+            reaction_count: toFiniteNumber(message.voteCount),
+          };
+          return {
+            chatMessageId,
+            signature: JSON.stringify({
+              text,
+              senderDisplayName,
+              receiverDisplayName,
+              senderUserId,
+              receiverUserId,
+              mainChatMessageId,
+              threadReplyCount,
+              isThreadReply,
+              isEdited,
+              chatType,
+              reactionCount: details.reaction_count,
+            }),
+            payload: {
+              chat_message_id: chatMessageId,
+              sender_display_name: senderDisplayName,
+              sender_user_id: senderUserId,
+              receiver_display_name: receiverDisplayName,
+              receiver_user_id: receiverUserId,
+              visibility: receiverDisplayName && receiverDisplayName.toLowerCase() !== "everyone" ? "direct" : "everyone",
+              text,
+              sent_at_unix_ms: sentAtUnixMs,
+              main_chat_message_id: mainChatMessageId,
+              thread_reply_count: threadReplyCount,
+              is_thread_reply: isThreadReply,
+              is_edited: isEdited,
+              chat_type: chatType,
+              details,
+            },
+            raw: message,
+          };
+        }
+
+        function emitChatRecord(record) {
+          if (!record) {
+            return;
+          }
+          const previousSignature = seenChatState.get(record.chatMessageId);
+          if (previousSignature === record.signature) {
+            return;
+          }
+          seenChatState.set(record.chatMessageId, record.signature);
+          emitDomEvent("zoom.chat.message", record.payload, record.raw);
+        }
+
+        function emitChatFromNode(node) {
+          if (!(node instanceof HTMLElement)) {
+            return;
+          }
+          const candidates = node.matches("[class*='chat-item-container']")
+            ? [node]
+            : Array.from(node.querySelectorAll("[class*='chat-item-container']"));
+          for (const candidate of candidates) {
+            const record = extractChatRecord(candidate);
+            emitChatRecord(record);
+          }
+        }
+
         function observeChatList(chatList) {
+          for (const existing of chatList.querySelectorAll("[class*='chat-item-container']")) {
+            emitChatFromNode(existing);
+          }
           new MutationObserver((mutations) => {
             for (const mutation of mutations) {
               for (const node of mutation.addedNodes) {
-                if (!(node instanceof HTMLElement)) {
-                  continue;
-                }
-                const candidates = node.matches("[class*='chat-item']")
-                  ? [node]
-                  : Array.from(node.querySelectorAll("[class*='chat-item']"));
-                for (const element of candidates) {
-                  const id = (element.textContent || "").trim().slice(0, 120);
-                  if (!id || seenChat.has(id)) {
-                    continue;
-                  }
-                  seenChat.add(id);
-                  const sender = element.querySelector("[class*='chat-item__sender']")?.textContent?.trim() || null;
-                  const receiver = element.querySelector("[class*='chat-item__receiver']")?.textContent?.trim() || null;
-                  const text = element.querySelector("[class*='message__text']")?.textContent?.trim() || "";
-                  if (text) {
-                    emitDomEvent("zoom.chat.message", {
-                      chat_message_id: crypto.randomUUID(),
-                      sender_display_name: sender,
-                      receiver_display_name: receiver,
-                      visibility: receiver ? "direct" : "everyone",
-                      text,
-                      sent_at_unix_ms: Date.now(),
-                    });
-                  }
-                }
+                emitChatFromNode(node);
               }
             }
           }).observe(chatList, { childList: true, subtree: true });
+        }
+
+        function observeChatStore() {
+          const store = resolveReduxStore();
+          if (!store) {
+            return false;
+          }
+          const processState = () => {
+            const stateSnapshot = store.getState();
+            const messages = stateSnapshot?.newChat?.meetingChat
+              || stateSnapshot?.chat?.meetingChat
+              || [];
+            if (!Array.isArray(messages)) {
+              return;
+            }
+            for (const message of messages) {
+              emitChatRecord(extractStoreChatRecord(message));
+            }
+          };
+          processState();
+          store.subscribe(processState);
+          return true;
+        }
+
+        const seenAttendees = new Map();
+        function buildAttendeeId(attendee) {
+          const userId = toFiniteNumber(attendee?.userId);
+          if (userId !== null) {
+            return "zoom_user:" + userId;
+          }
+          if (typeof attendee?.strConfUserID === "string" && attendee.strConfUserID.trim()) {
+            return "conf_user:" + attendee.strConfUserID.trim();
+          }
+          if (typeof attendee?.zoomID === "string" && attendee.zoomID.trim()) {
+            return "zoom_id:" + attendee.zoomID.trim();
+          }
+          if (typeof attendee?.displayName === "string" && attendee.displayName.trim()) {
+            return "display_name:" + attendee.displayName.trim();
+          }
+          return null;
+        }
+
+        function extractAttendeeRecord(attendee, backfilled) {
+          if (!attendee || typeof attendee !== "object") {
+            return null;
+          }
+          const attendeeId = buildAttendeeId(attendee);
+          if (!attendeeId) {
+            return null;
+          }
+          const payload = {
+            attendee_id: attendeeId,
+            user_id: toFiniteNumber(attendee.userId),
+            display_name: typeof attendee.displayName === "string" ? attendee.displayName : null,
+            is_host: Boolean(attendee.isHost),
+            is_co_host: Boolean(attendee.bCoHost),
+            is_guest: Boolean(attendee.isGuest),
+            muted: typeof attendee.muted === "boolean" ? attendee.muted : null,
+            video_on: typeof attendee.bVideoOn === "boolean" ? attendee.bVideoOn : null,
+            audio_connection: typeof attendee.audio === "string" ? attendee.audio : null,
+            last_spoken_at_unix_ms: toFiniteNumber(attendee.lastSpokenTime),
+            backfilled,
+            details: {
+              capture_strategy: "redux_store",
+              user_guid: typeof attendee.userGUID === "string" ? attendee.userGUID : null,
+              conf_user_id: typeof attendee.strConfUserID === "string" ? attendee.strConfUserID : null,
+              zoom_id: typeof attendee.zoomID === "string" ? attendee.zoomID : null,
+              unique_index: toFiniteNumber(attendee.uniqueIndex),
+              user_role: toFiniteNumber(attendee.userRole),
+              audio_connection_status: toFiniteNumber(attendee.audioConnectionStatus),
+              participant_id: toFiniteNumber(attendee.participantId),
+              device_os: typeof attendee.pwaOS === "string" ? attendee.pwaOS : typeof attendee.os === "string" ? attendee.os : null,
+              can_record: toFiniteNumber(attendee.canRecord),
+            },
+          };
+          return {
+            attendeeId,
+            signature: JSON.stringify({
+              display_name: payload.display_name,
+              is_host: payload.is_host,
+              is_co_host: payload.is_co_host,
+              is_guest: payload.is_guest,
+              muted: payload.muted,
+              video_on: payload.video_on,
+              audio_connection: payload.audio_connection,
+            }),
+            payload,
+            raw: attendee,
+          };
+        }
+
+        function observeAttendeeStore() {
+          const store = resolveReduxStore();
+          if (!store) {
+            return false;
+          }
+          let initialized = false;
+          const processState = () => {
+            const attendees = store.getState()?.attendeesList?.attendeesList;
+            if (!Array.isArray(attendees)) {
+              return;
+            }
+            const nextAttendeeIds = new Set();
+            for (const attendee of attendees) {
+              const record = extractAttendeeRecord(attendee, !initialized);
+              if (!record) {
+                continue;
+              }
+              nextAttendeeIds.add(record.attendeeId);
+              if (!seenAttendees.has(record.attendeeId)) {
+                seenAttendees.set(record.attendeeId, record);
+                emitDomEvent("zoom.attendee.joined", record.payload, record.raw);
+                continue;
+              }
+              const previousRecord = seenAttendees.get(record.attendeeId);
+              seenAttendees.set(record.attendeeId, record);
+              if (previousRecord?.signature !== record.signature) {
+                continue;
+              }
+            }
+            for (const [attendeeId, record] of seenAttendees.entries()) {
+              if (nextAttendeeIds.has(attendeeId)) {
+                continue;
+              }
+              emitDomEvent("zoom.attendee.left", {
+                ...record.payload,
+                backfilled: false,
+              }, record.raw);
+              seenAttendees.delete(attendeeId);
+            }
+            initialized = true;
+          };
+          processState();
+          store.subscribe(processState);
+          return true;
         }
 
         const meetingApp = document.getElementById("meeting-app");
@@ -312,14 +695,20 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
         }
         setInterval(scanSpeaker, 1000);
 
-        const chatPoll = setInterval(() => {
-          const chatList = document.querySelector("[class*='chat-container'] [class*='chat-list']")
-            || document.querySelector(".chat-container__chat-list");
-          if (chatList) {
-            observeChatList(chatList);
-            clearInterval(chatPoll);
-          }
-        }, 1500);
+        observeAttendeeStore();
+
+        if (!observeChatStore()) {
+          void openChatPanel().then(() => {
+            const chatPoll = setInterval(() => {
+              const chatList = document.querySelector("[class*='chat-container'] [class*='chat-list']")
+                || document.querySelector(".chat-container__chat-list");
+              if (chatList) {
+                observeChatList(chatList);
+                clearInterval(chatPoll);
+              }
+            }, 1500);
+          });
+        }
 
         audioTracks[0].addEventListener("ended", () => {
           setPhase("stopped");

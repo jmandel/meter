@@ -32,6 +32,8 @@ export type EventKind =
   | "browser.page.loaded"
   | "browser.capture.bootstrap_ready"
   | "zoom.chat.message"
+  | "zoom.attendee.joined"
+  | "zoom.attendee.left"
   | "zoom.speaker.active"
   | "zoom.meeting.joined"
   | "zoom.meeting.left"
@@ -189,10 +191,18 @@ export interface ChatMessageRecord {
   meeting_run_id: string;
   room_id: string;
   sender_display_name: string | null;
+  sender_user_id?: number | null;
   receiver_display_name: string | null;
+  receiver_user_id?: number | null;
   visibility: "everyone" | "direct" | "panel_unknown";
   text: string;
   sent_at: string;
+  main_chat_message_id?: string | null;
+  thread_reply_count?: number | null;
+  is_thread_reply?: boolean;
+  is_edited?: boolean;
+  chat_type?: string | null;
+  details?: Record<string, unknown> | null;
 }
 
 export interface SpeakerSpanRecord {
@@ -301,13 +311,36 @@ export interface ZoomSpeakerActivePayload {
   speaker_display_name: string | null;
 }
 
+export interface ZoomAttendeePresencePayload {
+  attendee_id: string;
+  user_id: number | null;
+  display_name: string | null;
+  is_host: boolean;
+  is_co_host: boolean;
+  is_guest: boolean;
+  muted: boolean | null;
+  video_on: boolean | null;
+  audio_connection: string | null;
+  last_spoken_at_unix_ms: number | null;
+  backfilled: boolean;
+  details?: Record<string, unknown> | null;
+}
+
 export interface ZoomChatMessagePayload {
   chat_message_id: string;
   sender_display_name: string | null;
+  sender_user_id?: number | null;
   receiver_display_name: string | null;
+  receiver_user_id?: number | null;
   visibility: "everyone" | "direct" | "panel_unknown";
   text: string;
   sent_at_unix_ms: number;
+  main_chat_message_id?: string | null;
+  thread_reply_count?: number | null;
+  is_thread_reply?: boolean;
+  is_edited?: boolean;
+  chat_type?: string | null;
+  details?: Record<string, unknown> | null;
 }
 
 export interface AudioCaptureStartedPayload {
@@ -443,6 +476,7 @@ export interface BrowserCaptureStoppedMessage {
 export interface BrowserDomEventMessage {
   type: "dom.event";
   event: EventEnvelope<unknown>;
+  raw?: unknown;
 }
 
 export type BrowserControlMessage =
