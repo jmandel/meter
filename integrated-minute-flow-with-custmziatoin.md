@@ -168,10 +168,10 @@ Suggested metadata:
 - `tmux_session_name`
 - `started_at`
 - `ended_at`
+- `prompt_template_id`
 - `prompt_label`
 - `prompt_hash`
 - `user_prompt_body`
-- `user_final_prompt_body`
 - `provider_command`
 - `working_dir`
 - `last_minutes_update_at`
@@ -219,10 +219,10 @@ Suggested schema:
 - `status`
 - `tmux_session_name`
 - `generator_command`
+- `prompt_template_id`
 - `prompt_label`
 - `prompt_hash`
 - `user_prompt_body`
-- `user_final_prompt_body`
 - `restarted_from_minute_job_id`
 - `started_at_unix_ms`
 - `ended_at_unix_ms`
@@ -334,14 +334,12 @@ Contains things like:
 
 ### Finalization prompt body
 
-Optional separate user-editable body for the end-of-meeting cleanup pass.
-
 ### Resolved prompt
 
 At job launch:
 
 - Meter builds `resolved_system_prompt = locked_preamble + user_prompt_body`
-- Meter builds `resolved_final_prompt = locked_final_preamble + user_final_prompt_body`
+- Meter keeps the end-of-meeting cleanup instructions in a locked final prompt
 - Meter snapshots both into the run dir and DB
 
 This makes behavior reproducible even if templates change later.
@@ -387,9 +385,9 @@ Example request body:
 
 ```json
 {
+  "prompt_template_id": "formal-working-group-minutes",
   "prompt_label": "FHIR WG dense technical notes",
-  "user_prompt_body": "Write compact, technical minutes with inline tracker links...",
-  "user_final_prompt_body": "At the end, add a concise summary..."
+  "user_prompt_body": "Write compact, technical minutes with inline tracker links..."
 }
 ```
 
@@ -397,9 +395,9 @@ Example request body:
 
 ```json
 {
+  "prompt_template_id": "action-oriented-minutes",
   "prompt_label": "FHIR WG dense technical notes v2",
   "user_prompt_body": "Be denser and track open design tensions explicitly...",
-  "user_final_prompt_body": "Keep the final summary under six bullets...",
   "reason": "user_resteer"
 }
 ```

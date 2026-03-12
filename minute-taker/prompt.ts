@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 
-import { DEFAULT_MINUTE_FINAL_PROMPT_BODY, DEFAULT_MINUTE_PROMPT_BODY } from "../src/minute-prompts";
+import { DEFAULT_MINUTE_PROMPT_BODY, getMinutePromptTemplate } from "../src/minute-prompts";
 
 const PROMPTS_DIR = join(dirname(import.meta.path), "prompts");
 
@@ -16,10 +16,12 @@ function loadPrompt(name: string, vars: Record<string, string> = {}): string {
 export function buildSystemPrompt(config: {
   meetingId: string;
   meetingRunId: string;
+  promptTemplateId?: string | null;
   userPromptBody?: string | null;
 }): string {
   const base = loadPrompt("system.md", config);
-  const userPromptBody = config.userPromptBody?.trim() || DEFAULT_MINUTE_PROMPT_BODY;
+  const templatePromptBody = getMinutePromptTemplate(config.promptTemplateId)?.prompt_body ?? DEFAULT_MINUTE_PROMPT_BODY;
+  const userPromptBody = config.userPromptBody?.trim() || templatePromptBody;
   return `${base}\n\n## Minutes Guidance\n\n${userPromptBody}`;
 }
 
@@ -41,11 +43,8 @@ export function formatChunkMessage(
 
 export function buildFinalMessage(
   chunk: { segmentIndex: number; content: string } | null,
-  userFinalPromptBody?: string | null,
 ): string {
-  const base = loadPrompt("final.md");
-  const customization = userFinalPromptBody?.trim() || DEFAULT_MINUTE_FINAL_PROMPT_BODY;
-  const finalPrompt = `${base}\n\n## Finalization Guidance\n\n${customization}`;
+  const finalPrompt = loadPrompt("final.md");
   if (chunk) {
     return `--- Final transcript chunk ${chunk.segmentIndex} (meeting ended) ---\n${chunk.content}\n--- end chunk ---\n${finalPrompt}`;
   }

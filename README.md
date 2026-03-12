@@ -290,7 +290,7 @@ Current behavior:
 
 The user-editable prompt surface is intentionally broad:
 
-- users edit the substantive minute-taking prompt body and optional finalization prompt body
+- users choose a named minute style template and can freely edit the resulting substantive minute-taking prompt body
 - Meter keeps the low-level operational prompt contract locked
 
 The live minutes panel in the dashboard tails the rendered Markdown from the managed minute-taker job. `GET /v1/meeting-runs/:id/minutes/view` opens a streaming viewer in a new tab, `GET /v1/meeting-runs/:id/minutes.md` returns the raw markdown, and `GET /v1/meeting-runs/:id/minutes/stream` streams settled snapshot updates keyed to the current minute job for that meeting run.

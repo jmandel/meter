@@ -69,6 +69,11 @@ import {
   randomToken,
   uuidv7,
 } from "./utils";
+import {
+  DEFAULT_MINUTE_PROMPT_TEMPLATE_ID,
+  getMinutePromptTemplate,
+  listMinutePromptTemplates,
+} from "./minute-prompts";
 import { parseSimulationScript, type SimulationScenario, type SimulationStep } from "./simulation";
 import { normalizeZoomJoinUrl } from "./zoom";
 
@@ -367,6 +372,9 @@ export class CoordinatorApp {
     try {
       if (url.pathname === "/v1/health" && request.method === "GET") {
         return this.handleHealth(request);
+      }
+      if (url.pathname === "/v1/minute-prompt-templates" && request.method === "GET") {
+        return this.handleListMinutePromptTemplates();
       }
       if (url.pathname === "/v1/meeting-runs" && request.method === "POST") {
         return await this.handleCreateMeetingRun(request);
@@ -782,10 +790,10 @@ export class CoordinatorApp {
       state: "starting",
       tmux_session_name: tmuxSessionName,
       command,
+      prompt_template_id: promptConfig.prompt_template_id,
       prompt_label: promptConfig.prompt_label,
       prompt_hash: promptHash,
       user_prompt_body: promptConfig.user_prompt_body,
-      user_final_prompt_body: promptConfig.user_final_prompt_body,
       claude_model: promptConfig.claude_model,
       claude_effort: promptConfig.claude_effort,
       working_dir: workingDir,
@@ -832,6 +840,7 @@ export class CoordinatorApp {
     const appended = this.storage.appendEvents([
       this.buildCoordinatorEvent(meetingRun.meeting_run_id, meetingRun.room_id, restartedFromMinuteJobId ? "minutes.job.restarting" : "minutes.job.started", {
         minute_job_id: minuteJobId,
+        prompt_template_id: promptConfig.prompt_template_id,
         tmux_session_name: tmuxSessionName,
         prompt_label: promptConfig.prompt_label,
         claude_model: promptConfig.claude_model,
@@ -913,18 +922,20 @@ export class CoordinatorApp {
   }
 
   private buildMinutePromptConfig(input: StartMinuteJobRequest | RestartMinuteJobRequest | null | undefined): MinutePromptConfig {
-    const promptLabel = input?.prompt_label?.trim() || null;
+    const requestedTemplateId = input?.prompt_template_id?.trim() || DEFAULT_MINUTE_PROMPT_TEMPLATE_ID;
+    const template = getMinutePromptTemplate(requestedTemplateId);
+    const promptTemplateId = template?.template_id ?? DEFAULT_MINUTE_PROMPT_TEMPLATE_ID;
+    const promptLabel = input?.prompt_label?.trim() || template?.name || null;
     const userPromptBody = input?.user_prompt_body?.trim() || null;
-    const userFinalPromptBody = input?.user_final_prompt_body?.trim() || null;
     const claudeModel = input?.claude_model?.trim() || process.env.METER_MINUTE_TAKER_MODEL?.trim() || null;
     const requestedEffort = input?.claude_effort?.trim() || process.env.METER_MINUTE_TAKER_EFFORT?.trim() || null;
     const claudeEffort = requestedEffort && ["low", "medium", "high", "max"].includes(requestedEffort)
       ? requestedEffort as MinutePromptConfig["claude_effort"]
       : null;
     return {
+      prompt_template_id: promptTemplateId,
       prompt_label: promptLabel,
       user_prompt_body: userPromptBody,
-      user_final_prompt_body: userFinalPromptBody,
       claude_model: claudeModel,
       claude_effort: claudeEffort,
     };
@@ -1384,6 +1395,13 @@ export class CoordinatorApp {
       meeting_id: decodeURIComponent(meetingId),
       room_id: roomId,
       meeting_run,
+    });
+  }
+
+  private handleListMinutePromptTemplates(): Response {
+    return jsonResponse({
+      default_template_id: DEFAULT_MINUTE_PROMPT_TEMPLATE_ID,
+      items: listMinutePromptTemplates(),
     });
   }
 

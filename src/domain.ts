@@ -178,9 +178,9 @@ export type MinuteJobState =
 export type MinuteClaudeEffort = "low" | "medium" | "high" | "max";
 
 export interface MinutePromptConfig {
+  prompt_template_id: string | null;
   prompt_label: string | null;
   user_prompt_body: string | null;
-  user_final_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
 }
@@ -192,10 +192,10 @@ export interface MinuteJobRecord {
   state: MinuteJobState;
   tmux_session_name: string | null;
   command: string | null;
+  prompt_template_id: string | null;
   prompt_label: string | null;
   prompt_hash: string | null;
   user_prompt_body: string | null;
-  user_final_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
   working_dir: string;
@@ -222,9 +222,9 @@ export interface MinuteVersionRecord {
 }
 
 export interface StartMinuteJobRequest {
+  prompt_template_id?: string | null;
   prompt_label?: string | null;
   user_prompt_body?: string | null;
-  user_final_prompt_body?: string | null;
   claude_model?: string | null;
   claude_effort?: MinuteClaudeEffort | null;
 }

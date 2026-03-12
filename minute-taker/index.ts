@@ -53,15 +53,16 @@ interface RunMetadata {
   meeting_run_id: string;
   room_id: string;
   base_url: string;
+  prompt_template_id?: string | null;
   prompt_label?: string | null;
   claude_model?: string | null;
   claude_effort?: "low" | "medium" | "high" | "max" | null;
 }
 
 interface InjectedMinuteTakerConfig {
+  prompt_template_id?: string | null;
   prompt_label?: string | null;
   user_prompt_body?: string | null;
-  user_final_prompt_body?: string | null;
   claude_model?: string | null;
   claude_effort?: "low" | "medium" | "high" | "max" | null;
   reset_output?: boolean;
@@ -240,10 +241,10 @@ async function runPollingLoop(
         const chunk = processResponse(tracker, response);
         if (chunk) {
           await writeChunk(runDir, chunk.segmentIndex, chunk.content);
-          const msg = buildFinalMessage(chunk, injectedConfig.user_final_prompt_body ?? null);
+          const msg = buildFinalMessage(chunk);
           await pasteMessage(tmux, msg);
         } else {
-          const msg = buildFinalMessage(null, injectedConfig.user_final_prompt_body ?? null);
+          const msg = buildFinalMessage(null);
           await sendMessage(tmux, msg);
         }
         console.log("Waiting for minutes.md to update and settle...");
@@ -334,6 +335,7 @@ async function main() {
     meeting_run_id: runId,
     room_id: meetingRun.room_id,
     base_url: config.baseUrl,
+    prompt_template_id: injectedConfig.prompt_template_id ?? null,
     prompt_label: injectedConfig.prompt_label ?? null,
     claude_model: injectedConfig.claude_model?.trim() || config.claudeModel,
     claude_effort: injectedConfig.claude_effort?.trim() || config.claudeEffort,
@@ -344,7 +346,6 @@ async function main() {
     rmSync(`${runDir}/.system-prompt.txt`, { force: true });
     rmSync(`${runDir}/.launch-claude.sh`, { force: true });
     rmSync(`${runDir}/.user-prompt.txt`, { force: true });
-    rmSync(`${runDir}/.final-user-prompt.txt`, { force: true });
     mkdirSync(`${runDir}/chunks`, { recursive: true });
   }
   await Bun.write(`${runDir}/run.json`, `${JSON.stringify(metadata, null, 2)}\n`);
@@ -378,10 +379,10 @@ async function main() {
 
   // Launch Claude with run dir as cwd -- prompts use relative paths
   await Bun.write(`${runDir}/.user-prompt.txt`, `${injectedConfig.user_prompt_body?.trim() ?? ""}\n`);
-  await Bun.write(`${runDir}/.final-user-prompt.txt`, `${injectedConfig.user_final_prompt_body?.trim() ?? ""}\n`);
   const systemPrompt = buildSystemPrompt({
     meetingId,
     meetingRunId: runId,
+    promptTemplateId: injectedConfig.prompt_template_id ?? null,
     userPromptBody: injectedConfig.user_prompt_body ?? null,
   });
   await launchClaude(tmux, systemPrompt, {

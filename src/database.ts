@@ -97,10 +97,10 @@ interface MinuteJobInsertInput {
   state: MinuteJobState;
   tmux_session_name: string | null;
   command: string | null;
+  prompt_template_id: string | null;
   prompt_label: string | null;
   prompt_hash: string | null;
   user_prompt_body: string | null;
-  user_final_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
   working_dir: string;
@@ -113,10 +113,10 @@ interface MinuteJobPatch {
   state?: MinuteJobState;
   tmux_session_name?: string | null;
   command?: string | null;
+  prompt_template_id?: string | null;
   prompt_label?: string | null;
   prompt_hash?: string | null;
   user_prompt_body?: string | null;
-  user_final_prompt_body?: string | null;
   claude_model?: string | null;
   claude_effort?: MinuteClaudeEffort | null;
   latest_content_sha256?: string | null;
@@ -134,10 +134,10 @@ interface MinuteJobRow {
   state: MinuteJobState;
   tmux_session_name: string | null;
   command: string | null;
+  prompt_template_id: string | null;
   prompt_label: string | null;
   prompt_hash: string | null;
   user_prompt_body: string | null;
-  user_final_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
   working_dir: string;
@@ -336,10 +336,10 @@ export class AppDatabase {
         state TEXT NOT NULL,
         tmux_session_name TEXT,
         command TEXT,
+        prompt_template_id TEXT,
         prompt_label TEXT,
         prompt_hash TEXT,
         user_prompt_body TEXT,
-        user_final_prompt_body TEXT,
         claude_model TEXT,
         claude_effort TEXT,
         working_dir TEXT NOT NULL,
@@ -393,6 +393,7 @@ export class AppDatabase {
     this.ensureColumn("chat_messages", "is_edited", "INTEGER");
     this.ensureColumn("chat_messages", "chat_type", "TEXT");
     this.ensureColumn("chat_messages", "details_json", "TEXT");
+    this.ensureColumn("minute_jobs", "prompt_template_id", "TEXT");
     this.ensureColumn("minute_jobs", "claude_model", "TEXT");
     this.ensureColumn("minute_jobs", "claude_effort", "TEXT");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_chat_messages_main_chat_message_id ON chat_messages(main_chat_message_id);");
@@ -1007,10 +1008,10 @@ export class AppDatabase {
       state: row.state,
       tmux_session_name: row.tmux_session_name,
       command: row.command,
+      prompt_template_id: row.prompt_template_id,
       prompt_label: row.prompt_label,
       prompt_hash: row.prompt_hash,
       user_prompt_body: row.user_prompt_body,
-      user_final_prompt_body: row.user_final_prompt_body,
       claude_model: row.claude_model,
       claude_effort: row.claude_effort,
       working_dir: row.working_dir,
@@ -1085,10 +1086,10 @@ export class AppDatabase {
           state,
           tmux_session_name,
           command,
+          prompt_template_id,
           prompt_label,
           prompt_hash,
           user_prompt_body,
-          user_final_prompt_body,
           claude_model,
           claude_effort,
           working_dir,
@@ -1110,10 +1111,10 @@ export class AppDatabase {
         input.state,
         input.tmux_session_name,
         input.command,
+        input.prompt_template_id,
         input.prompt_label,
         input.prompt_hash,
         input.user_prompt_body,
-        input.user_final_prompt_body,
         input.claude_model,
         input.claude_effort,
         input.working_dir,

@@ -2,7 +2,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { marked } from "marked";
 
-import { DEFAULT_MINUTE_FINAL_PROMPT_BODY, DEFAULT_MINUTE_PROMPT_BODY } from "../src/minute-prompts";
+import { listMinutePromptTemplates, type MinutePromptTemplate } from "../src/minute-prompts";
+import {
+  MINUTE_CLAUDE_EFFORT_OPTIONS,
+  MINUTE_CLAUDE_MODEL_SUGGESTIONS,
+  type MinuteDraftFields,
+  type MinutePresetSource,
+  type UiMinuteClaudeEffort,
+  minutePromptRequestBody,
+  useMinutePresetDraftManager,
+} from "./minute-prompt-drafts";
 
 const styles = `
   :root {
@@ -427,9 +436,9 @@ type MinuteJobRecord = {
   minute_job_id: string;
   state: MinuteJobState;
   tmux_session_name: string | null;
+  prompt_template_id: string | null;
   prompt_label: string | null;
   user_prompt_body: string | null;
-  user_final_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: Exclude<MinuteClaudeEffort, ""> | null;
   latest_version_seq: number;
@@ -448,6 +457,12 @@ type MinuteDetailsResponse = {
   minute_job: MinuteJobRecord | null;
   latest_version: MinuteVersionRecord | null;
 };
+
+type MinutePromptTemplatesResponse = {
+  items: MinutePromptTemplate[];
+};
+
+const BUILTIN_MINUTE_PROMPT_TEMPLATES = listMinutePromptTemplates();
 
 type StreamPayload = {
   minute_job: MinuteJobRecord;
@@ -549,27 +564,6 @@ function applyMarkdownHighlights(container: HTMLElement, previousLeafTexts: Set<
   return nextLeafTexts;
 }
 
-function normalizePromptBody(value: string | null | undefined): string {
-  return value?.trim() ? value : DEFAULT_MINUTE_PROMPT_BODY;
-}
-
-function normalizeFinalPromptBody(value: string | null | undefined): string {
-  return value?.trim() ? value : DEFAULT_MINUTE_FINAL_PROMPT_BODY;
-}
-
-function serializePromptBody(value: string, fallback: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === fallback.trim()) {
-    return null;
-  }
-  return trimmed;
-}
-
-function serializeClaudeModel(value: string): string | null {
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
 function setStatusClass(root: HTMLElement | null, tone: "idle" | "live" | "reconnecting"): void {
   if (!root) {
     return;
@@ -622,11 +616,8 @@ function App() {
   const paths = useMemo(() => getPaths(), []);
   const [minuteJob, setMinuteJob] = useState<MinuteJobRecord | null>(null);
   const [version, setVersion] = useState<MinuteVersionRecord | null>(null);
+  const [minuteTemplates, setMinuteTemplates] = useState<MinutePromptTemplate[]>(BUILTIN_MINUTE_PROMPT_TEMPLATES);
   const [content, setContent] = useState("");
-  const [promptBody, setPromptBody] = useState(DEFAULT_MINUTE_PROMPT_BODY);
-  const [finalPromptBody, setFinalPromptBody] = useState(DEFAULT_MINUTE_FINAL_PROMPT_BODY);
-  const [claudeModel, setClaudeModel] = useState("");
-  const [claudeEffort, setClaudeEffort] = useState<MinuteClaudeEffort>("");
   const [requestState, setRequestState] = useState<"idle" | "starting" | "restarting" | "stopping">("idle");
   const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting">("connecting");
   const [statusLabel, setStatusLabel] = useState("Connecting");
@@ -637,8 +628,24 @@ function App() {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const previousLeafTextsRef = useRef(new Set<string>());
   const lastMarkdownRef = useRef("");
-  const formInitializedRef = useRef(false);
   const windowStickBottomRef = useRef(true);
+  const runningFields = useMemo<MinuteDraftFields | null>(() => {
+    if (!minuteJob) {
+      return null;
+    }
+    return {
+      promptTemplateId: minuteJob.prompt_template_id ?? BUILTIN_MINUTE_PROMPT_TEMPLATES[0]?.template_id ?? "formal-working-group-minutes",
+      promptBody: minuteJob.user_prompt_body ?? "",
+      claudeModel: minuteJob.claude_model ?? "",
+      claudeEffort: minuteJob.claude_effort ?? "",
+    };
+  }, [minuteJob]);
+  const minuteDraft = useMinutePresetDraftManager({
+    templates: minuteTemplates,
+    runningFields,
+    runningPromptLabel: minuteJob?.prompt_label ?? null,
+    preferRunningPreset: Boolean(minuteJob),
+  });
 
   const renderedContent = useMemo(() => renderMinutesMarkdown(content), [content]);
 
@@ -656,19 +663,20 @@ function App() {
     if (forceDraftReset) {
       setSettingsOpen(!payload.minute_job);
     }
-    if (payload.minute_job && (forceDraftReset || !formInitializedRef.current)) {
-      setPromptBody(normalizePromptBody(payload.minute_job.user_prompt_body));
-      setFinalPromptBody(normalizeFinalPromptBody(payload.minute_job.user_final_prompt_body));
-      setClaudeModel(payload.minute_job.claude_model ?? "");
-      setClaudeEffort(payload.minute_job.claude_effort ?? "");
-      formInitializedRef.current = true;
-    }
-    if (!payload.minute_job && !formInitializedRef.current) {
-      setPromptBody(DEFAULT_MINUTE_PROMPT_BODY);
-      setFinalPromptBody(DEFAULT_MINUTE_FINAL_PROMPT_BODY);
-      setClaudeModel("");
-      setClaudeEffort("");
-      formInitializedRef.current = true;
+  };
+
+  const loadTemplates = async () => {
+    try {
+      const response = await fetch("/v1/minute-prompt-templates", { cache: "no-store" });
+      if (!response.ok) {
+        return;
+      }
+      const payload = await response.json() as MinutePromptTemplatesResponse;
+      if (payload.items.length > 0) {
+        setMinuteTemplates(payload.items);
+      }
+    } catch {
+      // keep builtin fallback
     }
   };
 
@@ -699,6 +707,7 @@ function App() {
     if (paths.title) {
       document.title = `${paths.title} Minutes`;
     }
+    void loadTemplates();
     void loadDetails(true).catch((loadError) => {
       setError(loadError instanceof Error ? loadError.message : "Failed to load minute details");
     });
@@ -777,12 +786,9 @@ function App() {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(action === "stop" ? {} : {
-          user_prompt_body: serializePromptBody(promptBody, DEFAULT_MINUTE_PROMPT_BODY),
-          user_final_prompt_body: serializePromptBody(finalPromptBody, DEFAULT_MINUTE_FINAL_PROMPT_BODY),
-          claude_model: serializeClaudeModel(claudeModel),
-          claude_effort: claudeEffort || null,
-        }),
+        body: JSON.stringify(action === "stop"
+          ? {}
+          : minutePromptRequestBody(minuteTemplates, minuteDraft.currentFields, minuteDraft.promptLabel)),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
@@ -858,31 +864,84 @@ function App() {
             </button>
           </div>
           <label className="field">
-            <span>Minute prompt</span>
-            <AutoGrowTextarea value={promptBody} onChange={setPromptBody} />
+            <span>Prompt preset</span>
+            <select
+              value={minuteDraft.selectedSource}
+              onChange={(event) => minuteDraft.selectSource(event.target.value as MinutePresetSource)}
+            >
+              {minuteJob ? <option value="run">This run's saved settings</option> : null}
+              {minuteTemplates.map((template) => (
+                <option key={template.template_id} value={`template:${template.template_id}`}>
+                  {template.name}
+                </option>
+              ))}
+              {minuteDraft.presets.map((preset) => (
+                <option key={preset.name} value={`preset:${preset.name}`}>
+                  Local preset: {preset.name}
+                </option>
+              ))}
+            </select>
           </label>
+          <div className="meta-row">
+            <span className={`pill pill-${currentState}`}>{currentState}</span>
+            <span>{minuteDraft.hasUnsavedChanges ? "Unsaved local preset changes" : `Using ${minuteDraft.selectedLabel}`}</span>
+            {minuteDraft.selectedPresetName && !minuteDraft.hasUnsavedChanges ? (
+              <button className="ghost-button" onClick={minuteDraft.deleteSelectedPreset} type="button">
+                Delete preset
+              </button>
+            ) : null}
+          </div>
+          {minuteDraft.hasUnsavedChanges ? (
+            <div className="field">
+              <span>Save local preset as</span>
+              <div className="button-row">
+                <input
+                  type="text"
+                  placeholder="FHIR WG formal"
+                  value={minuteDraft.presetNameDraft}
+                  onChange={(event) => minuteDraft.setPresetNameDraft(event.target.value)}
+                />
+                <button className="secondary-button" onClick={minuteDraft.savePreset} type="button">
+                  Save preset
+                </button>
+                <button className="ghost-button" onClick={minuteDraft.resetDraftToSelected} type="button">
+                  Revert draft
+                </button>
+              </div>
+              {minuteDraft.presetError ? <div className="inline-error">{minuteDraft.presetError}</div> : null}
+            </div>
+          ) : null}
+          {minuteDraft.selectedTemplate ? (
+            <div className="meta-row">
+              <span>{minuteDraft.selectedTemplate.description}</span>
+            </div>
+          ) : null}
           <label className="field">
-            <span>Finalization prompt</span>
-            <AutoGrowTextarea value={finalPromptBody} onChange={setFinalPromptBody} />
+            <span>Minute prompt</span>
+            <AutoGrowTextarea value={minuteDraft.promptBody} onChange={minuteDraft.setPromptBody} />
           </label>
           <div className="field-grid">
             <label className="field">
               <span>Claude model</span>
-              <input
-                type="text"
-                placeholder="claude-sonnet-4-5"
-                value={claudeModel}
-                onChange={(event) => setClaudeModel(event.target.value)}
-              />
+              <select
+                value={minuteDraft.claudeModel}
+                onChange={(event) => minuteDraft.setClaudeModel(event.target.value)}
+              >
+                <option value="">Server default</option>
+                {MINUTE_CLAUDE_MODEL_SUGGESTIONS.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
             </label>
             <label className="field">
               <span>Claude effort</span>
-              <select value={claudeEffort} onChange={(event) => setClaudeEffort(event.target.value as MinuteClaudeEffort)}>
+              <select value={minuteDraft.claudeEffort} onChange={(event) => minuteDraft.setClaudeEffort(event.target.value as UiMinuteClaudeEffort)}>
                 <option value="">Server default</option>
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="max">Max</option>
+                {MINUTE_CLAUDE_EFFORT_OPTIONS.filter((value) => value).map((value) => (
+                  <option key={value} value={value}>{value[0].toUpperCase()}{value.slice(1)}</option>
+                ))}
               </select>
             </label>
           </div>
@@ -897,7 +956,6 @@ function App() {
             </button>
           </div>
           <div className="meta-row">
-            <span className={`pill pill-${currentState}`}>{currentState}</span>
             <span>{minuteJob?.claude_model ?? "default model"}</span>
             <span>{minuteJob?.claude_effort ?? "default effort"}</span>
           </div>

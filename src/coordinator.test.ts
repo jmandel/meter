@@ -723,11 +723,11 @@ if (config.reset_output) {
 }
 
 const prompt = (config.user_prompt_body ?? "default").trim() || "default";
-const finalPrompt = (config.user_final_prompt_body ?? "").trim();
+const promptTemplateId = (config.prompt_template_id ?? "").trim();
 const claudeModel = (config.claude_model ?? "").trim();
 const claudeEffort = (config.claude_effort ?? "").trim();
 const write = (label) => {
-  writeFileSync(path.join(runDir, "minutes.md"), "# Minutes\\n\\nPrompt: " + prompt + "\\n\\nFinal: " + finalPrompt + "\\n\\nModel: " + claudeModel + "\\n\\nEffort: " + claudeEffort + "\\n\\nState: " + label + "\\n");
+  writeFileSync(path.join(runDir, "minutes.md"), "# Minutes\\n\\nTemplate: " + promptTemplateId + "\\n\\nPrompt: " + prompt + "\\n\\nModel: " + claudeModel + "\\n\\nEffort: " + claudeEffort + "\\n\\nState: " + label + "\\n");
 };
 
 setTimeout(() => write("running"), 50);
@@ -785,8 +785,8 @@ process.on("SIGTERM", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        prompt_template_id: "decision-journal",
         user_prompt_body: "Alpha minutes",
-        user_final_prompt_body: "Tighten action items",
         claude_model: "claude-3-5-haiku-latest",
         claude_effort: "medium",
       }),
@@ -811,6 +811,7 @@ process.on("SIGTERM", () => {
     const currentMinutes = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`).then((value) => value.json()) as {
       minute_job: {
         minute_job_id: string;
+        prompt_template_id: string | null;
         claude_model: string | null;
         claude_effort: string | null;
         latest_version_seq: number;
@@ -819,11 +820,13 @@ process.on("SIGTERM", () => {
       latest_version: { content_markdown: string } | null;
     };
     expect(currentMinutes.minute_job?.minute_job_id).toBe(started.minute_job.minute_job_id);
+    expect(currentMinutes.minute_job?.prompt_template_id).toBe("decision-journal");
     expect(currentMinutes.minute_job?.claude_model).toBe("claude-3-5-haiku-latest");
     expect(currentMinutes.minute_job?.claude_effort).toBe("medium");
     expect(currentMinutes.minute_job?.latest_version_seq).toBeGreaterThan(0);
     expect(currentMinutes.minute_job?.last_update_at).toBeTruthy();
     expect(currentMinutes.latest_version?.content_markdown).toContain("Alpha minutes");
+    expect(currentMinutes.latest_version?.content_markdown).toContain("Template: decision-journal");
     expect(currentMinutes.latest_version?.content_markdown).toContain("Model: claude-3-5-haiku-latest");
     expect(currentMinutes.latest_version?.content_markdown).toContain("Effort: medium");
 
