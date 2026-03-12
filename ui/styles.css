@@ -826,12 +826,33 @@ button {
   gap: 10px;
 }
 
-.minutes-defaults-row {
+.minutes-preset-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.minutes-preset-picker {
+  min-width: min(280px, 100%);
+}
+
+.minutes-preset-save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.minutes-preset-name {
+  flex: 1 1 280px;
+}
+
+.minutes-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .minutes-config-grid {
@@ -878,6 +899,10 @@ button {
 
 .auto-grow-textarea {
   field-sizing: content;
+}
+
+.action-link-button {
+  text-decoration: none;
 }
 
 .minutes-meta-row {

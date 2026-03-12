@@ -103,9 +103,23 @@ interface EventRecord {
 
 const ACTIVE_STATES = new Set(["pending", "starting", "joining", "capturing", "stopping"]);
 const MINUTE_LOCAL_DEFAULTS_STORAGE_BASE = "meter:minutes:local-default";
+const MINUTE_LOCAL_PRESETS_STORAGE_KEY = `${MINUTE_LOCAL_DEFAULTS_STORAGE_BASE}:presets`;
+const MINUTE_LOCAL_SELECTED_PRESET_STORAGE_KEY = `${MINUTE_LOCAL_DEFAULTS_STORAGE_BASE}:selected`;
 const MINUTE_CLAUDE_EFFORT_OPTIONS = ["", "low", "medium", "high", "max"] as const;
 
 type UiMinuteClaudeEffort = (typeof MINUTE_CLAUDE_EFFORT_OPTIONS)[number];
+type MinutePresetSource = "default" | "run" | `preset:${string}`;
+
+interface MinuteDraftFields {
+  promptBody: string;
+  finalPromptBody: string;
+  claudeModel: string;
+  claudeEffort: UiMinuteClaudeEffort;
+}
+
+interface LocalMinutePreset extends MinuteDraftFields {
+  name: string;
+}
 
 function isActiveRun(run: MeetingRunRecord): boolean {
   if (!ACTIVE_STATES.has(run.state)) {
@@ -223,43 +237,385 @@ function serializeMinuteClaudeEffort(value: UiMinuteClaudeEffort): "low" | "medi
   return value || null;
 }
 
-function minuteLocalDefaultsStorageKey(kind: "prompt" | "final" | "model" | "effort"): string {
+function legacyMinuteLocalDefaultsStorageKey(kind: "prompt" | "final" | "model" | "effort"): string {
   return `${MINUTE_LOCAL_DEFAULTS_STORAGE_BASE}:${kind}`;
 }
 
-function readStoredPromptOverride(storageKey: string): string | null {
-  const stored = window.localStorage.getItem(storageKey);
-  if (!stored || !stored.trim()) {
-    window.localStorage.removeItem(storageKey);
+function defaultMinuteDraftFields(): MinuteDraftFields {
+  return {
+    promptBody: DEFAULT_MINUTE_PROMPT_BODY,
+    finalPromptBody: DEFAULT_MINUTE_FINAL_PROMPT_BODY,
+    claudeModel: "",
+    claudeEffort: "",
+  };
+}
+
+function normalizeMinuteDraftFields(fields: MinuteDraftFields): MinuteDraftFields {
+  return {
+    promptBody: effectiveMinutePromptBody(fields.promptBody),
+    finalPromptBody: effectiveMinuteFinalPromptBody(fields.finalPromptBody),
+    claudeModel: normalizeMinuteClaudeModel(fields.claudeModel),
+    claudeEffort: normalizeMinuteClaudeEffort(fields.claudeEffort),
+  };
+}
+
+function minuteDraftFieldsEqual(left: MinuteDraftFields, right: MinuteDraftFields): boolean {
+  return left.promptBody === right.promptBody
+    && left.finalPromptBody === right.finalPromptBody
+    && left.claudeModel === right.claudeModel
+    && left.claudeEffort === right.claudeEffort;
+}
+
+function minutePresetSourceForName(name: string): MinutePresetSource {
+  return `preset:${name}`;
+}
+
+function minutePresetNameFromSource(source: MinutePresetSource): string | null {
+  return source.startsWith("preset:") ? source.slice("preset:".length) : null;
+}
+
+function sortMinutePresets(presets: LocalMinutePreset[]): LocalMinutePreset[] {
+  return [...presets].sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }));
+}
+
+function normalizeLocalMinutePreset(input: unknown): LocalMinutePreset | null {
+  if (!input || typeof input !== "object") {
     return null;
   }
-  return stored;
-}
-
-function readStoredScalar(storageKey: string): string | null {
-  const stored = window.localStorage.getItem(storageKey);
-  if (!stored || !stored.trim()) {
-    window.localStorage.removeItem(storageKey);
+  const candidate = input as Partial<Record<string, unknown>>;
+  const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+  if (!name) {
     return null;
   }
-  return stored.trim();
+  const normalized = normalizeMinuteDraftFields({
+    promptBody: typeof candidate.promptBody === "string" ? candidate.promptBody : DEFAULT_MINUTE_PROMPT_BODY,
+    finalPromptBody: typeof candidate.finalPromptBody === "string" ? candidate.finalPromptBody : DEFAULT_MINUTE_FINAL_PROMPT_BODY,
+    claudeModel: typeof candidate.claudeModel === "string" ? candidate.claudeModel : "",
+    claudeEffort: typeof candidate.claudeEffort === "string" ? candidate.claudeEffort as UiMinuteClaudeEffort : "",
+  });
+  return {
+    name,
+    ...normalized,
+  };
 }
 
-function persistPromptDraft(storageKey: string, value: string, baseline: string): void {
-  if (!value.trim() || value.trim() === baseline.trim()) {
-    window.localStorage.removeItem(storageKey);
-    return;
+function buildUniqueMinutePresetName(existing: LocalMinutePreset[], baseName: string): string {
+  const trimmedBase = baseName.trim() || "Local custom";
+  const existingNames = new Set(existing.map((preset) => preset.name.toLowerCase()));
+  if (!existingNames.has(trimmedBase.toLowerCase())) {
+    return trimmedBase;
   }
-  window.localStorage.setItem(storageKey, value);
+  let index = 2;
+  while (existingNames.has(`${trimmedBase} ${index}`.toLowerCase())) {
+    index += 1;
+  }
+  return `${trimmedBase} ${index}`;
 }
 
-function persistScalarDraft(storageKey: string, value: string, baseline = ""): void {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === baseline.trim()) {
-    window.localStorage.removeItem(storageKey);
+function writeStoredMinutePresets(presets: LocalMinutePreset[]): void {
+  if (presets.length === 0) {
+    window.localStorage.removeItem(MINUTE_LOCAL_PRESETS_STORAGE_KEY);
     return;
   }
-  window.localStorage.setItem(storageKey, trimmed);
+  window.localStorage.setItem(MINUTE_LOCAL_PRESETS_STORAGE_KEY, JSON.stringify(sortMinutePresets(presets)));
+}
+
+function persistSelectedMinutePresetSource(source: MinutePresetSource): void {
+  if (source === "default" || source === "run") {
+    window.localStorage.removeItem(MINUTE_LOCAL_SELECTED_PRESET_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(MINUTE_LOCAL_SELECTED_PRESET_STORAGE_KEY, source);
+}
+
+function migrateLegacyMinuteLocalDefaults(existingPresets: LocalMinutePreset[]): LocalMinutePreset[] {
+  const legacyPrompt = window.localStorage.getItem(legacyMinuteLocalDefaultsStorageKey("prompt"));
+  const legacyFinal = window.localStorage.getItem(legacyMinuteLocalDefaultsStorageKey("final"));
+  const legacyModel = window.localStorage.getItem(legacyMinuteLocalDefaultsStorageKey("model"));
+  const legacyEffort = window.localStorage.getItem(legacyMinuteLocalDefaultsStorageKey("effort"));
+
+  const cleanupLegacy = () => {
+    window.localStorage.removeItem(legacyMinuteLocalDefaultsStorageKey("prompt"));
+    window.localStorage.removeItem(legacyMinuteLocalDefaultsStorageKey("final"));
+    window.localStorage.removeItem(legacyMinuteLocalDefaultsStorageKey("model"));
+    window.localStorage.removeItem(legacyMinuteLocalDefaultsStorageKey("effort"));
+  };
+
+  if (!legacyPrompt && !legacyFinal && !legacyModel && !legacyEffort) {
+    return existingPresets;
+  }
+
+  const legacyPresetFields = normalizeMinuteDraftFields({
+    promptBody: legacyPrompt ?? DEFAULT_MINUTE_PROMPT_BODY,
+    finalPromptBody: legacyFinal ?? DEFAULT_MINUTE_FINAL_PROMPT_BODY,
+    claudeModel: legacyModel ?? "",
+    claudeEffort: normalizeMinuteClaudeEffort(legacyEffort),
+  });
+
+  cleanupLegacy();
+
+  if (minuteDraftFieldsEqual(legacyPresetFields, defaultMinuteDraftFields())) {
+    return existingPresets;
+  }
+
+  if (existingPresets.some((preset) => minuteDraftFieldsEqual(preset, legacyPresetFields))) {
+    return existingPresets;
+  }
+
+  const migratedName = buildUniqueMinutePresetName(existingPresets, "Local custom");
+  const nextPresets = sortMinutePresets([
+    ...existingPresets,
+    {
+      name: migratedName,
+      ...legacyPresetFields,
+    },
+  ]);
+  writeStoredMinutePresets(nextPresets);
+  persistSelectedMinutePresetSource(minutePresetSourceForName(migratedName));
+  return nextPresets;
+}
+
+function readStoredMinutePresets(): LocalMinutePreset[] {
+  const raw = window.localStorage.getItem(MINUTE_LOCAL_PRESETS_STORAGE_KEY);
+  let presets: LocalMinutePreset[] = [];
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        const seenNames = new Set<string>();
+        presets = parsed.flatMap((item) => {
+          const preset = normalizeLocalMinutePreset(item);
+          if (!preset) {
+            return [];
+          }
+          const key = preset.name.toLowerCase();
+          if (seenNames.has(key)) {
+            return [];
+          }
+          seenNames.add(key);
+          return [preset];
+        });
+      }
+    } catch {
+      window.localStorage.removeItem(MINUTE_LOCAL_PRESETS_STORAGE_KEY);
+    }
+  }
+  return migrateLegacyMinuteLocalDefaults(sortMinutePresets(presets));
+}
+
+function readStoredMinutePresetSource(presets: LocalMinutePreset[]): MinutePresetSource {
+  const stored = window.localStorage.getItem(MINUTE_LOCAL_SELECTED_PRESET_STORAGE_KEY)?.trim();
+  if (!stored || stored === "default") {
+    return "default";
+  }
+  const presetName = minutePresetNameFromSource(stored as MinutePresetSource);
+  if (!presetName) {
+    window.localStorage.removeItem(MINUTE_LOCAL_SELECTED_PRESET_STORAGE_KEY);
+    return "default";
+  }
+  if (!presets.some((preset) => preset.name === presetName)) {
+    window.localStorage.removeItem(MINUTE_LOCAL_SELECTED_PRESET_STORAGE_KEY);
+    return "default";
+  }
+  return stored as MinutePresetSource;
+}
+
+function minuteDraftFieldsForSource(
+  source: MinutePresetSource,
+  presets: LocalMinutePreset[],
+  runningFields: MinuteDraftFields | null,
+): MinuteDraftFields {
+  if (source === "run" && runningFields) {
+    return normalizeMinuteDraftFields(runningFields);
+  }
+  const presetName = minutePresetNameFromSource(source);
+  if (presetName) {
+    const preset = presets.find((candidate) => candidate.name === presetName);
+    if (preset) {
+      return preset;
+    }
+  }
+  return defaultMinuteDraftFields();
+}
+
+function minutePresetLabelForSource(source: MinutePresetSource): string {
+  if (source === "default") {
+    return "Meter default";
+  }
+  if (source === "run") {
+    return "This run's saved settings";
+  }
+  return minutePresetNameFromSource(source) ?? "Local preset";
+}
+
+function isReservedMinutePresetName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return normalized === "default"
+    || normalized === "meter default"
+    || normalized === "this run's saved settings";
+}
+
+function useMinutePresetDraftManager({
+  runningFields,
+  runningPromptLabel,
+  preferRunningPreset,
+}: {
+  runningFields: MinuteDraftFields | null;
+  runningPromptLabel: string | null;
+  preferRunningPreset: boolean;
+}) {
+  const [presets, setPresets] = useState<LocalMinutePreset[]>([]);
+  const [selectedSource, setSelectedSource] = useState<MinutePresetSource>("default");
+  const [promptBody, setPromptBody] = useState(DEFAULT_MINUTE_PROMPT_BODY);
+  const [finalPromptBody, setFinalPromptBody] = useState(DEFAULT_MINUTE_FINAL_PROMPT_BODY);
+  const [claudeModel, setClaudeModel] = useState("");
+  const [claudeEffort, setClaudeEffort] = useState<UiMinuteClaudeEffort>("");
+  const [presetNameDraft, setPresetNameDraft] = useState("");
+  const [presetError, setPresetError] = useState<string | null>(null);
+
+  const normalizedRunningFields = useMemo(
+    () => (runningFields ? normalizeMinuteDraftFields(runningFields) : null),
+    [runningFields?.promptBody, runningFields?.finalPromptBody, runningFields?.claudeModel, runningFields?.claudeEffort],
+  );
+
+  useEffect(() => {
+    const loadedPresets = readStoredMinutePresets();
+    setPresets(loadedPresets);
+    const storedSource = readStoredMinutePresetSource(loadedPresets);
+    const nextSource = storedSource !== "default"
+      ? storedSource
+      : preferRunningPreset && normalizedRunningFields
+        ? "run"
+        : "default";
+    const fields = minuteDraftFieldsForSource(nextSource, loadedPresets, normalizedRunningFields);
+    setSelectedSource(nextSource);
+    setPromptBody(fields.promptBody);
+    setFinalPromptBody(fields.finalPromptBody);
+    setClaudeModel(fields.claudeModel);
+    setClaudeEffort(fields.claudeEffort);
+    setPresetNameDraft(minutePresetNameFromSource(nextSource) ?? "");
+    setPresetError(null);
+  }, [
+    normalizedRunningFields?.promptBody,
+    normalizedRunningFields?.finalPromptBody,
+    normalizedRunningFields?.claudeModel,
+    normalizedRunningFields?.claudeEffort,
+    preferRunningPreset,
+  ]);
+
+  const currentFields = useMemo(
+    () => normalizeMinuteDraftFields({ promptBody, finalPromptBody, claudeModel, claudeEffort }),
+    [promptBody, finalPromptBody, claudeModel, claudeEffort],
+  );
+  const selectedFields = useMemo(
+    () => minuteDraftFieldsForSource(selectedSource, presets, normalizedRunningFields),
+    [selectedSource, presets, normalizedRunningFields],
+  );
+  const hasUnsavedChanges = !minuteDraftFieldsEqual(currentFields, selectedFields);
+  const selectedPresetName = minutePresetNameFromSource(selectedSource);
+  const promptLabel = !hasUnsavedChanges
+    ? selectedPresetName ?? (selectedSource === "run" ? runningPromptLabel : null)
+    : null;
+
+  const applySource = useCallback((source: MinutePresetSource, nextPresets = presets) => {
+    const fields = minuteDraftFieldsForSource(source, nextPresets, normalizedRunningFields);
+    setSelectedSource(source);
+    setPromptBody(fields.promptBody);
+    setFinalPromptBody(fields.finalPromptBody);
+    setClaudeModel(fields.claudeModel);
+    setClaudeEffort(fields.claudeEffort);
+    setPresetNameDraft(minutePresetNameFromSource(source) ?? "");
+    setPresetError(null);
+    persistSelectedMinutePresetSource(source);
+  }, [normalizedRunningFields, presets]);
+
+  const selectSource = useCallback((source: MinutePresetSource) => {
+    applySource(source);
+  }, [applySource]);
+
+  const savePreset = useCallback(() => {
+    const trimmedName = presetNameDraft.trim();
+    if (!trimmedName) {
+      setPresetError("Name the preset before saving it.");
+      return;
+    }
+    if (isReservedMinutePresetName(trimmedName)) {
+      setPresetError("Choose a name other than Default or This run's saved settings.");
+      return;
+    }
+    if (minuteDraftFieldsEqual(currentFields, defaultMinuteDraftFields())) {
+      setPresetError("This matches Meter default. Use the default preset instead.");
+      return;
+    }
+    const nextPreset: LocalMinutePreset = {
+      name: trimmedName,
+      ...currentFields,
+    };
+    const nextPresets = sortMinutePresets([
+      ...presets.filter((preset) => preset.name.toLowerCase() !== trimmedName.toLowerCase()),
+      nextPreset,
+    ]);
+    writeStoredMinutePresets(nextPresets);
+    setPresets(nextPresets);
+    applySource(minutePresetSourceForName(trimmedName), nextPresets);
+  }, [applySource, currentFields, presetNameDraft, presets]);
+
+  const deleteSelectedPreset = useCallback(() => {
+    if (!selectedPresetName) {
+      return;
+    }
+    const nextPresets = presets.filter((preset) => preset.name !== selectedPresetName);
+    writeStoredMinutePresets(nextPresets);
+    setPresets(nextPresets);
+    applySource(normalizedRunningFields && preferRunningPreset ? "run" : "default", nextPresets);
+  }, [applySource, normalizedRunningFields, preferRunningPreset, presets, selectedPresetName]);
+
+  const resetDraftToSelected = useCallback(() => {
+    const fields = minuteDraftFieldsForSource(selectedSource, presets, normalizedRunningFields);
+    setPromptBody(fields.promptBody);
+    setFinalPromptBody(fields.finalPromptBody);
+    setClaudeModel(fields.claudeModel);
+    setClaudeEffort(fields.claudeEffort);
+    setPresetNameDraft(minutePresetNameFromSource(selectedSource) ?? "");
+    setPresetError(null);
+  }, [selectedSource, presets, normalizedRunningFields]);
+
+  return {
+    presets,
+    selectedSource,
+    selectedPresetName,
+    selectedLabel: minutePresetLabelForSource(selectedSource),
+    promptBody,
+    finalPromptBody,
+    claudeModel,
+    claudeEffort,
+    setPromptBody: (nextValue: string) => {
+      setPromptBody(nextValue);
+      setPresetError(null);
+    },
+    setFinalPromptBody: (nextValue: string) => {
+      setFinalPromptBody(nextValue);
+      setPresetError(null);
+    },
+    setClaudeModel: (nextValue: string) => {
+      setClaudeModel(nextValue);
+      setPresetError(null);
+    },
+    setClaudeEffort: (nextValue: UiMinuteClaudeEffort) => {
+      setClaudeEffort(nextValue);
+      setPresetError(null);
+    },
+    presetNameDraft,
+    setPresetNameDraft,
+    presetError,
+    setPresetError,
+    hasUnsavedChanges,
+    promptLabel,
+    selectSource,
+    savePreset,
+    deleteSelectedPreset,
+    resetDraftToSelected,
+  };
 }
 
 function formatBytes(bytes: number): string {
@@ -484,78 +840,24 @@ function NewCapture({
   onCreated: (run: MeetingRunRecord) => void;
 }) {
   const enabledStorageKey = "meter:new-capture:minutes:enabled";
-  const promptStorageKey = minuteLocalDefaultsStorageKey("prompt");
-  const finalPromptStorageKey = minuteLocalDefaultsStorageKey("final");
-  const modelStorageKey = minuteLocalDefaultsStorageKey("model");
-  const effortStorageKey = minuteLocalDefaultsStorageKey("effort");
   const [joinUrl, setJoinUrl] = useState("");
   const [botName, setBotName] = useState("");
   const [minutesEnabled, setMinutesEnabled] = useState(false);
-  const [minutePromptBody, setMinutePromptBody] = useState("");
-  const [minuteFinalPromptBody, setMinuteFinalPromptBody] = useState("");
-  const [minuteClaudeModel, setMinuteClaudeModel] = useState("");
-  const [minuteClaudeEffort, setMinuteClaudeEffort] = useState<UiMinuteClaudeEffort>("");
-  const [hasLocalMinuteDefaults, setHasLocalMinuteDefaults] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const refreshLocalMinuteDefaultsFlag = useCallback(() => {
-    setHasLocalMinuteDefaults(Boolean(
-      readStoredPromptOverride(promptStorageKey)
-      || readStoredPromptOverride(finalPromptStorageKey)
-      || readStoredScalar(modelStorageKey)
-      || readStoredScalar(effortStorageKey),
-    ));
-  }, [effortStorageKey, finalPromptStorageKey, modelStorageKey, promptStorageKey]);
+  const minuteDraft = useMinutePresetDraftManager({
+    runningFields: null,
+    runningPromptLabel: null,
+    preferRunningPreset: false,
+  });
 
   useEffect(() => {
     setMinutesEnabled(window.localStorage.getItem(enabledStorageKey) === "1");
-    setMinutePromptBody(readStoredPromptOverride(promptStorageKey) ?? DEFAULT_MINUTE_PROMPT_BODY);
-    setMinuteFinalPromptBody(readStoredPromptOverride(finalPromptStorageKey) ?? DEFAULT_MINUTE_FINAL_PROMPT_BODY);
-    setMinuteClaudeModel(readStoredScalar(modelStorageKey) ?? "");
-    setMinuteClaudeEffort(normalizeMinuteClaudeEffort(readStoredScalar(effortStorageKey)));
-    refreshLocalMinuteDefaultsFlag();
-  }, [effortStorageKey, enabledStorageKey, finalPromptStorageKey, modelStorageKey, promptStorageKey, refreshLocalMinuteDefaultsFlag]);
+  }, [enabledStorageKey]);
 
   useEffect(() => {
     window.localStorage.setItem(enabledStorageKey, minutesEnabled ? "1" : "0");
   }, [enabledStorageKey, minutesEnabled]);
-
-  const handlePromptBodyChange = (nextValue: string) => {
-    setMinutePromptBody(nextValue);
-    persistPromptDraft(promptStorageKey, nextValue, DEFAULT_MINUTE_PROMPT_BODY);
-    refreshLocalMinuteDefaultsFlag();
-  };
-
-  const handleFinalPromptBodyChange = (nextValue: string) => {
-    setMinuteFinalPromptBody(nextValue);
-    persistPromptDraft(finalPromptStorageKey, nextValue, DEFAULT_MINUTE_FINAL_PROMPT_BODY);
-    refreshLocalMinuteDefaultsFlag();
-  };
-
-  const handleClaudeModelChange = (nextValue: string) => {
-    setMinuteClaudeModel(nextValue);
-    persistScalarDraft(modelStorageKey, nextValue);
-    refreshLocalMinuteDefaultsFlag();
-  };
-
-  const handleClaudeEffortChange = (nextValue: UiMinuteClaudeEffort) => {
-    setMinuteClaudeEffort(nextValue);
-    persistScalarDraft(effortStorageKey, nextValue);
-    refreshLocalMinuteDefaultsFlag();
-  };
-
-  const handleRevertLocalMinuteDefaults = () => {
-    window.localStorage.removeItem(promptStorageKey);
-    window.localStorage.removeItem(finalPromptStorageKey);
-    window.localStorage.removeItem(modelStorageKey);
-    window.localStorage.removeItem(effortStorageKey);
-    setMinutePromptBody(DEFAULT_MINUTE_PROMPT_BODY);
-    setMinuteFinalPromptBody(DEFAULT_MINUTE_FINAL_PROMPT_BODY);
-    setMinuteClaudeModel("");
-    setMinuteClaudeEffort("");
-    setHasLocalMinuteDefaults(false);
-  };
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -574,11 +876,11 @@ function NewCapture({
       if (minutesEnabled) {
         try {
           await postJson(`/v1/meeting-runs/${createdRun.meeting_run_id}/minutes/start`, {
-            prompt_label: null,
-            user_prompt_body: serializeMinutePromptBody(minutePromptBody, DEFAULT_MINUTE_PROMPT_BODY),
-            user_final_prompt_body: serializeMinutePromptBody(minuteFinalPromptBody, DEFAULT_MINUTE_FINAL_PROMPT_BODY),
-            claude_model: serializeMinuteClaudeModel(minuteClaudeModel),
-            claude_effort: serializeMinuteClaudeEffort(minuteClaudeEffort),
+            prompt_label: minuteDraft.promptLabel,
+            user_prompt_body: serializeMinutePromptBody(minuteDraft.promptBody, DEFAULT_MINUTE_PROMPT_BODY),
+            user_final_prompt_body: serializeMinutePromptBody(minuteDraft.finalPromptBody, DEFAULT_MINUTE_FINAL_PROMPT_BODY),
+            claude_model: serializeMinuteClaudeModel(minuteDraft.claudeModel),
+            claude_effort: serializeMinuteClaudeEffort(minuteDraft.claudeEffort),
           });
           const refreshed = await fetchJson<{ meeting_run: MeetingRunRecord }>(`/v1/meeting-runs/${createdRun.meeting_run_id}`);
           createdRun = refreshed.meeting_run;
@@ -637,34 +939,70 @@ function NewCapture({
         </label>
         {minutesEnabled ? (
           <>
-            <div className="minutes-defaults-row">
-              {hasLocalMinuteDefaults ? (
-                <>
-                  <span className="minutes-draft minutes-draft-dirty">Locally customized prompt defaults</span>
-                  <button className="ghost-button" disabled={submitting} onClick={handleRevertLocalMinuteDefaults} type="button">
-                    Revert to default
-                  </button>
-                </>
-              ) : (
-                <span className="minutes-draft minutes-draft-clean">Using Meter defaults</span>
-              )}
+            <div className="minutes-preset-row">
+              <label className="field minutes-preset-picker">
+                <span>Prompt preset</span>
+                <select
+                  value={minuteDraft.selectedSource}
+                  disabled={submitting}
+                  onChange={(inputEvent) => minuteDraft.selectSource(inputEvent.target.value as MinutePresetSource)}
+                >
+                  <option value="default">Meter default</option>
+                  {minuteDraft.presets.map((preset) => (
+                    <option key={preset.name} value={minutePresetSourceForName(preset.name)}>
+                      {preset.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span className={`minutes-draft ${minuteDraft.hasUnsavedChanges ? "minutes-draft-dirty" : "minutes-draft-clean"}`}>
+                {minuteDraft.hasUnsavedChanges ? "Unsaved local preset changes" : `Using ${minuteDraft.selectedLabel}`}
+              </span>
+              {minuteDraft.selectedPresetName && !minuteDraft.hasUnsavedChanges ? (
+                <button className="ghost-button" disabled={submitting} onClick={minuteDraft.deleteSelectedPreset} type="button">
+                  Delete preset
+                </button>
+              ) : null}
             </div>
+            {minuteDraft.hasUnsavedChanges ? (
+              <div className="minutes-preset-save">
+                <label className="field minutes-preset-name">
+                  <span>Save local preset as</span>
+                  <input
+                    type="text"
+                    placeholder="Weekly FHIR WG"
+                    value={minuteDraft.presetNameDraft}
+                    disabled={submitting}
+                    onChange={(inputEvent) => minuteDraft.setPresetNameDraft(inputEvent.target.value)}
+                  />
+                </label>
+                <div className="minutes-preset-actions">
+                  <button className="secondary-button" disabled={submitting} onClick={minuteDraft.savePreset} type="button">
+                    Save preset
+                  </button>
+                  <button className="ghost-button" disabled={submitting} onClick={minuteDraft.resetDraftToSelected} type="button">
+                    Revert draft
+                  </button>
+                </div>
+                {minuteDraft.presetError ? <div className="inline-error">{minuteDraft.presetError}</div> : null}
+              </div>
+            ) : null}
             <label className="field">
               <span>Minute prompt</span>
               <AutoGrowTextarea
                 className="auto-grow-textarea"
-                value={minutePromptBody}
+                value={minuteDraft.promptBody}
                 disabled={submitting}
-                onChange={handlePromptBodyChange}
+                onChange={minuteDraft.setPromptBody}
               />
             </label>
             <label className="field">
               <span>Finalization prompt</span>
               <AutoGrowTextarea
                 className="auto-grow-textarea"
-                value={minuteFinalPromptBody}
+                value={minuteDraft.finalPromptBody}
                 disabled={submitting}
-                onChange={handleFinalPromptBodyChange}
+                onChange={minuteDraft.setFinalPromptBody}
               />
             </label>
             <div className="minutes-config-grid">
@@ -673,17 +1011,17 @@ function NewCapture({
                 <input
                   type="text"
                   placeholder="claude-sonnet-4-5"
-                  value={minuteClaudeModel}
+                  value={minuteDraft.claudeModel}
                   disabled={submitting}
-                  onChange={(inputEvent) => handleClaudeModelChange(inputEvent.target.value)}
+                  onChange={(inputEvent) => minuteDraft.setClaudeModel(inputEvent.target.value)}
                 />
               </label>
               <label className="field">
                 <span>Claude effort</span>
                 <select
-                  value={minuteClaudeEffort}
+                  value={minuteDraft.claudeEffort}
                   disabled={submitting}
-                  onChange={(inputEvent) => handleClaudeEffortChange(inputEvent.target.value as UiMinuteClaudeEffort)}
+                  onChange={(inputEvent) => minuteDraft.setClaudeEffort(inputEvent.target.value as UiMinuteClaudeEffort)}
                 >
                   <option value="">Server default</option>
                   <option value="low">Low</option>
@@ -786,89 +1124,22 @@ function MinutesPanel({
   onChanged: () => void;
 }) {
   type MinuteStreamState = ConnectionState | "idle";
-  const promptStorageKey = minuteLocalDefaultsStorageKey("prompt");
-  const finalPromptStorageKey = minuteLocalDefaultsStorageKey("final");
-  const modelStorageKey = minuteLocalDefaultsStorageKey("model");
-  const effortStorageKey = minuteLocalDefaultsStorageKey("effort");
-  const [promptBody, setPromptBody] = useState("");
-  const [finalPromptBody, setFinalPromptBody] = useState("");
-  const [claudeModel, setClaudeModel] = useState("");
-  const [claudeEffort, setClaudeEffort] = useState<UiMinuteClaudeEffort>("");
-  const [hasLocalMinuteDefaults, setHasLocalMinuteDefaults] = useState(false);
   const [content, setContent] = useState("");
   const [requestState, setRequestState] = useState<"idle" | "starting" | "restarting" | "stopping">("idle");
   const [error, setError] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<MinuteStreamState>("idle");
   const contentRef = useRef<HTMLDivElement | null>(null);
   const renderedContent = useMemo(() => (content ? renderMinutesMarkdown(content) : ""), [content]);
-  const runningPromptBody = effectiveMinutePromptBody(run.minutes?.user_prompt_body);
-  const runningFinalPromptBody = effectiveMinuteFinalPromptBody(run.minutes?.user_final_prompt_body);
-  const runningClaudeModel = normalizeMinuteClaudeModel(run.minutes?.claude_model);
-  const runningClaudeEffort = normalizeMinuteClaudeEffort(run.minutes?.claude_effort);
-
-  const refreshLocalMinuteDefaultsFlag = useCallback(() => {
-    setHasLocalMinuteDefaults(Boolean(
-      readStoredPromptOverride(promptStorageKey)
-      || readStoredPromptOverride(finalPromptStorageKey)
-      || readStoredScalar(modelStorageKey)
-      || readStoredScalar(effortStorageKey),
-    ));
-  }, [effortStorageKey, finalPromptStorageKey, modelStorageKey, promptStorageKey]);
-
-  useEffect(() => {
-    setPromptBody(readStoredPromptOverride(promptStorageKey) ?? runningPromptBody);
-    setFinalPromptBody(readStoredPromptOverride(finalPromptStorageKey) ?? runningFinalPromptBody);
-    setClaudeModel(readStoredScalar(modelStorageKey) ?? runningClaudeModel);
-    setClaudeEffort(normalizeMinuteClaudeEffort(readStoredScalar(effortStorageKey) ?? runningClaudeEffort));
-    refreshLocalMinuteDefaultsFlag();
-  }, [
-    effortStorageKey,
-    finalPromptStorageKey,
-    modelStorageKey,
-    promptStorageKey,
-    refreshLocalMinuteDefaultsFlag,
-    run.meeting_run_id,
-    runningClaudeEffort,
-    runningClaudeModel,
-    runningFinalPromptBody,
-    runningPromptBody,
-  ]);
-
-  const handlePromptBodyChange = (nextValue: string) => {
-    setPromptBody(nextValue);
-    persistPromptDraft(promptStorageKey, nextValue, DEFAULT_MINUTE_PROMPT_BODY);
-    refreshLocalMinuteDefaultsFlag();
-  };
-
-  const handleFinalPromptBodyChange = (nextValue: string) => {
-    setFinalPromptBody(nextValue);
-    persistPromptDraft(finalPromptStorageKey, nextValue, DEFAULT_MINUTE_FINAL_PROMPT_BODY);
-    refreshLocalMinuteDefaultsFlag();
-  };
-
-  const handleClaudeModelChange = (nextValue: string) => {
-    setClaudeModel(nextValue);
-    persistScalarDraft(modelStorageKey, nextValue);
-    refreshLocalMinuteDefaultsFlag();
-  };
-
-  const handleClaudeEffortChange = (nextValue: UiMinuteClaudeEffort) => {
-    setClaudeEffort(nextValue);
-    persistScalarDraft(effortStorageKey, nextValue);
-    refreshLocalMinuteDefaultsFlag();
-  };
-
-  const handleRevertLocalMinuteDefaults = () => {
-    window.localStorage.removeItem(promptStorageKey);
-    window.localStorage.removeItem(finalPromptStorageKey);
-    window.localStorage.removeItem(modelStorageKey);
-    window.localStorage.removeItem(effortStorageKey);
-    setPromptBody(runningPromptBody);
-    setFinalPromptBody(runningFinalPromptBody);
-    setClaudeModel(runningClaudeModel);
-    setClaudeEffort(runningClaudeEffort);
-    setHasLocalMinuteDefaults(false);
-  };
+  const minuteDraft = useMinutePresetDraftManager({
+    runningFields: {
+      promptBody: run.minutes?.user_prompt_body ?? DEFAULT_MINUTE_PROMPT_BODY,
+      finalPromptBody: run.minutes?.user_final_prompt_body ?? DEFAULT_MINUTE_FINAL_PROMPT_BODY,
+      claudeModel: run.minutes?.claude_model ?? "",
+      claudeEffort: normalizeMinuteClaudeEffort(run.minutes?.claude_effort),
+    },
+    runningPromptLabel: run.minutes?.prompt_label ?? null,
+    preferRunningPreset: Boolean(run.minutes),
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -921,10 +1192,21 @@ function MinutesPanel({
 
   const activeMinuteState = run.minutes?.state;
   const minutesRunning = activeMinuteState === "starting" || activeMinuteState === "running" || activeMinuteState === "stopping" || activeMinuteState === "restarting";
-  const draftMatchesRunning = runningPromptBody === promptBody
-    && runningFinalPromptBody === finalPromptBody
-    && runningClaudeModel === claudeModel.trim()
-    && runningClaudeEffort === claudeEffort;
+  const runningDraftFields = normalizeMinuteDraftFields({
+    promptBody: run.minutes?.user_prompt_body ?? DEFAULT_MINUTE_PROMPT_BODY,
+    finalPromptBody: run.minutes?.user_final_prompt_body ?? DEFAULT_MINUTE_FINAL_PROMPT_BODY,
+    claudeModel: run.minutes?.claude_model ?? "",
+    claudeEffort: normalizeMinuteClaudeEffort(run.minutes?.claude_effort),
+  });
+  const draftMatchesRunning = minuteDraftFieldsEqual(
+    normalizeMinuteDraftFields({
+      promptBody: minuteDraft.promptBody,
+      finalPromptBody: minuteDraft.finalPromptBody,
+      claudeModel: minuteDraft.claudeModel,
+      claudeEffort: minuteDraft.claudeEffort,
+    }),
+    runningDraftFields,
+  );
   const primaryAction = !run.minutes
     ? { action: "start" as const, label: "Start minutes", busyLabel: "Starting minutes..." }
     : minutesRunning
@@ -939,11 +1221,11 @@ function MinutesPanel({
         await postJson(`/v1/meeting-runs/${run.meeting_run_id}/minutes/stop`, {});
       } else {
         await postJson(`/v1/meeting-runs/${run.meeting_run_id}/minutes/${action}`, {
-          prompt_label: null,
-          user_prompt_body: serializeMinutePromptBody(promptBody, DEFAULT_MINUTE_PROMPT_BODY),
-          user_final_prompt_body: serializeMinutePromptBody(finalPromptBody, DEFAULT_MINUTE_FINAL_PROMPT_BODY),
-          claude_model: serializeMinuteClaudeModel(claudeModel),
-          claude_effort: serializeMinuteClaudeEffort(claudeEffort),
+          prompt_label: minuteDraft.promptLabel,
+          user_prompt_body: serializeMinutePromptBody(minuteDraft.promptBody, DEFAULT_MINUTE_PROMPT_BODY),
+          user_final_prompt_body: serializeMinutePromptBody(minuteDraft.finalPromptBody, DEFAULT_MINUTE_FINAL_PROMPT_BODY),
+          claude_model: serializeMinuteClaudeModel(minuteDraft.claudeModel),
+          claude_effort: serializeMinuteClaudeEffort(minuteDraft.claudeEffort),
         });
       }
       onChanged();
@@ -962,48 +1244,71 @@ function MinutesPanel({
           <span className={`minutes-state minutes-state-${run.minutes?.state ?? "idle"}`}>
             {run.minutes?.state ?? "idle"}
           </span>
-          {run.minutes ? (
-            <a
-              className="transcript-link"
-              href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
-              rel="noreferrer"
-              target="_blank"
-            >
-              Open live view
-            </a>
-          ) : null}
         </div>
       </div>
 
       <div className="minutes-controls">
-        <div className="minutes-defaults-row">
-          {hasLocalMinuteDefaults ? (
-            <>
-              <span className="minutes-draft minutes-draft-dirty">Locally customized prompt defaults</span>
-              <button className="ghost-button" disabled={requestState !== "idle"} onClick={handleRevertLocalMinuteDefaults} type="button">
-                Revert to default
-              </button>
-            </>
-          ) : (
-            <span className="minutes-draft minutes-draft-clean">
-              {run.minutes ? "Using this run's saved prompt settings" : "Using Meter defaults"}
-            </span>
-          )}
+        <div className="minutes-preset-row">
+          <label className="minutes-field minutes-preset-picker">
+            <span>Prompt preset</span>
+            <select
+              value={minuteDraft.selectedSource}
+              onChange={(inputEvent) => minuteDraft.selectSource(inputEvent.target.value as MinutePresetSource)}
+            >
+              {run.minutes ? <option value="run">This run's saved settings</option> : null}
+              <option value="default">Meter default</option>
+              {minuteDraft.presets.map((preset) => (
+                <option key={preset.name} value={minutePresetSourceForName(preset.name)}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className={`minutes-draft ${minuteDraft.hasUnsavedChanges ? "minutes-draft-dirty" : "minutes-draft-clean"}`}>
+            {minuteDraft.hasUnsavedChanges ? "Unsaved local preset changes" : `Using ${minuteDraft.selectedLabel}`}
+          </span>
+          {minuteDraft.selectedPresetName && !minuteDraft.hasUnsavedChanges ? (
+            <button className="ghost-button" disabled={requestState !== "idle"} onClick={minuteDraft.deleteSelectedPreset} type="button">
+              Delete preset
+            </button>
+          ) : null}
         </div>
+        {minuteDraft.hasUnsavedChanges ? (
+          <div className="minutes-preset-save">
+            <label className="minutes-field minutes-preset-name">
+              <span>Save local preset as</span>
+              <input
+                type="text"
+                placeholder="Weekly FHIR WG"
+                value={minuteDraft.presetNameDraft}
+                onChange={(inputEvent) => minuteDraft.setPresetNameDraft(inputEvent.target.value)}
+              />
+            </label>
+            <div className="minutes-preset-actions">
+              <button className="secondary-button" disabled={requestState !== "idle"} onClick={minuteDraft.savePreset} type="button">
+                Save preset
+              </button>
+              <button className="ghost-button" disabled={requestState !== "idle"} onClick={minuteDraft.resetDraftToSelected} type="button">
+                Revert draft
+              </button>
+            </div>
+            {minuteDraft.presetError ? <div className="inline-error">{minuteDraft.presetError}</div> : null}
+          </div>
+        ) : null}
         <label className="minutes-field">
           <span>Minute prompt</span>
           <AutoGrowTextarea
             className="auto-grow-textarea"
-            value={promptBody}
-            onChange={handlePromptBodyChange}
+            value={minuteDraft.promptBody}
+            onChange={minuteDraft.setPromptBody}
           />
         </label>
         <label className="minutes-field">
           <span>Finalization prompt</span>
           <AutoGrowTextarea
             className="auto-grow-textarea"
-            value={finalPromptBody}
-            onChange={handleFinalPromptBodyChange}
+            value={minuteDraft.finalPromptBody}
+            onChange={minuteDraft.setFinalPromptBody}
           />
         </label>
         <div className="minutes-config-grid">
@@ -1012,15 +1317,15 @@ function MinutesPanel({
             <input
               type="text"
               placeholder="claude-sonnet-4-5"
-              value={claudeModel}
-              onChange={(inputEvent) => handleClaudeModelChange(inputEvent.target.value)}
+              value={minuteDraft.claudeModel}
+              onChange={(inputEvent) => minuteDraft.setClaudeModel(inputEvent.target.value)}
             />
           </label>
           <label className="minutes-field">
             <span>Claude effort</span>
             <select
-              value={claudeEffort}
-              onChange={(inputEvent) => handleClaudeEffortChange(inputEvent.target.value as UiMinuteClaudeEffort)}
+              value={minuteDraft.claudeEffort}
+              onChange={(inputEvent) => minuteDraft.setClaudeEffort(inputEvent.target.value as UiMinuteClaudeEffort)}
             >
               <option value="">Server default</option>
               <option value="low">Low</option>
@@ -1045,6 +1350,16 @@ function MinutesPanel({
               </button>
             </>
           )}
+          {run.minutes ? (
+            <a
+              className="ghost-button action-link-button"
+              href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open live view
+            </a>
+          ) : null}
           <span className={`minutes-draft ${draftMatchesRunning ? "minutes-draft-clean" : "minutes-draft-dirty"}`}>
             {draftMatchesRunning ? "Draft matches running prompt" : "Draft differs from running prompt"}
           </span>
