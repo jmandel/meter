@@ -1,8 +1,8 @@
 import path from "node:path";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type {
   AppendEventsBatchRequest,
-  ArchiveChunkUploadResponse,
   AudioCaptureStartedPayload,
   AudioChunkWrittenPayload,
   BrowserConsolePayload,
@@ -11,7 +11,6 @@ import type {
   BrowserControlMessage,
   BrowserDomEventMessage,
   BrowserHelloMessage,
-  BrowserUploadAckRequest,
   CompleteMeetingRunRequest,
   ErrorRaisedPayload,
   EventEnvelope,
@@ -34,12 +33,9 @@ import {
   appendLogLine,
   errorResponse,
   getAvailablePort,
-  getRequiredHeader,
-  jsonResponse,
   nowUnixMs,
   randomToken,
   readJsonFile,
-  sha256Hex,
   sleep,
   uuidv7,
   writeJsonFile,
@@ -50,6 +46,7 @@ interface RuntimePaths {
   data_dir: string;
   event_journal_path: string;
   archive_audio_dir: string;
+  archive_mp3_path: string;
   live_pcm_dir: string | null;
   worker_log_path: string;
   browser_log_path: string;
@@ -66,6 +63,19 @@ interface PendingEventBatch {
   first_seq: number;
   last_seq: number;
   events: EventEnvelope[];
+}
+
+interface ArchiveEncoderState {
+  process: ChildProcessWithoutNullStreams | null;
+  closePromise: Promise<number | null> | null;
+  writeChain: Promise<void>;
+  streamId: string | null;
+  startedAtUnixMs: number | null;
+  endedAtUnixMs: number | null;
+  sampleRateHz: number | null;
+  channels: number | null;
+  failed: boolean;
+  emitted: boolean;
 }
 
 function isTerminalState(state: MeetingRunState): boolean {
@@ -123,6 +133,19 @@ export class WorkerProcess {
   private flushing = false;
   private browserMessageQueue = Promise.resolve();
   private currentSpeakerLabel: string | null = null;
+  private archiveErrorReported = false;
+  private readonly archiveEncoder: ArchiveEncoderState = {
+    process: null,
+    closePromise: null,
+    writeChain: Promise.resolve(),
+    streamId: null,
+    startedAtUnixMs: null,
+    endedAtUnixMs: null,
+    sampleRateHz: null,
+    channels: null,
+    failed: false,
+    emitted: false,
+  };
   private chrome?: Bun.Subprocess<"ignore", "ignore", "inherit">;
   private cdp?: CDPSession;
   private heartbeatTimer?: Timer;
@@ -143,6 +166,7 @@ export class WorkerProcess {
       data_dir: launch.paths.data_dir,
       event_journal_path: launch.paths.event_journal_path,
       archive_audio_dir: launch.paths.archive_audio_dir,
+      archive_mp3_path: path.join(launch.paths.archive_audio_dir, "meeting.mp3"),
       live_pcm_dir: launch.paths.live_pcm_dir,
       worker_log_path: launch.paths.worker_log_path,
       browser_log_path: launch.paths.browser_log_path,
@@ -208,20 +232,6 @@ export class WorkerProcess {
       fetch: (request, server) => {
         const url = new URL(request.url);
         const token = url.searchParams.get("token");
-        const isBrowserRoute = url.pathname.startsWith("/internal/browser/");
-
-        if (isBrowserRoute && request.method === "OPTIONS") {
-          if (token !== this.browserToken) {
-            return this.withBrowserCors(
-              errorResponse(401, "unauthorized", "Invalid browser token"),
-              request,
-            );
-          }
-          return new Response(null, {
-            status: 204,
-            headers: this.browserCorsHeaders(request),
-          });
-        }
 
         if (url.pathname === "/internal/browser/session") {
           if (token !== this.browserToken) {
@@ -241,7 +251,6 @@ export class WorkerProcess {
             room_id: this.launch.room_id,
             worker_base_url: this.workerBaseUrl(),
             open_chat_panel: this.launch.options.open_chat_panel,
-            archive_chunk_ms: this.launch.options.archive_chunk_ms,
           });
           return this.withBrowserCors(new Response(script, {
             headers: {
@@ -249,18 +258,6 @@ export class WorkerProcess {
               "cache-control": "no-store",
             },
           }), request);
-        }
-
-        const uploadMatch = url.pathname.match(/^\/internal\/browser\/archive\/([^/]+)\/(\d+)$/);
-        if (uploadMatch && request.method === "POST") {
-          if (token !== this.browserToken) {
-            return this.withBrowserCors(
-              errorResponse(401, "unauthorized", "Invalid browser token"),
-              request,
-            );
-          }
-          const response = this.handleArchiveUpload(request, uploadMatch[1], Number.parseInt(uploadMatch[2], 10));
-          return response.then((value) => this.withBrowserCors(value, request));
         }
 
         return errorResponse(404, "not_found", `No route for ${request.method} ${url.pathname}`);
@@ -566,7 +563,6 @@ export class WorkerProcess {
         room_id: this.launch.room_id,
         worker_base_url: this.workerBaseUrl(),
         open_chat_panel: this.launch.options.open_chat_panel,
-        archive_chunk_ms: this.launch.options.archive_chunk_ms,
       }),
     );
     await cdpEval(cdp, `window.__zoomerCapture.installCaptureButton()`);

@@ -445,26 +445,11 @@ export interface BrowserDomEventMessage {
   event: EventEnvelope<unknown>;
 }
 
-export interface BrowserUploadAckRequest {
-  type: "archive.flush";
-  archive_stream_id: string;
-  highest_chunk_seq: number;
-  ts_unix_ms: number;
-}
-
 export type BrowserControlMessage =
   | BrowserHelloMessage
   | BrowserCaptureStartedMessage
   | BrowserCaptureStoppedMessage
-  | BrowserDomEventMessage
-  | BrowserUploadAckRequest;
-
-export interface ArchiveChunkUploadResponse {
-  accepted: true;
-  audio_object_id: string;
-  path: string;
-  byte_length: number;
-}
+  | BrowserDomEventMessage;
 
 export interface PcmFrameHeader {
   magic: "ZPCM";

@@ -4,7 +4,6 @@ export interface BootstrapScriptOptions {
   room_id: string;
   worker_base_url: string;
   open_chat_panel: boolean;
-  archive_chunk_ms: number;
 }
 
 export function renderBootstrapScript(options: BootstrapScriptOptions): string {
@@ -212,8 +211,8 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           type: "capture.started",
           archive_stream_id: archiveStreamId,
           live_stream_id: liveStreamId,
-          archive_content_type: "audio/wav",
-          archive_codec: "pcm_s16le",
+          archive_content_type: "audio/mpeg",
+          archive_codec: "mp3",
           pcm_sample_rate_hz: targetRate,
           pcm_channels: 1,
           ts_unix_ms: Date.now(),
