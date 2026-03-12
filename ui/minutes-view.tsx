@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { marked } from "marked";
 
@@ -564,6 +564,157 @@ function applyMarkdownHighlights(container: HTMLElement, previousLeafTexts: Set<
   return nextLeafTexts;
 }
 
+interface SelectionSnapshot {
+  start: number;
+  end: number;
+  text: string;
+  prefixContext: string;
+  suffixContext: string;
+}
+
+function getAbsoluteTextOffset(container: HTMLElement, node: Node, offset: number): number {
+  const range = document.createRange();
+  range.setStart(container, 0);
+  range.setEnd(node, offset);
+  return range.toString().length;
+}
+
+function captureSelectionSnapshot(container: HTMLElement): SelectionSnapshot | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return null;
+  }
+  const range = selection.getRangeAt(0);
+  const startContainer = range.startContainer.nodeType === Node.TEXT_NODE
+    ? range.startContainer.parentElement
+    : range.startContainer as Element | null;
+  const endContainer = range.endContainer.nodeType === Node.TEXT_NODE
+    ? range.endContainer.parentElement
+    : range.endContainer as Element | null;
+  if (!startContainer || !endContainer || !container.contains(startContainer) || !container.contains(endContainer)) {
+    return null;
+  }
+  const fullText = container.textContent ?? "";
+  const start = getAbsoluteTextOffset(container, range.startContainer, range.startOffset);
+  const end = getAbsoluteTextOffset(container, range.endContainer, range.endOffset);
+  const safeStart = Math.max(0, Math.min(start, fullText.length));
+  const safeEnd = Math.max(safeStart, Math.min(end, fullText.length));
+  return {
+    start: safeStart,
+    end: safeEnd,
+    text: fullText.slice(safeStart, safeEnd),
+    prefixContext: fullText.slice(Math.max(0, safeStart - 32), safeStart),
+    suffixContext: fullText.slice(safeEnd, Math.min(fullText.length, safeEnd + 32)),
+  };
+}
+
+function resolveTextNodePosition(container: HTMLElement, absoluteOffset: number): { node: Node; offset: number } | null {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  let traversed = 0;
+  let current = walker.nextNode();
+  while (current) {
+    const textLength = current.textContent?.length ?? 0;
+    if (absoluteOffset <= traversed + textLength) {
+      return {
+        node: current,
+        offset: Math.max(0, absoluteOffset - traversed),
+      };
+    }
+    traversed += textLength;
+    current = walker.nextNode();
+  }
+  if (container.lastChild) {
+    const lastTextNode = (() => {
+      const reverseWalker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      let last: Node | null = null;
+      let next = reverseWalker.nextNode();
+      while (next) {
+        last = next;
+        next = reverseWalker.nextNode();
+      }
+      return last;
+    })();
+    if (lastTextNode) {
+      return {
+        node: lastTextNode,
+        offset: lastTextNode.textContent?.length ?? 0,
+      };
+    }
+  }
+  return null;
+}
+
+function scoreSelectionMatch(fullText: string, start: number, snapshot: SelectionSnapshot): number {
+  let score = 0;
+  if (snapshot.text && fullText.slice(start, start + snapshot.text.length) === snapshot.text) {
+    score += 10;
+  }
+  const prefixStart = Math.max(0, start - snapshot.prefixContext.length);
+  if (snapshot.prefixContext && fullText.slice(prefixStart, start) === snapshot.prefixContext) {
+    score += 5;
+  }
+  const suffixEnd = Math.min(fullText.length, start + snapshot.text.length + snapshot.suffixContext.length);
+  if (snapshot.suffixContext && fullText.slice(start + snapshot.text.length, suffixEnd) === snapshot.suffixContext) {
+    score += 5;
+  }
+  score -= Math.abs(start - snapshot.start) / 1000;
+  return score;
+}
+
+function findSelectionOffsets(fullText: string, snapshot: SelectionSnapshot): { start: number; end: number } | null {
+  if (snapshot.end <= fullText.length && fullText.slice(snapshot.start, snapshot.end) === snapshot.text) {
+    return { start: snapshot.start, end: snapshot.end };
+  }
+  if (!snapshot.text) {
+    const position = Math.min(snapshot.start, fullText.length);
+    return { start: position, end: position };
+  }
+
+  let bestStart = -1;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let searchFrom = 0;
+  while (searchFrom <= fullText.length) {
+    const matchIndex = fullText.indexOf(snapshot.text, searchFrom);
+    if (matchIndex === -1) {
+      break;
+    }
+    const score = scoreSelectionMatch(fullText, matchIndex, snapshot);
+    if (score > bestScore) {
+      bestScore = score;
+      bestStart = matchIndex;
+    }
+    searchFrom = matchIndex + Math.max(1, snapshot.text.length);
+  }
+  if (bestStart === -1) {
+    return null;
+  }
+  return {
+    start: bestStart,
+    end: bestStart + snapshot.text.length,
+  };
+}
+
+function restoreSelectionSnapshot(container: HTMLElement, snapshot: SelectionSnapshot): void {
+  const offsets = findSelectionOffsets(container.textContent ?? "", snapshot);
+  if (!offsets) {
+    return;
+  }
+  const startPosition = resolveTextNodePosition(container, offsets.start);
+  const endPosition = resolveTextNodePosition(container, offsets.end);
+  if (!startPosition || !endPosition) {
+    return;
+  }
+  const range = document.createRange();
+  range.setStart(startPosition.node, startPosition.offset);
+  range.setEnd(endPosition.node, endPosition.offset);
+  const selection = window.getSelection();
+  if (!selection) {
+    return;
+  }
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
 function setStatusClass(root: HTMLElement | null, tone: "idle" | "live" | "reconnecting"): void {
   if (!root) {
     return;
@@ -629,6 +780,7 @@ function App() {
   const previousLeafTextsRef = useRef(new Set<string>());
   const lastMarkdownRef = useRef("");
   const windowStickBottomRef = useRef(true);
+  const pendingSelectionRef = useRef<SelectionSnapshot | null>(null);
   const runningFields = useMemo<MinuteDraftFields | null>(() => {
     if (!minuteJob) {
       return null;
@@ -648,6 +800,20 @@ function App() {
   });
 
   const renderedContent = useMemo(() => renderMinutesMarkdown(content), [content]);
+
+  const applyIncomingMarkdown = (markdown: string, updatedLabelText: string) => {
+    const container = contentRef.current;
+    if (container) {
+      pendingSelectionRef.current = captureSelectionSnapshot(container);
+    }
+    const wasNearBottom = windowStickBottomRef.current || isWindowNearBottom();
+    lastMarkdownRef.current = markdown;
+    setContent(markdown);
+    setUpdatedLabel(updatedLabelText);
+    if (wasNearBottom) {
+      scrollWindowToBottom();
+    }
+  };
 
   const loadDetails = async (forceDraftReset = false) => {
     if (!paths.detailsPath) {
@@ -690,13 +856,10 @@ function App() {
       if (!markdown.trim() || markdown === lastMarkdownRef.current) {
         return;
       }
-      const wasNearBottom = windowStickBottomRef.current || isWindowNearBottom();
-      lastMarkdownRef.current = markdown;
-      setContent(markdown);
-      setUpdatedLabel(reason === "initial" ? `Loaded ${new Date().toLocaleString()}` : `Updated ${new Date().toLocaleString()} · polled raw markdown`);
-      if (wasNearBottom) {
-        scrollWindowToBottom();
-      }
+      applyIncomingMarkdown(
+        markdown,
+        reason === "initial" ? `Loaded ${new Date().toLocaleString()}` : `Updated ${new Date().toLocaleString()} · polled raw markdown`,
+      );
     } catch {
       // ignore; stream may still succeed
     }
@@ -714,13 +877,17 @@ function App() {
     void fetchLatestMarkdown("initial");
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const viewport = contentRef.current;
     if (!viewport) {
       return;
     }
     const nextLeafTexts = applyMarkdownHighlights(viewport, previousLeafTextsRef.current);
     previousLeafTextsRef.current = nextLeafTexts;
+    if (pendingSelectionRef.current) {
+      restoreSelectionSnapshot(viewport, pendingSelectionRef.current);
+      pendingSelectionRef.current = null;
+    }
   }, [renderedContent]);
 
   useEffect(() => {
@@ -754,18 +921,17 @@ function App() {
     });
     eventSource.addEventListener("minutes", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as StreamPayload;
-      const wasNearBottom = windowStickBottomRef.current || isWindowNearBottom();
       setMinuteJob(payload.minute_job);
       setVersion(payload.version);
       setStreamState("live");
       setStatusLabel(payload.version.status === "final" ? "Finalized" : "Live");
-      setUpdatedLabel(`Updated ${new Date(payload.version.created_at).toLocaleString()} · version ${payload.version.seq}`);
       if (payload.content_markdown !== lastMarkdownRef.current) {
-        lastMarkdownRef.current = payload.content_markdown;
-        setContent(payload.content_markdown);
-        if (wasNearBottom) {
-          scrollWindowToBottom();
-        }
+        applyIncomingMarkdown(
+          payload.content_markdown,
+          `Updated ${new Date(payload.version.created_at).toLocaleString()} · version ${payload.version.seq}`,
+        );
+      } else {
+        setUpdatedLabel(`Updated ${new Date(payload.version.created_at).toLocaleString()} · version ${payload.version.seq}`);
       }
     });
 
