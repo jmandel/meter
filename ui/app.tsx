@@ -768,11 +768,11 @@ function MinutesPanel({
           {run.minutes ? (
             <a
               className="transcript-link"
-              href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
+              href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
               rel="noreferrer"
               target="_blank"
             >
-              Open markdown
+              Open live view
             </a>
           ) : null}
         </div>
@@ -1054,7 +1054,7 @@ function HistoryRow({
               {run.minutes ? (
                 <a
                   className="history-action"
-                  href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
+                  href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
                   rel="noreferrer"
                   target="_blank"
                 >

@@ -193,8 +193,8 @@ async function runPollingLoop(
   let pollCount = 0;
 
   while (true) {
-    await sleep(config.pollIntervalMs);
     pollCount++;
+    let shouldExit = false;
 
     try {
       // Check meeting state
@@ -224,41 +224,46 @@ async function runPollingLoop(
         } else {
           console.log("minutes.md updated and settled.");
         }
-        break;
+        shouldExit = true;
+      } else {
+        // Fetch transcript since last cursor
+        const sinceParam = tracker.cursor ?? undefined;
+        console.log(`Poll ${pollCount}: fetching transcript (since=${sinceParam ?? "start"})...`);
+        const response = await fetchTranscriptMd(client, runId, sinceParam);
+        console.log(`  Response: ${response.length} bytes`);
+        const chunk = processResponse(tracker, response);
+
+        if (!chunk) {
+          console.log("  No new content.");
+        } else {
+          console.log(
+            `Chunk ${chunk.segmentIndex}: ${chunk.content.split("\n").length} lines (cursor: ${chunk.cursor ?? "none"})`,
+          );
+
+          // Save chunk to disk for audit trail
+          await writeChunk(runDir, chunk.segmentIndex, chunk.content);
+
+          // Paste chunk content directly into Claude's conversation
+          const msg = formatChunkMessage(chunk);
+          await pasteMessage(tmux, msg);
+
+          consecutiveErrors = 0;
+        }
       }
-
-      // Fetch transcript since last cursor
-      const sinceParam = tracker.cursor ?? undefined;
-      console.log(`Poll ${pollCount}: fetching transcript (since=${sinceParam ?? "start"})...`);
-      const response = await fetchTranscriptMd(client, runId, sinceParam);
-      console.log(`  Response: ${response.length} bytes`);
-      const chunk = processResponse(tracker, response);
-
-      if (!chunk) {
-        console.log(`  No new content.`);
-        continue;
-      }
-
-      console.log(
-        `Chunk ${chunk.segmentIndex}: ${chunk.content.split("\n").length} lines (cursor: ${chunk.cursor ?? "none"})`,
-      );
-
-      // Save chunk to disk for audit trail
-      await writeChunk(runDir, chunk.segmentIndex, chunk.content);
-
-      // Paste chunk content directly into Claude's conversation
-      const msg = formatChunkMessage(chunk);
-      await pasteMessage(tmux, msg);
-
-      consecutiveErrors = 0;
     } catch (error) {
       consecutiveErrors++;
       console.error(`Poll error (${consecutiveErrors}/10):`, error);
       if (consecutiveErrors >= 10) {
         console.error("Too many consecutive errors, exiting.");
-        break;
+        shouldExit = true;
       }
     }
+
+    if (shouldExit) {
+      break;
+    }
+
+    await sleep(config.pollIntervalMs);
   }
 }
 
@@ -330,7 +335,7 @@ async function main() {
   });
   await launchClaude(tmux, systemPrompt);
   console.log("Launched Claude in tmux session. Waiting for initialization...");
-  await sleep(5000);
+  await sleep(2000);
 
   // Send initial orientation prompt
   await sendMessage(tmux, buildInitialPrompt());

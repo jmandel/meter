@@ -4,6 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 
 import dashboard from "../ui/index.html";
+import minutesView from "../ui/minutes-view.html";
 
 import type {
   AttendeeSummaryRecord,
@@ -216,6 +217,14 @@ function buildMeetingRunOptions(config: AppConfig, overrides?: Partial<MeetingRu
   };
 }
 
+function formatRoomLabel(roomId: string): string {
+  const [provider, providerRoomKey] = roomId.split(":", 2);
+  if (provider === "zoom" && providerRoomKey) {
+    return `Zoom ${providerRoomKey}`;
+  }
+  return roomId;
+}
+
 async function serveFileContent(request: Request, filePath: string, contentType: string | null): Promise<Response> {
   const file = Bun.file(filePath);
   if (!(await file.exists())) {
@@ -301,6 +310,7 @@ export class CoordinatorApp {
       port: this.config.listen_port,
       routes: {
         "/": dashboard,
+        "/minutes-view": minutesView,
       },
       fetch: (request) => this.handleRequest(request),
     });
@@ -401,6 +411,10 @@ export class CoordinatorApp {
       if (match && request.method === "GET") {
         return this.handleZoomMeetingMinutes(url, match[1]);
       }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes\/view$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingMinutesView(request, url, match[1]);
+      }
       match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes\.md$/);
       if (match && request.method === "GET") {
         return this.handleZoomMeetingMinutesMarkdown(url, match[1], request);
@@ -445,6 +459,10 @@ export class CoordinatorApp {
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes$/);
       if (match && request.method === "GET") {
         return this.handleGetMinutes(match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/view$/);
+      if (match && request.method === "GET") {
+        return this.handleMinutesView(request, match[1]);
       }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/start$/);
       if (match && request.method === "POST") {
@@ -1364,6 +1382,30 @@ export class CoordinatorApp {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
     return this.handleGetMinutes(meetingRun.meeting_run_id);
+  }
+
+  private handleMinutesView(request: Request, meetingRunId: string): Response {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const redirectUrl = new URL("/minutes-view", this.resolvePublicBaseUrl(request));
+    redirectUrl.searchParams.set("stream", `/v1/meeting-runs/${meetingRunId}/minutes/stream`);
+    redirectUrl.searchParams.set("markdown", `/v1/meeting-runs/${meetingRunId}/minutes.md`);
+    redirectUrl.searchParams.set("title", formatRoomLabel(meetingRun.room_id));
+    return Response.redirect(redirectUrl.toString(), 302);
+  }
+
+  private handleZoomMeetingMinutesView(request: Request, url: URL, meetingId: string): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    const redirectUrl = new URL("/minutes-view", this.resolvePublicBaseUrl(request));
+    redirectUrl.searchParams.set("stream", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes/stream${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
+    redirectUrl.searchParams.set("markdown", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes.md${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
+    redirectUrl.searchParams.set("title", formatRoomLabel(meetingRun.room_id));
+    return Response.redirect(redirectUrl.toString(), 302);
   }
 
   private async handleStartMinutes(request: Request, meetingRunId: string): Promise<Response> {

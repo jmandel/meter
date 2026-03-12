@@ -820,6 +820,11 @@ process.on("SIGTERM", () => {
     expect(streamText).toContain("Alpha minutes");
     await streamReader?.cancel();
 
+    const viewHtml = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/view`).then((value) => value.text());
+    expect(viewHtml).toContain("Meter Minutes");
+    expect(viewHtml).toContain("minutes-view");
+    expect(viewHtml).toContain('id="root"');
+
     const restartResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/restart`, {
       method: "POST",
       headers: { "content-type": "application/json" },

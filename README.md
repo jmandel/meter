@@ -182,6 +182,7 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `POST /v1/meeting-runs/:id/minutes/start`
 - `POST /v1/meeting-runs/:id/minutes/restart`
 - `POST /v1/meeting-runs/:id/minutes/stop`
+- `GET /v1/meeting-runs/:id/minutes/view`
 - `GET /v1/meeting-runs/:id/minutes.md`
 - `GET /v1/meeting-runs/:id/minutes/versions`
 - `GET /v1/meeting-runs/:id/minutes/stream`
@@ -189,6 +190,7 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `GET /v1/zoom-meetings/:meeting_id/meeting-runs`
 - `GET /v1/zoom-meetings/:meeting_id/transcript.md`
 - `GET /v1/zoom-meetings/:meeting_id/minutes`
+- `GET /v1/zoom-meetings/:meeting_id/minutes/view`
 - `GET /v1/zoom-meetings/:meeting_id/minutes.md`
 - `GET /v1/zoom-meetings/:meeting_id/minutes/stream`
 - `GET /v1/zoom-meetings/:meeting_id/attendees`
@@ -291,7 +293,7 @@ The user-editable prompt surface is intentionally broad:
 - users edit the substantive minute-taking prompt body and optional finalization prompt body
 - Meter keeps the low-level operational prompt contract locked
 
-The live minutes panel in the dashboard tails the rendered Markdown from the managed minute-taker job. `GET /v1/meeting-runs/:id/minutes.md` returns the latest rendered document, and `GET /v1/meeting-runs/:id/minutes/stream` streams settled snapshot updates keyed to the current minute job for that meeting run.
+The live minutes panel in the dashboard tails the rendered Markdown from the managed minute-taker job. `GET /v1/meeting-runs/:id/minutes/view` opens a streaming viewer in a new tab, `GET /v1/meeting-runs/:id/minutes.md` returns the raw markdown, and `GET /v1/meeting-runs/:id/minutes/stream` streams settled snapshot updates keyed to the current minute job for that meeting run.
 
 ## Configuration
 
