@@ -973,31 +973,28 @@ button {
 .history-action {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  min-height: 30px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(211, 106, 46, 0.22);
-  background: rgba(255, 255, 255, 0.78);
+  gap: 6px;
+  min-height: 20px;
+  padding: 0;
   color: var(--accent-deep);
   font-size: 12px;
   font-weight: 700;
   text-decoration: none;
+  letter-spacing: 0.01em;
 }
 
 .history-button {
   appearance: none;
   background: none;
   border: none;
-  padding: 6px 10px;
+  padding: 0;
   font: inherit;
   cursor: pointer;
   text-align: left;
 }
 
 .history-action:hover {
-  background: rgba(235, 221, 202, 0.96);
-  text-decoration: none;
+  text-decoration: underline;
 }
 
 .history-minutes-row td {

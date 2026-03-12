@@ -197,6 +197,24 @@ function serializeMinutePromptBody(value: string, fallback: string): string | nu
   return trimmed;
 }
 
+function readStoredPromptBody(storageKey: string, fallback: string): string {
+  const stored = window.localStorage.getItem(storageKey);
+  const normalizedFallback = fallback.trim();
+  if (!stored || !stored.trim() || stored.trim() === normalizedFallback) {
+    window.localStorage.removeItem(storageKey);
+    return fallback;
+  }
+  return stored;
+}
+
+function persistPromptDraft(storageKey: string, value: string, baseline: string): void {
+  if (!value.trim() || value.trim() === baseline.trim()) {
+    window.localStorage.removeItem(storageKey);
+    return;
+  }
+  window.localStorage.setItem(storageKey, value);
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -395,8 +413,8 @@ function NewCapture({
 
   useEffect(() => {
     setMinutesEnabled(window.localStorage.getItem(`${storageKeyBase}:enabled`) === "1");
-    setMinutePromptBody(window.localStorage.getItem(`${storageKeyBase}:prompt`) ?? DEFAULT_MINUTE_PROMPT_BODY);
-    setMinuteFinalPromptBody(window.localStorage.getItem(`${storageKeyBase}:final`) ?? DEFAULT_MINUTE_FINAL_PROMPT_BODY);
+    setMinutePromptBody(readStoredPromptBody(`${storageKeyBase}:prompt`, DEFAULT_MINUTE_PROMPT_BODY));
+    setMinuteFinalPromptBody(readStoredPromptBody(`${storageKeyBase}:final`, DEFAULT_MINUTE_FINAL_PROMPT_BODY));
   }, []);
 
   useEffect(() => {
@@ -404,11 +422,11 @@ function NewCapture({
   }, [minutesEnabled, storageKeyBase]);
 
   useEffect(() => {
-    window.localStorage.setItem(`${storageKeyBase}:prompt`, minutePromptBody);
+    persistPromptDraft(`${storageKeyBase}:prompt`, minutePromptBody, DEFAULT_MINUTE_PROMPT_BODY);
   }, [minutePromptBody, storageKeyBase]);
 
   useEffect(() => {
-    window.localStorage.setItem(`${storageKeyBase}:final`, minuteFinalPromptBody);
+    persistPromptDraft(`${storageKeyBase}:final`, minuteFinalPromptBody, DEFAULT_MINUTE_FINAL_PROMPT_BODY);
   }, [minuteFinalPromptBody, storageKeyBase]);
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -611,19 +629,17 @@ function MinutesPanel({
   const renderedContent = useMemo(() => (content ? renderMinutesMarkdown(content) : ""), [content]);
 
   useEffect(() => {
-    const savedPrompt = window.localStorage.getItem(`${storageKeyBase}:prompt`);
-    const savedFinalPrompt = window.localStorage.getItem(`${storageKeyBase}:final`);
-    setPromptBody(savedPrompt ?? effectiveMinutePromptBody(run.minutes?.user_prompt_body));
-    setFinalPromptBody(savedFinalPrompt ?? effectiveMinuteFinalPromptBody(run.minutes?.user_final_prompt_body));
+    setPromptBody(readStoredPromptBody(`${storageKeyBase}:prompt`, effectiveMinutePromptBody(run.minutes?.user_prompt_body)));
+    setFinalPromptBody(readStoredPromptBody(`${storageKeyBase}:final`, effectiveMinuteFinalPromptBody(run.minutes?.user_final_prompt_body)));
   }, [run.meeting_run_id, storageKeyBase]);
 
   useEffect(() => {
-    window.localStorage.setItem(`${storageKeyBase}:prompt`, promptBody);
-  }, [promptBody, storageKeyBase]);
+    persistPromptDraft(`${storageKeyBase}:prompt`, promptBody, effectiveMinutePromptBody(run.minutes?.user_prompt_body));
+  }, [promptBody, run.minutes?.user_prompt_body, storageKeyBase]);
 
   useEffect(() => {
-    window.localStorage.setItem(`${storageKeyBase}:final`, finalPromptBody);
-  }, [finalPromptBody, storageKeyBase]);
+    persistPromptDraft(`${storageKeyBase}:final`, finalPromptBody, effectiveMinuteFinalPromptBody(run.minutes?.user_final_prompt_body));
+  }, [finalPromptBody, run.minutes?.user_final_prompt_body, storageKeyBase]);
 
   useEffect(() => {
     let cancelled = false;
