@@ -318,9 +318,7 @@ const styles = `
   }
 
   .viewer {
-    min-height: 72vh;
-    max-height: 78vh;
-    overflow: auto;
+    min-height: min(68vh, 720px);
     border-radius: 18px;
     border: 1px solid var(--border);
     background: rgba(255, 255, 255, 0.94);
@@ -397,8 +395,7 @@ const styles = `
     }
 
     .viewer {
-      min-height: 55vh;
-      max-height: none;
+      min-height: 48vh;
     }
   }
 `;
@@ -560,6 +557,19 @@ function setStatusClass(root: HTMLElement | null, tone: "idle" | "live" | "recon
   root.className = `status status-${tone}`;
 }
 
+function isWindowNearBottom(): boolean {
+  const doc = document.documentElement;
+  return window.scrollY + window.innerHeight >= doc.scrollHeight - 48;
+}
+
+function scrollWindowToBottom(): void {
+  window.requestAnimationFrame(() => {
+    window.scrollTo({
+      top: document.documentElement.scrollHeight,
+    });
+  });
+}
+
 function AutoGrowTextarea({
   value,
   onChange,
@@ -607,7 +617,7 @@ function App() {
   const previousLeafTextsRef = useRef(new Set<string>());
   const lastMarkdownRef = useRef("");
   const formInitializedRef = useRef(false);
-  const viewerStickBottomRef = useRef(true);
+  const windowStickBottomRef = useRef(true);
 
   const renderedContent = useMemo(() => renderMinutesMarkdown(content), [content]);
 
@@ -648,15 +658,12 @@ function App() {
       if (!markdown.trim() || markdown === lastMarkdownRef.current) {
         return;
       }
-      const viewport = contentRef.current;
-      const wasNearBottom = !viewport || viewerStickBottomRef.current || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48;
+      const wasNearBottom = windowStickBottomRef.current || isWindowNearBottom();
       lastMarkdownRef.current = markdown;
       setContent(markdown);
       setUpdatedLabel(reason === "initial" ? `Loaded ${new Date().toLocaleString()}` : `Updated ${new Date().toLocaleString()} · polled raw markdown`);
-      if (wasNearBottom && viewport) {
-        window.requestAnimationFrame(() => {
-          viewport.scrollTop = viewport.scrollHeight;
-        });
+      if (wasNearBottom) {
+        scrollWindowToBottom();
       }
     } catch {
       // ignore; stream may still succeed
@@ -679,17 +686,20 @@ function App() {
     if (!viewport) {
       return;
     }
-    viewport.scrollTop = viewport.scrollHeight;
-  }, []);
-
-  useEffect(() => {
-    const viewport = contentRef.current;
-    if (!viewport) {
-      return;
-    }
     const nextLeafTexts = applyMarkdownHighlights(viewport, previousLeafTextsRef.current);
     previousLeafTextsRef.current = nextLeafTexts;
   }, [renderedContent]);
+
+  useEffect(() => {
+    const handleWindowScroll = () => {
+      windowStickBottomRef.current = isWindowNearBottom();
+    };
+    handleWindowScroll();
+    window.addEventListener("scroll", handleWindowScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", handleWindowScroll);
+    };
+  }, []);
 
   useEffect(() => {
     const pollTimer = window.setInterval(() => {
@@ -711,8 +721,7 @@ function App() {
     });
     eventSource.addEventListener("minutes", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as StreamPayload;
-      const viewport = contentRef.current;
-      const wasNearBottom = !viewport || viewerStickBottomRef.current || viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48;
+      const wasNearBottom = windowStickBottomRef.current || isWindowNearBottom();
       setMinuteJob(payload.minute_job);
       setVersion(payload.version);
       setStreamState("live");
@@ -721,10 +730,8 @@ function App() {
       if (payload.content_markdown !== lastMarkdownRef.current) {
         lastMarkdownRef.current = payload.content_markdown;
         setContent(payload.content_markdown);
-        if (wasNearBottom && viewport) {
-          window.requestAnimationFrame(() => {
-            viewport.scrollTop = viewport.scrollHeight;
-          });
+        if (wasNearBottom) {
+          scrollWindowToBottom();
         }
       }
     });
@@ -734,14 +741,6 @@ function App() {
       eventSource.close();
     };
   }, [paths.streamPath]);
-
-  const handleViewerScroll = () => {
-    const viewport = contentRef.current;
-    if (!viewport) {
-      return;
-    }
-    viewerStickBottomRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 48;
-  };
 
   const submit = async (action: "start" | "restart" | "stop") => {
     const endpoint = action === "start" ? paths.startPath : action === "restart" ? paths.restartPath : paths.stopPath;
@@ -884,7 +883,7 @@ function App() {
               <span>{updatedLabel}</span>
             </div>
           </div>
-          <div className="viewer" ref={contentRef} onScroll={handleViewerScroll}>
+          <div className="viewer" ref={contentRef}>
             {content ? (
               <div className="minutes-markdown" dangerouslySetInnerHTML={{ __html: renderedContent }} />
             ) : (
