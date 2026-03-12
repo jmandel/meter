@@ -23,9 +23,19 @@ import type {
   RescueStatusResponse,
   SearchHit,
   SpeechSegmentRecord,
+  StartSimulationRequest,
+  StartSimulationResponse,
   WorkerLaunchConfig,
   WorkerHeartbeatResponse,
   WorkerRegisterRequest,
+  AudioCaptureStartedPayload,
+  AudioCaptureStoppedPayload,
+  BrowserConsolePayload,
+  TranscriptionSegmentPayload,
+  TranscriptionSessionStartedPayload,
+  ZoomChatMessagePayload,
+  ZoomMeetingJoinedPayload,
+  ZoomSpeakerActivePayload,
   ZoomAttendeePresencePayload,
 } from "./domain";
 import { AppDatabase } from "./database";
@@ -50,6 +60,7 @@ import {
   randomToken,
   uuidv7,
 } from "./utils";
+import { parseSimulationScript, type SimulationScenario, type SimulationStep } from "./simulation";
 import { normalizeZoomJoinUrl } from "./zoom";
 
 interface WorkerHandle {
@@ -91,6 +102,16 @@ interface AutomatedRescueAttempt {
   log_path: string;
   prompt_path: string;
   context_path: string;
+}
+
+interface SimulationHandle {
+  meeting_run_id: string;
+  room_id: string;
+  cancelled: boolean;
+  completed: boolean;
+  cancel_reason: string | null;
+  abort_controller: AbortController;
+  promise: Promise<void> | null;
 }
 
 interface SseSubscriber {
@@ -177,6 +198,7 @@ export class CoordinatorApp {
   private readonly eventBus = new EventBus();
   private readonly workersByMeetingRunId = new Map<string, WorkerHandle>();
   private readonly workersByWorkerId = new Map<string, WorkerHandle>();
+  private readonly simulationsByMeetingRunId = new Map<string, SimulationHandle>();
   private readonly rescueClaimsByMeetingRunId = new Map<string, RescueClaimState>();
   private readonly automatedRescueAttemptsByMeetingRunId = new Map<string, AutomatedRescueAttempt>();
   private readonly automatedRescueAttemptCountsByMeetingRunId = new Map<string, number>();
@@ -279,11 +301,43 @@ export class CoordinatorApp {
       if (url.pathname === "/v1/search" && request.method === "GET") {
         return this.handleSearch(url);
       }
+      if (url.pathname === "/v1/simulations" && request.method === "POST") {
+        return await this.handleStartSimulation(request);
+      }
       if (url.pathname === "/v1/stream" && request.method === "GET") {
         return this.handleEventStream(request, { room_id: url.searchParams.get("room_id"), meeting_run_id: url.searchParams.get("meeting_run_id"), kind: url.searchParams.get("kind"), source: url.searchParams.get("source") });
       }
 
-      let match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)$/);
+      let match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)$/);
+      if (match && request.method === "GET") {
+        return this.handleGetZoomMeeting(match[1], url);
+      }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/meeting-runs$/);
+      if (match && request.method === "GET") {
+        return this.handleListMeetingRuns(url, this.zoomRoomIdFromMeetingId(match[1]));
+      }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/transcript\.md$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingTranscript(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes\.md$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingTranscript(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/attendees$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingAttendees(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/attendees\.md$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingMarkdownAttendees(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/stream$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingStream(request, url, match[1]);
+      }
+
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)$/);
       if (match && request.method === "GET") {
         return this.handleGetMeetingRun(match[1]);
       }
@@ -300,6 +354,10 @@ export class CoordinatorApp {
         return this.handleListSpeech(url, match[1]);
       }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/transcript\.md$/);
+      if (match && request.method === "GET") {
+        return this.handleMarkdownTranscript(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\.md$/);
       if (match && request.method === "GET") {
         return this.handleMarkdownTranscript(url, match[1]);
       }
@@ -407,6 +465,9 @@ export class CoordinatorApp {
       ...Array.from(this.automatedRescueAttemptsByMeetingRunId.keys()).map((meetingRunId) =>
         this.stopAutomatedRescueForMeetingRun(meetingRunId, "coordinator stopping"),
       ),
+      ...Array.from(this.simulationsByMeetingRunId.keys()).map((meetingRunId) =>
+        this.stopSimulationForMeetingRun(meetingRunId, "coordinator stopping"),
+      ),
     ]);
     this.server?.stop();
     this.storage.close();
@@ -446,6 +507,33 @@ export class CoordinatorApp {
 
   private getMeetingRun(meetingRunId: string): MeetingRunRecord | null {
     return this.storage.getMeetingRunRecord(meetingRunId);
+  }
+
+  private zoomRoomIdFromMeetingId(meetingId: string): string {
+    return `zoom:${decodeURIComponent(meetingId)}`;
+  }
+
+  private resolveMeetingRunForRoom(roomId: string, explicitMeetingRunId?: string | null): MeetingRunRecord | null {
+    if (explicitMeetingRunId) {
+      const meetingRun = this.getMeetingRun(explicitMeetingRunId);
+      if (!meetingRun || meetingRun.room_id !== roomId) {
+        return null;
+      }
+      return meetingRun;
+    }
+
+    const meetingRuns = this.storage.listMeetingRunRecords({
+      room_id: roomId,
+      limit: 100,
+    });
+    if (meetingRuns.length === 0) {
+      return null;
+    }
+    return meetingRuns.find((item) => !["completed", "failed", "aborted"].includes(item.state)) ?? meetingRuns[0] ?? null;
+  }
+
+  private resolveMeetingRunForZoomMeeting(meetingId: string, explicitMeetingRunId?: string | null): MeetingRunRecord | null {
+    return this.resolveMeetingRunForRoom(this.zoomRoomIdFromMeetingId(meetingId), explicitMeetingRunId);
   }
 
   private recoverWorkerHandle(meetingRun: MeetingRunRecord, workerId: string | null): WorkerHandle | null {
@@ -555,65 +643,90 @@ export class CoordinatorApp {
     return jsonResponse(response);
   }
 
+  private async initializeMeetingRun(input: {
+    normalized: ReturnType<typeof normalizeZoomJoinUrl>;
+    requested_by: string | null;
+    bot_name: string;
+    tags: string[];
+    options: MeetingRunOptions;
+  }): Promise<{ meeting_run_id: string; layout: MeetingRunFileLayout; meeting_run: MeetingRunRecord | null }> {
+    const now = nowUnixMs();
+    const actualMeetingRunId = uuidv7(now);
+    const layout = await createMeetingRunLayout(this.config.data_root, actualMeetingRunId, now, input.options.persist_live_pcm);
+    const metadata = {
+      meeting_run_id: actualMeetingRunId,
+      room_id: input.normalized.room_id,
+      normalized_join_url: input.normalized.normalized_join_url,
+      requested_by: input.requested_by,
+      bot_name: input.bot_name,
+      created_at_unix_ms: now,
+      tags: input.tags,
+      options: input.options,
+    };
+    await writeMeetingMetadata(layout, metadata);
+    await writeMeetingLifecycle(layout, buildLifecycleFile(actualMeetingRunId, "pending", now));
+
+    this.storage.upsertRoom({
+      room_id: input.normalized.room_id,
+      provider_room_key: input.normalized.provider_room_key,
+      normalized_join_url: input.normalized.normalized_join_url,
+      display_name: null,
+      now_unix_ms: now,
+    });
+    this.storage.insertMeetingRun({
+      meeting_run_id: actualMeetingRunId,
+      room_id: input.normalized.room_id,
+      normalized_join_url: input.normalized.normalized_join_url,
+      requested_by: input.requested_by,
+      bot_name: input.bot_name,
+      state: "pending",
+      created_at_unix_ms: now,
+      data_dir: layout.data_dir,
+      tags: input.tags,
+      options: input.options,
+      paths: layout,
+    });
+
+    const createdEvent = this.buildCoordinatorEvent(actualMeetingRunId, input.normalized.room_id, "system.meeting_run.created", {
+      join_url: input.normalized.normalized_join_url,
+      requested_by: input.requested_by,
+      tags: input.tags,
+    }, now);
+    const appended = this.storage.appendEvents([createdEvent], now);
+    this.eventBus.publish(appended.records);
+
+    return {
+      meeting_run_id: actualMeetingRunId,
+      layout,
+      meeting_run: this.storage.getMeetingRunRecord(actualMeetingRunId),
+    };
+  }
+
   private async handleCreateMeetingRun(request: Request): Promise<Response> {
     const body = await parseJsonBody<CreateMeetingRunRequest>(request);
     if (!body.join_url) {
       return errorResponse(400, "invalid_request", "`join_url` is required");
     }
 
-    const now = nowUnixMs();
     const normalized = normalizeZoomJoinUrl(body.join_url);
-    const actualMeetingRunId = uuidv7(now);
     const options = buildMeetingRunOptions(this.config, body.options);
-    const layout = await createMeetingRunLayout(this.config.data_root, actualMeetingRunId, now, options.persist_live_pcm);
-    const metadata = {
-      meeting_run_id: actualMeetingRunId,
-      room_id: normalized.room_id,
-      normalized_join_url: normalized.normalized_join_url,
+    const botName = body.bot_name?.trim() || this.config.default_bot_name;
+    const initialized = await this.initializeMeetingRun({
+      normalized,
       requested_by: body.requested_by ?? null,
-      bot_name: body.bot_name?.trim() || this.config.default_bot_name,
-      created_at_unix_ms: now,
+      bot_name: botName,
       tags: body.tags ?? [],
       options,
-    };
-    await writeMeetingMetadata(layout, metadata);
-    await writeMeetingLifecycle(layout, buildLifecycleFile(actualMeetingRunId, "pending", now));
-
-    this.storage.upsertRoom({
-      room_id: normalized.room_id,
-      provider_room_key: normalized.provider_room_key,
-      normalized_join_url: normalized.normalized_join_url,
-      display_name: null,
-      now_unix_ms: now,
     });
-    this.storage.insertMeetingRun({
-      meeting_run_id: actualMeetingRunId,
-      room_id: normalized.room_id,
-      normalized_join_url: normalized.normalized_join_url,
-      requested_by: body.requested_by ?? null,
-      bot_name: body.bot_name?.trim() || this.config.default_bot_name,
-      state: "pending",
-      created_at_unix_ms: now,
-      data_dir: layout.data_dir,
-      tags: body.tags ?? [],
-      options,
-      paths: layout,
-    });
-
-    const createdEvent = this.buildCoordinatorEvent(actualMeetingRunId, normalized.room_id, "system.meeting_run.created", {
-      join_url: normalized.normalized_join_url,
-      requested_by: body.requested_by ?? null,
-      tags: body.tags ?? [],
-    }, now);
-    const appended = this.storage.appendEvents([createdEvent], now);
-    this.eventBus.publish(appended.records);
+    const actualMeetingRunId = initialized.meeting_run_id;
+    const layout = initialized.layout;
 
     const workerLaunchConfig: WorkerLaunchConfig = {
       app: this.config,
       meeting_run_id: actualMeetingRunId,
       room_id: normalized.room_id,
       normalized_join_url: normalized.normalized_join_url,
-      bot_name: body.bot_name?.trim() || this.config.default_bot_name,
+      bot_name: botName,
       requested_by: body.requested_by ?? null,
       tags: body.tags ?? [],
       options,
@@ -634,8 +747,79 @@ export class CoordinatorApp {
       return errorResponse(500, "worker_spawn_failed", "Failed to start worker", { message });
     }
 
-    const meetingRun = this.storage.getMeetingRunRecord(actualMeetingRunId);
-    return jsonResponse({ meeting_run: meetingRun }, { status: 201 });
+    return jsonResponse({ meeting_run: this.storage.getMeetingRunRecord(actualMeetingRunId) }, { status: 201 });
+  }
+
+  private async handleStartSimulation(request: Request): Promise<Response> {
+    const body = await parseJsonBody<StartSimulationRequest>(request);
+    if (!body.script?.trim()) {
+      return errorResponse(400, "invalid_request", "`script` is required");
+    }
+
+    let scenario: SimulationScenario;
+    try {
+      scenario = parseSimulationScript(body.script);
+    } catch (error) {
+      return errorResponse(400, "invalid_simulation_script", error instanceof Error ? error.message : String(error));
+    }
+
+    const meetingId = body.meeting_id?.trim() || scenario.meeting_id;
+    if (!meetingId) {
+      return errorResponse(400, "invalid_request", "`meeting_id` is required");
+    }
+    const speed = body.speed && body.speed > 0 ? body.speed : scenario.speed;
+    const title = body.title?.trim() || scenario.title || `Simulated Zoom ${meetingId}`;
+    const botName = body.bot_name?.trim() || scenario.bot_name || "Meter Simulator";
+    const requestedBy = body.requested_by?.trim() || scenario.requested_by || "simulation";
+    const tags = Array.from(new Set(["simulation", ...(scenario.tags ?? []), ...((body.tags ?? []).map((item) => item.trim()).filter(Boolean))]));
+    const normalized = {
+      room_id: `zoom:${meetingId}`,
+      provider_room_key: meetingId,
+      normalized_join_url: `https://app.zoom.us/wc/join/${meetingId}`,
+    };
+    const options = buildMeetingRunOptions(this.config, {
+      enable_transcription: true,
+      enable_speaker_tracking: true,
+      enable_chat_tracking: true,
+      persist_archive_audio: false,
+      persist_live_pcm: false,
+    });
+
+    const initialized = await this.initializeMeetingRun({
+      normalized,
+      requested_by: requestedBy,
+      bot_name: botName,
+      tags,
+      options,
+    });
+    const meetingRun = initialized.meeting_run;
+    if (!meetingRun) {
+      return errorResponse(500, "internal_error", "Failed to initialize simulation run");
+    }
+
+    this.startSimulation(meetingRun, {
+      ...scenario,
+      meeting_id: meetingId,
+      title,
+      bot_name: botName,
+      requested_by: requestedBy,
+      speed,
+      tags,
+    });
+
+    const baseUrl = this.resolvePublicBaseUrl(request);
+    const response: StartSimulationResponse = {
+      meeting_run: meetingRun,
+      simulation: {
+        meeting_id: meetingId,
+        room_id: normalized.room_id,
+        transcript_url: `${baseUrl}/v1/zoom-meetings/${encodeURIComponent(meetingId)}/transcript.md?meeting_run_id=${meetingRun.meeting_run_id}`,
+        attendees_url: `${baseUrl}/v1/zoom-meetings/${encodeURIComponent(meetingId)}/attendees?meeting_run_id=${meetingRun.meeting_run_id}`,
+        attendees_markdown_url: `${baseUrl}/v1/zoom-meetings/${encodeURIComponent(meetingId)}/attendees.md?meeting_run_id=${meetingRun.meeting_run_id}`,
+        stream_url: `${baseUrl}/v1/zoom-meetings/${encodeURIComponent(meetingId)}/stream?meeting_run_id=${meetingRun.meeting_run_id}`,
+      },
+    };
+    return jsonResponse(response, { status: 201 });
   }
 
   private async spawnWorker(launchConfig: WorkerLaunchConfig): Promise<void> {
@@ -769,6 +953,19 @@ export class CoordinatorApp {
     return jsonResponse({ meeting_run: record });
   }
 
+  private handleGetZoomMeeting(meetingId: string, url: URL): Response {
+    const roomId = this.zoomRoomIdFromMeetingId(meetingId);
+    const meetingRun = this.resolveMeetingRunForRoom(roomId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    return jsonResponse({
+      meeting_id: decodeURIComponent(meetingId),
+      room_id: roomId,
+      meeting_run,
+    });
+  }
+
   private handleGetRescueStatus(request: Request, meetingRunId: string): Response {
     const record = this.getMeetingRun(meetingRunId);
     if (!record) {
@@ -868,21 +1065,25 @@ export class CoordinatorApp {
     if (["completed", "failed", "aborted"].includes(record.state)) {
       return errorResponse(409, "meeting_run_terminal", "Meeting run is already in a terminal state");
     }
+    const simulation = this.simulationsByMeetingRunId.get(meetingRunId) ?? null;
     const handle =
       this.workersByMeetingRunId.get(meetingRunId) ??
       (record.worker?.worker_id ? this.recoverWorkerHandle(record, record.worker.worker_id) : null);
-    if (!handle || !record.worker?.worker_id) {
+    if (!simulation && (!handle || !record.worker?.worker_id)) {
       return errorResponse(409, "worker_unavailable", "No worker is available to stop this meeting run");
     }
-    if (handle.stop_requested) {
+    if (simulation?.cancelled || handle?.stop_requested) {
       return jsonResponse({
         meeting_run_id: meetingRunId,
         accepted: true,
       });
     }
-    handle.stop_requested = true;
+    if (handle) {
+      handle.stop_requested = true;
+    }
     this.rescueClaimsByMeetingRunId.delete(meetingRunId);
     void this.stopAutomatedRescueForMeetingRun(meetingRunId, "stop requested");
+    void this.stopSimulationForMeetingRun(meetingRunId, "stop requested");
     void this.persistWorkersState();
     this.storage.patchMeetingRun(meetingRunId, {
       state: "stopping",
@@ -1262,30 +1463,471 @@ export class CoordinatorApp {
     });
   }
 
+  private startSimulation(meetingRun: MeetingRunRecord, scenario: SimulationScenario): void {
+    const handle: SimulationHandle = {
+      meeting_run_id: meetingRun.meeting_run_id,
+      room_id: meetingRun.room_id,
+      cancelled: false,
+      completed: false,
+      cancel_reason: null,
+      abort_controller: new AbortController(),
+      promise: null,
+    };
+    this.simulationsByMeetingRunId.set(meetingRun.meeting_run_id, handle);
+    handle.promise = this.runSimulation(handle, meetingRun, scenario)
+      .catch(async (error) => {
+        if (handle.completed) {
+          return;
+        }
+        const reason = handle.cancel_reason ?? (error instanceof Error ? error.message : String(error));
+        if (handle.cancelled) {
+          await this.completeSimulation(meetingRun, reason === "stop requested" ? "completed" : "aborted", null);
+          return;
+        }
+        await this.completeSimulation(meetingRun, "failed", {
+          code: "simulation_failed",
+          message: reason,
+          fatal: true,
+        });
+      })
+      .finally(() => {
+        handle.completed = true;
+        this.simulationsByMeetingRunId.delete(meetingRun.meeting_run_id);
+      });
+  }
+
+  private async waitForSimulationDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+    if (delayMs <= 0) {
+      return;
+    }
+    if (signal.aborted) {
+      throw new Error(String(signal.reason ?? "simulation_cancelled"));
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, delayMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        reject(new Error(String(signal.reason ?? "simulation_cancelled")));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  private async appendSyntheticEvent(
+    meetingRun: MeetingRunRecord,
+    source: EventEnvelope["source"],
+    kind: EventEnvelope["kind"],
+    payload: unknown,
+    tsUnixMs: number,
+    raw?: unknown,
+  ): Promise<void> {
+    const event: EventEnvelope = {
+      meeting_run_id: meetingRun.meeting_run_id,
+      room_id: meetingRun.room_id,
+      seq: this.storage.reserveCoordinatorSeq(meetingRun.meeting_run_id),
+      source,
+      kind,
+      ts_unix_ms: tsUnixMs,
+      payload,
+      raw,
+    };
+    const appended = this.storage.appendEvents([event], nowUnixMs());
+    this.patchMeetingRunFromEvents(meetingRun.meeting_run_id, [event]);
+    this.eventBus.publish(appended.records);
+  }
+
+  private async setMeetingRunState(meetingRunId: string, state: MeetingRunRecord["state"], tsUnixMs: number): Promise<void> {
+    this.storage.patchMeetingRun(meetingRunId, {
+      state,
+      updated_at_unix_ms: tsUnixMs,
+    });
+    if (state === "capturing") {
+      this.storage.patchMeetingRun(meetingRunId, {
+        started_at_unix_ms: tsUnixMs,
+      });
+    }
+  }
+
+  private async completeSimulation(
+    meetingRun: MeetingRunRecord,
+    finalState: "completed" | "failed" | "aborted",
+    error: { code: string; message: string; fatal: boolean } | null,
+  ): Promise<void> {
+    const current = this.getMeetingRun(meetingRun.meeting_run_id);
+    if (!current || ["completed", "failed", "aborted"].includes(current.state)) {
+      return;
+    }
+    const endedAtUnixMs = nowUnixMs();
+    const events: EventEnvelope[] = [];
+    let nextSeq = this.storage.reserveCoordinatorSeq(meetingRun.meeting_run_id);
+    if (error) {
+      events.push({
+        meeting_run_id: meetingRun.meeting_run_id,
+        room_id: meetingRun.room_id,
+        seq: nextSeq,
+        source: "system",
+        kind: "error.raised",
+        ts_unix_ms: endedAtUnixMs,
+        payload: error,
+      });
+      nextSeq -= 1;
+    }
+    events.push({
+      meeting_run_id: meetingRun.meeting_run_id,
+      room_id: meetingRun.room_id,
+      seq: nextSeq,
+      source: "system",
+      kind: finalState === "failed" ? "system.worker.failed" : "system.worker.completed",
+      ts_unix_ms: endedAtUnixMs,
+      payload: {
+        worker_id: `simulation:${meetingRun.meeting_run_id}`,
+        final_state: finalState,
+      },
+    });
+    const appended = this.storage.appendEvents(events, endedAtUnixMs);
+    this.storage.patchMeetingRun(meetingRun.meeting_run_id, {
+      state: finalState,
+      ended_at_unix_ms: endedAtUnixMs,
+      updated_at_unix_ms: endedAtUnixMs,
+      last_error_code: error?.code ?? null,
+      last_error_message: error?.message ?? null,
+    });
+    this.eventBus.publish(appended.records);
+  }
+
+  private async stopSimulationForMeetingRun(meetingRunId: string, reason: string): Promise<void> {
+    const handle = this.simulationsByMeetingRunId.get(meetingRunId);
+    if (!handle || handle.completed) {
+      return;
+    }
+    handle.cancelled = true;
+    handle.cancel_reason = reason;
+    handle.abort_controller.abort(reason);
+    await handle.promise?.catch(() => undefined);
+  }
+
+  private async runSimulation(handle: SimulationHandle, meetingRun: MeetingRunRecord, scenario: SimulationScenario): Promise<void> {
+    const speed = scenario.speed > 0 ? scenario.speed : 1;
+    const signal = handle.abort_controller.signal;
+    let simulatedTs = nowUnixMs();
+    let captureStarted = false;
+    let captureStopped = false;
+    let joined = false;
+    let segmentCounter = 1;
+    let chatCounter = 1;
+    const attendeeState = new Map<string, ZoomAttendeePresencePayload>();
+    const chatState = new Map<string, ZoomChatMessagePayload>();
+
+    const emitJoin = async (stepArgs: Record<string, string>) => {
+      joined = true;
+      await this.setMeetingRunState(meetingRun.meeting_run_id, "joining", simulatedTs);
+      const payload: ZoomMeetingJoinedPayload = {
+        title: stepArgs.title ?? scenario.title ?? `Simulated Zoom ${scenario.meeting_id}`,
+        page_url: stepArgs.page_url ?? meetingRun.normalized_join_url,
+        joined_at_unix_ms: simulatedTs,
+      };
+      await this.appendSyntheticEvent(meetingRun, "browser", "zoom.meeting.joined", payload, simulatedTs);
+    };
+
+    const emitCaptureStarted = async () => {
+      if (captureStarted) {
+        return;
+      }
+      captureStarted = true;
+      const payload: AudioCaptureStartedPayload = {
+        archive_stream_id: `simulation-archive-${meetingRun.meeting_run_id}`,
+        live_stream_id: `simulation-live-${meetingRun.meeting_run_id}`,
+        archive_content_type: "audio/mpeg",
+        archive_codec: "simulation",
+        pcm_sample_rate_hz: 16000,
+        pcm_channels: 1,
+      };
+      await this.appendSyntheticEvent(meetingRun, "audio_capture", "audio.capture.started", payload, simulatedTs);
+      const transcriptionPayload: TranscriptionSessionStartedPayload = {
+        provider: "custom",
+        provider_session_id: `simulation:${meetingRun.meeting_run_id}`,
+        sample_rate_hz: 16000,
+      };
+      await this.appendSyntheticEvent(meetingRun, "transcription", "transcription.session.started", transcriptionPayload, simulatedTs);
+    };
+
+    const emitCaptureStopped = async (reason: AudioCaptureStoppedPayload["reason"]) => {
+      if (!captureStarted || captureStopped) {
+        return;
+      }
+      captureStopped = true;
+      const payload: AudioCaptureStoppedPayload = { reason };
+      await this.appendSyntheticEvent(meetingRun, "audio_capture", "audio.capture.stopped", payload, simulatedTs);
+      await this.appendSyntheticEvent(meetingRun, "transcription", "transcription.session.stopped", {
+        provider: "custom",
+        provider_session_id: `simulation:${meetingRun.meeting_run_id}`,
+      }, simulatedTs);
+    };
+
+    const hasJoinStep = scenario.steps.some((step) => step.action === "join");
+    const hasCaptureStartStep = scenario.steps.some((step) => step.action === "capture.start");
+
+    await this.appendSyntheticEvent(meetingRun, "system", "system.worker.started", {
+      worker_id: `simulation:${meetingRun.meeting_run_id}`,
+      pid: process.pid,
+      ingest_port: 0,
+      cdp_port: 0,
+      chrome_user_data_dir: "simulation",
+    }, simulatedTs);
+    await this.appendSyntheticEvent(meetingRun, "browser", "browser.page.loaded", {
+      page_url: meetingRun.normalized_join_url,
+      user_agent: "meter-simulation",
+    }, simulatedTs);
+
+    if (!hasJoinStep) {
+      simulatedTs += 50;
+      await emitJoin({});
+    }
+    if (!hasCaptureStartStep && !hasJoinStep) {
+      simulatedTs += 50;
+      await emitCaptureStarted();
+    }
+
+    let explicitFinalState: "completed" | "failed" | "aborted" | null = null;
+    let explicitError: { code: string; message: string; fatal: boolean } | null = null;
+
+    for (const step of scenario.steps) {
+      await this.waitForSimulationDelay(Math.round(step.delay_ms / speed), signal);
+      simulatedTs += step.delay_ms;
+
+      if (step.action === "join") {
+        await emitJoin(step.args);
+        if (!hasCaptureStartStep && !captureStarted) {
+          simulatedTs += 50;
+          await emitCaptureStarted();
+        }
+        continue;
+      }
+      if (step.action === "capture.start") {
+        await emitCaptureStarted();
+        continue;
+      }
+      if (step.action === "capture.stop") {
+        await emitCaptureStopped((step.args.reason as AudioCaptureStoppedPayload["reason"] | undefined) ?? "manual");
+        continue;
+      }
+      if (step.action === "attendee.join") {
+        const payload: ZoomAttendeePresencePayload = {
+          attendee_id: step.args.id ?? `attendee-${attendeeState.size + 1}`,
+          user_id: step.args.user_id ? Number.parseInt(step.args.user_id, 10) : null,
+          display_name: step.args.name ?? null,
+          is_host: step.args.host === "1" || step.args.host === "true",
+          is_co_host: step.args.co_host === "1" || step.args.co_host === "true",
+          is_guest: step.args.guest === "1" || step.args.guest === "true",
+          muted: step.args.muted === undefined ? null : (step.args.muted === "1" || step.args.muted === "true"),
+          video_on: step.args.video_on === undefined ? null : (step.args.video_on === "1" || step.args.video_on === "true"),
+          audio_connection: step.args.audio_connection ?? "computer",
+          last_spoken_at_unix_ms: null,
+          backfilled: false,
+          details: {
+            simulated: true,
+          },
+        };
+        attendeeState.set(payload.attendee_id, payload);
+        await this.appendSyntheticEvent(meetingRun, "zoom_dom", "zoom.attendee.joined", payload, simulatedTs);
+        continue;
+      }
+      if (step.action === "attendee.leave") {
+        const attendeeId = step.args.id ?? "";
+        const existing = attendeeState.get(attendeeId);
+        const payload: ZoomAttendeePresencePayload = {
+          attendee_id: attendeeId || existing?.attendee_id || `attendee-${attendeeState.size + 1}`,
+          user_id: step.args.user_id ? Number.parseInt(step.args.user_id, 10) : existing?.user_id ?? null,
+          display_name: step.args.name ?? existing?.display_name ?? null,
+          is_host: existing?.is_host ?? false,
+          is_co_host: existing?.is_co_host ?? false,
+          is_guest: existing?.is_guest ?? false,
+          muted: existing?.muted ?? null,
+          video_on: existing?.video_on ?? null,
+          audio_connection: existing?.audio_connection ?? "computer",
+          last_spoken_at_unix_ms: existing?.last_spoken_at_unix_ms ?? null,
+          backfilled: false,
+          details: {
+            simulated: true,
+          },
+        };
+        attendeeState.delete(payload.attendee_id);
+        await this.appendSyntheticEvent(meetingRun, "zoom_dom", "zoom.attendee.left", payload, simulatedTs);
+        continue;
+      }
+      if (step.action === "speaker") {
+        const payload: ZoomSpeakerActivePayload = {
+          speaker_display_name: step.args.name ?? null,
+        };
+        await this.appendSyntheticEvent(meetingRun, "zoom_dom", "zoom.speaker.active", payload, simulatedTs);
+        continue;
+      }
+      if (step.action === "say") {
+        const speakerLabel = step.args.speaker ?? null;
+        if (speakerLabel) {
+          await this.appendSyntheticEvent(meetingRun, "zoom_dom", "zoom.speaker.active", {
+            speaker_display_name: speakerLabel,
+          } satisfies ZoomSpeakerActivePayload, simulatedTs);
+        }
+        const durationMs = step.args.duration_ms ? Number.parseInt(step.args.duration_ms, 10) : 1500;
+        const payload: TranscriptionSegmentPayload = {
+          speech_segment_id: step.args.segment ?? `sim-seg-${segmentCounter++}`,
+          provider: "custom",
+          provider_segment_id: step.args.provider_segment_id ?? null,
+          text: step.args.text ?? "",
+          status: step.args.status === "partial" ? "partial" : "final",
+          started_at_unix_ms: simulatedTs,
+          ended_at_unix_ms: simulatedTs + durationMs,
+          speaker_label: speakerLabel,
+          speaker_confidence: null,
+        };
+        await this.appendSyntheticEvent(meetingRun, "transcription", payload.status === "partial" ? "transcription.segment.partial" : "transcription.segment.final", payload, simulatedTs);
+        continue;
+      }
+      if (step.action === "chat") {
+        const chatMessageId = step.args.id ?? `sim-chat-${chatCounter++}`;
+        const replyTo = step.args.reply_to ?? null;
+        const payload: ZoomChatMessagePayload = {
+          chat_message_id: chatMessageId,
+          sender_display_name: step.args.from ?? null,
+          sender_user_id: step.args.sender_user_id ? Number.parseInt(step.args.sender_user_id, 10) : null,
+          receiver_display_name: step.args.to ?? "Everyone",
+          receiver_user_id: step.args.receiver_user_id ? Number.parseInt(step.args.receiver_user_id, 10) : null,
+          visibility: step.args.visibility === "direct" ? "direct" : "everyone",
+          text: step.args.text ?? "",
+          sent_at_unix_ms: simulatedTs,
+          main_chat_message_id: replyTo,
+          thread_reply_count: replyTo ? 0 : (step.args.replies ? Number.parseInt(step.args.replies, 10) : 0),
+          is_thread_reply: Boolean(replyTo),
+          is_edited: false,
+          chat_type: replyTo ? "thread" : "groupchat",
+          details: {
+            simulated: true,
+          },
+        };
+        chatState.set(chatMessageId, payload);
+        await this.appendSyntheticEvent(meetingRun, "zoom_dom", "zoom.chat.message", payload, simulatedTs);
+        if (replyTo) {
+          const root = chatState.get(replyTo);
+          if (root) {
+            const updatedRoot: ZoomChatMessagePayload = {
+              ...root,
+              thread_reply_count: (root.thread_reply_count ?? 0) + 1,
+            };
+            chatState.set(replyTo, updatedRoot);
+            await this.appendSyntheticEvent(meetingRun, "zoom_dom", "zoom.chat.message", updatedRoot, simulatedTs);
+          }
+        }
+        continue;
+      }
+      if (step.action === "console") {
+        const payload: BrowserConsolePayload = {
+          level: (step.args.level as BrowserConsolePayload["level"] | undefined) ?? "info",
+          text: step.args.text ?? "",
+        };
+        await this.appendSyntheticEvent(meetingRun, "browser", "browser.console", payload, simulatedTs);
+        continue;
+      }
+      if (step.action === "event") {
+        if (!step.args.kind || !step.args.source || !step.args.payload) {
+          throw new Error(`Simulation event step on line ${step.line} requires source=, kind=, and payload=`);
+        }
+        const payload = JSON.parse(step.args.payload);
+        const raw = step.args.raw ? JSON.parse(step.args.raw) : undefined;
+        await this.appendSyntheticEvent(
+          meetingRun,
+          step.args.source as EventEnvelope["source"],
+          step.args.kind as EventEnvelope["kind"],
+          payload,
+          simulatedTs,
+          raw,
+        );
+        if (step.args.kind === "audio.capture.started") {
+          captureStarted = true;
+        }
+        if (step.args.kind === "audio.capture.stopped") {
+          captureStopped = true;
+        }
+        if (step.args.kind === "zoom.meeting.joined") {
+          joined = true;
+        }
+        continue;
+      }
+      if (step.action === "end") {
+        explicitFinalState = (step.args.state as "completed" | "failed" | "aborted" | undefined) ?? "completed";
+        if (explicitFinalState === "failed") {
+          explicitError = {
+            code: step.args.code ?? "simulation_failed",
+            message: step.args.message ?? "Simulation ended in failure",
+            fatal: true,
+          };
+        }
+        break;
+      }
+    }
+
+    if (signal.aborted) {
+      throw new Error(String(signal.reason ?? "simulation_cancelled"));
+    }
+
+    if (joined) {
+      await this.appendSyntheticEvent(meetingRun, "browser", "zoom.meeting.left", {
+        title: scenario.title ?? `Simulated Zoom ${scenario.meeting_id}`,
+        page_url: meetingRun.normalized_join_url,
+        joined_at_unix_ms: simulatedTs,
+      }, simulatedTs);
+    }
+    await emitCaptureStopped("ended");
+    await this.completeSimulation(meetingRun, explicitFinalState ?? "completed", explicitError);
+  }
+
+  private handleZoomMeetingTranscript(url: URL, meetingId: string): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    return this.renderMarkdownTranscriptResponse(url, meetingRun);
+  }
+
   private handleMarkdownTranscript(url: URL, meetingRunId: string): Response {
     const meetingRun = this.getMeetingRun(meetingRunId);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "Meeting run not found");
     }
+    return this.renderMarkdownTranscriptResponse(url, meetingRun);
+  }
 
+  private renderMarkdownTranscriptResponse(url: URL, meetingRun: MeetingRunRecord): Response {
     const includeParams = url.searchParams
       .getAll("include")
       .flatMap((value) => value.split(","))
       .map((value) => value.trim().toLowerCase())
       .filter(Boolean);
     const includeChat = parseBoolean(url.searchParams.get("chat") ?? undefined, false) || includeParams.includes("chat");
+    const sinceParam = url.searchParams.get("since");
+    const sinceUnixMs = sinceParam ? parseTimestamp(sinceParam) : null;
+    if (sinceParam && sinceUnixMs === null) {
+      return errorResponse(400, "invalid_request", "`since` must be a parseable timestamp");
+    }
     const speech = this.storage.listSpeechRecords({
-      meeting_run_id: meetingRunId,
+      meeting_run_id: meetingRun.meeting_run_id,
       status: "final",
       limit: 10_000,
     });
     const chat = includeChat
       ? this.storage.listChatRecords({
-          meeting_run_id: meetingRunId,
+          meeting_run_id: meetingRun.meeting_run_id,
           limit: 10_000,
         })
       : [];
-    const markdown = this.renderMarkdownTranscript(meetingRun, speech, chat, includeChat);
+    const markdown = this.renderMarkdownTranscript(meetingRun, speech, chat, {
+      include_chat: includeChat,
+      since_unix_ms: sinceUnixMs,
+    });
     return new Response(markdown, {
       headers: {
         "content-type": "text/markdown; charset=utf-8",
@@ -1298,11 +1940,16 @@ export class CoordinatorApp {
     meetingRun: MeetingRunRecord,
     speech: SpeechSegmentRecord[],
     chat: ChatMessageRecord[] = [],
-    includeChat = false,
+    options?: {
+      include_chat?: boolean;
+      since_unix_ms?: number | null;
+    },
   ): string {
+    const includeChat = options?.include_chat ?? false;
+    const sinceUnixMs = options?.since_unix_ms ?? null;
     const heading = meetingRun.room_id.startsWith("zoom:") ? meetingRun.room_id.slice(5) : meetingRun.room_id;
     const startedAt = meetingRun.started_at ?? meetingRun.created_at;
-    const formatTimestamp = (iso: string | null) => {
+    const formatDisplayTimestamp = (iso: string | null) => {
       if (!iso) {
         return "Unknown time";
       }
@@ -1315,37 +1962,53 @@ export class CoordinatorApp {
       }).format(new Date(iso));
     };
 
-    const grouped: Array<{ speaker: string; started_at: string | null; text: string }> = [];
-    for (const segment of speech) {
+    const formatCursorTimestamp = (iso: string | null) => iso ?? "unknown";
+    const speechCursorUnixMs = (segment: SpeechSegmentRecord) => {
+      return Date.parse(segment.emitted_at ?? segment.ended_at ?? segment.started_at ?? "") || 0;
+    };
+    const filteredSpeech = sinceUnixMs === null
+      ? speech
+      : speech.filter((segment) => speechCursorUnixMs(segment) > sinceUnixMs);
+    const filteredChat = sinceUnixMs === null
+      ? chat
+      : chat.filter((item) => (Date.parse(item.sent_at) || 0) > sinceUnixMs);
+
+    const grouped: Array<{ speaker: string; started_at: string | null; cursor_at: string | null; text: string }> = [];
+    for (const segment of filteredSpeech) {
       const text = segment.text.trim();
       if (!text) {
         continue;
       }
       const speaker = segment.speaker_label?.trim() || "Unknown speaker";
       const startedAtIso = segment.started_at ?? segment.emitted_at;
+      const cursorAtIso = segment.emitted_at ?? segment.ended_at ?? segment.started_at ?? null;
       const previous = grouped[grouped.length - 1];
       if (previous && speaker !== "Unknown speaker" && previous.speaker === speaker) {
         previous.text = `${previous.text}${previous.text.endsWith("-") ? "" : " "}${text}`.trim();
+        previous.cursor_at = cursorAtIso ?? previous.cursor_at;
         continue;
       }
       grouped.push({
         speaker,
         started_at: startedAtIso,
+        cursor_at: cursorAtIso,
         text,
       });
     }
 
     const lines = [
-      `# ${heading} · ${formatTimestamp(startedAt)}`,
+      `# ${heading} · ${formatDisplayTimestamp(startedAt)}`,
       `Meeting URL: ${meetingRun.normalized_join_url}`,
       "",
       "## Transcript",
       "",
+      "_Use `?since=<cursor timestamp>` with any cursor shown below to fetch only newer entries._",
+      "",
     ];
 
     if (grouped.length === 0) {
-      if (!includeChat || chat.length === 0) {
-        lines.push("_No finalized transcript yet._");
+      if (!includeChat || filteredChat.length === 0) {
+        lines.push(sinceUnixMs === null ? "_No finalized transcript yet._" : `_No transcript entries newer than ${new Date(sinceUnixMs).toISOString()}._`);
         lines.push("");
         return lines.join("\n");
       }
@@ -1353,7 +2016,7 @@ export class CoordinatorApp {
 
     if (!includeChat) {
       for (const item of grouped) {
-        lines.push(`### ${formatTimestamp(item.started_at)} · ${item.speaker}`);
+        lines.push(`### ${formatDisplayTimestamp(item.started_at)} · ${item.speaker} · cursor ${formatCursorTimestamp(item.cursor_at)}`);
         lines.push("");
         lines.push(item.text);
         lines.push("");
@@ -1363,7 +2026,7 @@ export class CoordinatorApp {
 
     const chatRenderIds = new Map<string, number>();
     let nextChatRenderId = 1;
-    for (const item of [...chat].sort((left, right) => Date.parse(left.sent_at) - Date.parse(right.sent_at) || left.event_id - right.event_id)) {
+    for (const item of [...filteredChat].sort((left, right) => Date.parse(left.sent_at) - Date.parse(right.sent_at) || left.event_id - right.event_id)) {
       if (!chatRenderIds.has(item.chat_message_id)) {
         chatRenderIds.set(item.chat_message_id, nextChatRenderId);
         nextChatRenderId += 1;
@@ -1377,9 +2040,10 @@ export class CoordinatorApp {
         sort_index: index,
         speaker: item.speaker,
         started_at: item.started_at,
+        cursor_at: item.cursor_at,
         text: item.text,
       })),
-      ...chat
+      ...filteredChat
         .filter((item) => item.text.trim())
         .map((item, index) => ({
           kind: "chat" as const,
@@ -1390,14 +2054,16 @@ export class CoordinatorApp {
     ].sort((left, right) => left.sort_ts - right.sort_ts || left.sort_index - right.sort_index || (left.kind === "speech" ? -1 : 1));
 
     if (transcriptItems.length === 0) {
-      lines.push("_No finalized transcript or chat yet._");
+      lines.push(sinceUnixMs === null
+        ? "_No finalized transcript or chat yet._"
+        : `_No transcript or chat entries newer than ${new Date(sinceUnixMs).toISOString()}._`);
       lines.push("");
       return lines.join("\n");
     }
 
     for (const item of transcriptItems) {
       if (item.kind === "speech") {
-        lines.push(`### ${formatTimestamp(item.started_at)} · ${item.speaker}`);
+        lines.push(`### ${formatDisplayTimestamp(item.started_at)} · ${item.speaker} · cursor ${formatCursorTimestamp(item.cursor_at)}`);
         lines.push("");
         lines.push(item.text);
         lines.push("");
@@ -1416,7 +2082,7 @@ export class CoordinatorApp {
       if (item.chat.is_edited) {
         chatTokens.push("edited=1");
       }
-      lines.push(`### ${formatTimestamp(item.chat.sent_at)} · [chat ${chatTokens.join(" ")}] ${chatLabel}`);
+      lines.push(`### ${formatDisplayTimestamp(item.chat.sent_at)} · [chat ${chatTokens.join(" ")}] ${chatLabel} · cursor ${formatCursorTimestamp(item.chat.sent_at)}`);
       lines.push("");
       lines.push(item.chat.text);
       lines.push("");
@@ -1432,10 +2098,32 @@ export class CoordinatorApp {
     return jsonResponse(this.listResponse(this.listAttendeeSummaries(meetingRun)));
   }
 
+  private handleZoomMeetingAttendees(url: URL, meetingId: string): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    return jsonResponse(this.listResponse(this.listAttendeeSummaries(meetingRun)));
+  }
+
   private handleMarkdownAttendees(meetingRunId: string): Response {
     const meetingRun = this.getMeetingRun(meetingRunId);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const markdown = this.renderMarkdownAttendees(meetingRun, this.listAttendeeSummaries(meetingRun));
+    return new Response(markdown, {
+      headers: {
+        "content-type": "text/markdown; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  private handleZoomMeetingMarkdownAttendees(url: URL, meetingId: string): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
     const markdown = this.renderMarkdownAttendees(meetingRun, this.listAttendeeSummaries(meetingRun));
     return new Response(markdown, {
@@ -1810,6 +2498,19 @@ export class CoordinatorApp {
         "cache-control": "no-cache, no-transform",
         connection: "keep-alive",
       },
+    });
+  }
+
+  private handleZoomMeetingStream(request: Request, url: URL, meetingId: string): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    return this.handleEventStream(request, {
+      meeting_run_id: meetingRun.meeting_run_id,
+      room_id: null,
+      kind: url.searchParams.get("kind"),
+      source: url.searchParams.get("source"),
     });
   }
 

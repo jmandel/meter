@@ -4,6 +4,7 @@ import type {
   RescueClaimRequest,
   RescueReleaseRequest,
   RescueStatusResponse,
+  StartSimulationResponse,
 } from "./domain";
 
 function getArg(args: Map<string, string>, ...keys: string[]): string | null {
@@ -83,6 +84,30 @@ export async function runMeterCommand(args: Map<string, string>): Promise<void> 
       state: body.meeting_run.state,
       rescue_url: `${baseUrl}/v1/meeting-runs/${body.meeting_run.meeting_run_id}/rescue`,
     }, null, 2));
+    return;
+  }
+
+  if (action === "simulate") {
+    const scriptPath = getArg(args, "--script", "--script-file");
+    if (!scriptPath) {
+      throw new Error("--script is required for --action simulate");
+    }
+    const script = await Bun.file(scriptPath).text();
+    const body = await fetchJson<StartSimulationResponse>(`${baseUrl}/v1/simulations`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        script,
+        speed: getArg(args, "--speed") ? Number.parseFloat(getArg(args, "--speed") as string) : undefined,
+        meeting_id: getArg(args, "--meeting-id"),
+        title: getArg(args, "--title"),
+        bot_name: getArg(args, "--bot-name"),
+        requested_by: operator,
+      }),
+    });
+    console.log(JSON.stringify(body, null, 2));
     return;
   }
 

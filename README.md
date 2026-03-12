@@ -86,6 +86,7 @@ In practice, that means the main surfaces are:
 - the live dashboard for active runs
 - the per-meeting SSE stream for incremental updates
 - the markdown transcript endpoint for a single readable transcript view
+- stable recurring-meeting aliases keyed by Zoom meeting ID
 - the stored event log and SQLite projection for later querying
 
 ## Architecture
@@ -169,10 +170,83 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `GET /v1/meeting-runs/:id/speakers`
 - `GET /v1/meeting-runs/:id/audio`
 - `GET /v1/meeting-runs/:id/transcript.md`
+- `GET /v1/meeting-runs/:id/minutes.md`
+- `GET /v1/zoom-meetings/:meeting_id`
+- `GET /v1/zoom-meetings/:meeting_id/meeting-runs`
+- `GET /v1/zoom-meetings/:meeting_id/transcript.md`
+- `GET /v1/zoom-meetings/:meeting_id/minutes.md`
+- `GET /v1/zoom-meetings/:meeting_id/attendees`
+- `GET /v1/zoom-meetings/:meeting_id/attendees.md`
+- `GET /v1/zoom-meetings/:meeting_id/stream`
+- `POST /v1/simulations`
 - `GET /v1/stream`
 - `GET /v1/meeting-runs/:id/stream`
 
 The transcript markdown endpoint is intended for easy manual inspection and prompt insertion. It returns plain markdown as text, not a downloaded file.
+
+Recurring-meeting aliases:
+
+- `GET /v1/zoom-meetings/:meeting_id/...` resolves to the current active run for that Zoom meeting when one exists
+- otherwise it resolves to the most recent recorded run for that meeting ID
+- pass `?meeting_run_id=<id>` if you want to pin one historical run explicitly
+
+Incremental transcript fetch:
+
+- `GET /v1/meeting-runs/:id/transcript.md?since=<cursor>`
+- `GET /v1/zoom-meetings/:meeting_id/transcript.md?since=<cursor>`
+- each transcript section now includes a visible `cursor <ISO-8601 timestamp>` marker
+- use that exact cursor value as `since=` to fetch only newer transcript/chat sections next time
+
+Example:
+
+```text
+### Mar 12, 6:48:30 AM · Josh Mandel · cursor 2026-03-12T06:48:31.100Z
+```
+
+Then:
+
+```bash
+curl 'http://127.0.0.1:3100/v1/zoom-meetings/2193058682/transcript.md?since=2026-03-12T06:48:31.100Z'
+```
+
+Simulation kit:
+
+- `POST /v1/simulations` starts a synthetic meeting run that emits normal event-log, SSE, transcript, chat, and attendee outputs without launching Zoom or Chromium
+- simulation runs are tagged with `simulation`
+- the response returns the created `meeting_run` plus direct transcript/attendee/stream URLs
+
+Simple simulation DSL:
+
+```text
+meeting 2193058682
+title "Weekly Sync Simulation"
+speed 10
+
++0s attendee.join id=host-1 user_id=101 name="Alice Host" host=1
++0.5s say speaker="Alice Host" text="Welcome everyone."
++0.5s chat from="Alice Host" to="Everyone" text="Please review the notes."
++1s end
+```
+
+Supported simulation actions:
+
+- `join`
+- `capture.start`
+- `capture.stop`
+- `attendee.join`
+- `attendee.leave`
+- `speaker`
+- `say`
+- `chat`
+- `console`
+- `event`
+- `end`
+
+Simulation CLI helper:
+
+```bash
+bun run meter.ts simulate --script examples/simulations/weekly-sync.meter
+```
 
 ## Configuration
 

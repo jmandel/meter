@@ -334,13 +334,17 @@ test("renderMarkdownTranscript keeps default output speech only", () => {
     meetingRun: MeetingRunRecord,
     speech: SpeechSegmentRecord[],
     chat?: ChatMessageRecord[],
-    includeChat?: boolean,
+    options?: {
+      include_chat?: boolean;
+      since_unix_ms?: number | null;
+    },
   ) => string;
 
-  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), false);
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), { include_chat: false });
 
   expect(markdown).toContain("## Transcript");
   expect(markdown).toContain("Opening remarks");
+  expect(markdown).toContain("cursor 2026-03-12T06:48:12.100Z");
   expect(markdown).not.toContain("[chat ");
   expect(markdown).not.toContain("Reply text");
 });
@@ -351,17 +355,44 @@ test("renderMarkdownTranscript can interleave chat entries", () => {
     meetingRun: MeetingRunRecord,
     speech: SpeechSegmentRecord[],
     chat?: ChatMessageRecord[],
-    includeChat?: boolean,
+    options?: {
+      include_chat?: boolean;
+      since_unix_ms?: number | null;
+    },
   ) => string;
 
-  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), true);
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), { include_chat: true });
 
   expect(markdown).toContain("[chat id=1 replies=1] Judge mobile -> Everyone");
   expect(markdown).toContain("[chat id=2 reply-to=1] Josh Mandel -> Everyone");
+  expect(markdown).toContain("cursor 2026-03-12T06:48:20.000Z");
   expect(markdown).toContain("Reply text");
   expect(markdown.indexOf("Opening remarks")).toBeLessThan(markdown.indexOf("Ahoy"));
   expect(markdown.indexOf("Ahoy")).toBeLessThan(markdown.indexOf("Reply text"));
   expect(markdown.indexOf("Reply text")).toBeLessThan(markdown.indexOf("Follow up"));
+});
+
+test("renderMarkdownTranscript supports since with copyable cursor timestamps", () => {
+  const app = new CoordinatorApp(buildConfig());
+  const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
+    meetingRun: MeetingRunRecord,
+    speech: SpeechSegmentRecord[],
+    chat?: ChatMessageRecord[],
+    options?: {
+      include_chat?: boolean;
+      since_unix_ms?: number | null;
+    },
+  ) => string;
+
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), buildChat(), {
+    include_chat: true,
+    since_unix_ms: Date.parse("2026-03-12T06:48:12.100Z"),
+  });
+
+  expect(markdown).not.toContain("Opening remarks");
+  expect(markdown).toContain("Reply text");
+  expect(markdown).toContain("Follow up");
+  expect(markdown).toContain("cursor 2026-03-12T06:48:31.100Z");
 });
 
 test("buildAttendeeSummaries merges guest rejoins into one attendee entry", () => {
@@ -433,6 +464,30 @@ test("buildRescueStatus reports live rescue metadata and bootstrap url", () => {
   expect(rescue.browser_bootstrap_url).toContain("bootstrap.js?token=test");
   expect(rescue.screenshot_url).toBe("http://127.0.0.1:3100/v1/meeting-runs/meeting-run-test/screenshot");
   expect(rescue.recent_errors[0]?.code).toBe("join_stall");
+});
+
+test("resolveMeetingRunForRoom prefers an active run over older history", () => {
+  const app = new CoordinatorApp(buildConfig()) as any;
+  app.storage = {
+    listMeetingRunRecords: () => [
+      {
+        ...buildMeetingRun(),
+        meeting_run_id: "run-completed",
+        state: "completed",
+        created_at: "2026-03-12T06:49:00.000Z",
+      },
+      {
+        ...buildMeetingRun(),
+        meeting_run_id: "run-capturing",
+        state: "capturing",
+        created_at: "2026-03-12T06:48:00.000Z",
+      },
+    ],
+  };
+
+  const resolved = app.resolveMeetingRunForRoom("zoom:2193058682");
+
+  expect(resolved?.meeting_run_id).toBe("run-capturing");
 });
 
 test("renderAutomatedRescuePrompt injects meeting context into the prompt", async () => {

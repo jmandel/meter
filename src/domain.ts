@@ -381,6 +381,10 @@ export interface AudioCaptureStartedPayload {
   pcm_channels: number;
 }
 
+export interface AudioCaptureStoppedPayload {
+  reason: "ended" | "manual" | "error";
+}
+
 export interface AudioChunkWrittenPayload {
   audio_object_id: string;
   stream_kind: "archive" | "live_pcm";
@@ -489,6 +493,28 @@ export interface CompleteMeetingRunRequest {
 
 export interface CompleteMeetingRunResponse {
   accepted: true;
+}
+
+export interface StartSimulationRequest {
+  script: string;
+  speed?: number | null;
+  meeting_id?: string | null;
+  title?: string | null;
+  bot_name?: string | null;
+  requested_by?: string | null;
+  tags?: string[];
+}
+
+export interface StartSimulationResponse {
+  meeting_run: MeetingRunRecord | null;
+  simulation: {
+    meeting_id: string;
+    room_id: string;
+    transcript_url: string;
+    attendees_url: string;
+    attendees_markdown_url: string;
+    stream_url: string;
+  };
 }
 
 export interface RescueClaimRequest {
