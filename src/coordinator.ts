@@ -136,6 +136,7 @@ interface MinuteJobHandle {
   child_pid: number | null;
   watcher: FSWatcher | null;
   debounce_timer: Timer | null;
+  poll_timer: Timer | null;
 }
 
 interface SseSubscriber {
@@ -633,6 +634,10 @@ export class CoordinatorApp {
       clearTimeout(handle.debounce_timer);
       handle.debounce_timer = null;
     }
+    if (handle.poll_timer) {
+      clearInterval(handle.poll_timer);
+      handle.poll_timer = null;
+    }
     handle.watcher?.close();
     handle.watcher = null;
   }
@@ -702,6 +707,11 @@ export class CoordinatorApp {
       content_sha256: sha,
       created_at_unix_ms: ts,
     });
+    this.storage.patchMinuteJob(handle.minute_job_id, {
+      latest_content_sha256: sha,
+      latest_version_seq: seq,
+      last_update_at_unix_ms: ts,
+    });
     const minuteJob = this.storage.getMinuteJobRecord(handle.minute_job_id);
     const version = this.storage.getLatestMinuteVersionForMinuteJob(handle.minute_job_id);
     if (!minuteJob || !version) {
@@ -742,6 +752,9 @@ export class CoordinatorApp {
     handle.watcher.on("error", async (error) => {
       await appendLogLine(this.coordinatorLogPath, `minute watcher error ${handle.minute_job_id}: ${error instanceof Error ? error.message : String(error)}`);
     });
+    handle.poll_timer = setInterval(() => {
+      this.scheduleMinuteSnapshot(handle, "live");
+    }, 3000);
     if (existsSync(handle.latest_minutes_path)) {
       this.scheduleMinuteSnapshot(handle, "live");
     }
@@ -808,6 +821,7 @@ export class CoordinatorApp {
       child_pid: child.pid ?? null,
       watcher: null,
       debounce_timer: null,
+      poll_timer: null,
     };
     this.minuteJobsByMeetingRunId.set(meetingRun.meeting_run_id, handle);
     this.minuteJobsByMinuteJobId.set(minuteJobId, handle);
@@ -3109,17 +3123,23 @@ export class CoordinatorApp {
           controller.enqueue(encoder.encode(chunk));
         };
 
-        if (filters.meeting_run_id) {
-          const minuteJob = this.getLatestMinuteJob(filters.meeting_run_id);
-          const latestVersion = minuteJob ? this.storage.getLatestMinuteVersionForMinuteJob(minuteJob.minute_job_id) : null;
-          if (minuteJob && latestVersion) {
-            writeFrame("minutes", latestVersion.minute_version_id, {
-              minute_job: minuteJob,
-              version: latestVersion,
-              content_markdown: latestVersion.content_markdown,
-            });
-          }
+        const initialMeetingRun = filters.meeting_run_id
+          ? this.getMeetingRun(filters.meeting_run_id)
+          : (filters.room_id ? this.resolveMeetingRunForRoom(filters.room_id) : null);
+        const initialMinuteJob = initialMeetingRun ? this.getLatestMinuteJob(initialMeetingRun.meeting_run_id) : null;
+        const initialLatestVersion = initialMinuteJob
+          ? this.storage.getLatestMinuteVersionForMinuteJob(initialMinuteJob.minute_job_id)
+          : null;
+        if (initialMinuteJob && initialLatestVersion) {
+          writeFrame("minutes", initialLatestVersion.minute_version_id, {
+            minute_job: initialMinuteJob,
+            version: initialLatestVersion,
+            content_markdown: initialLatestVersion.content_markdown,
+          });
         }
+        writeFrame("heartbeat", "0", {
+          ts: new Date().toISOString(),
+        });
 
         const subscriber: MinuteSubscriber = {
           matches: (update) => {

@@ -302,6 +302,50 @@ function start(): void {
 
   let lastLeafTexts = new Set<string>();
   let lastMarkdown = "";
+  let initialLoadComplete = false;
+
+  const renderMarkdown = (markdown: string, updatedLabel: string) => {
+    if (markdown === lastMarkdown) {
+      return false;
+    }
+    const previous = new Set(lastLeafTexts);
+    lastMarkdown = markdown;
+    lastLeafTexts = applyMarkdown(contentEl, markdown, previous);
+    updatedEl.textContent = updatedLabel;
+    return true;
+  };
+
+  const fetchLatestMarkdown = async (reason: "initial" | "poll") => {
+    try {
+      const response = await fetch(markdownPath, {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        return;
+      }
+      const markdown = await response.text();
+      if (!markdown.trim()) {
+        return;
+      }
+      const changed = renderMarkdown(
+        markdown,
+        reason === "initial"
+          ? `Loaded ${new Date().toLocaleString()}`
+          : `Updated ${new Date().toLocaleString()} · polled raw markdown`,
+      );
+      if (changed || reason === "initial") {
+        initialLoadComplete = true;
+      }
+    } catch {
+      // ignored; SSE may still succeed
+    }
+  };
+
+  void fetchLatestMarkdown("initial");
+
+  const pollTimer = window.setInterval(() => {
+    void fetchLatestMarkdown("poll");
+  }, 3000);
 
   const eventSource = new EventSource(streamPath);
 
@@ -320,14 +364,20 @@ function start(): void {
   eventSource.addEventListener("minutes", (event) => {
     const payload = JSON.parse((event as MessageEvent).data) as StreamPayload;
     setStatus(root, payload.version.status === "final" ? "Finalized" : "Live", "live");
-    updatedEl.textContent = `Updated ${new Date(payload.version.created_at).toLocaleString()} · version ${payload.version.seq}`;
-    if (payload.content_markdown === lastMarkdown) {
-      return;
-    }
-    lastMarkdown = payload.content_markdown;
-    const previous = new Set(lastLeafTexts);
-    lastLeafTexts = applyMarkdown(contentEl, payload.content_markdown, previous);
+    renderMarkdown(payload.content_markdown, `Updated ${new Date(payload.version.created_at).toLocaleString()} · version ${payload.version.seq}`);
+    initialLoadComplete = true;
   });
+
+  window.addEventListener("beforeunload", () => {
+    window.clearInterval(pollTimer);
+    eventSource.close();
+  }, { once: true });
+
+  window.setTimeout(() => {
+    if (!initialLoadComplete && lastMarkdown.length === 0) {
+      updatedEl.textContent = "Waiting for first minute snapshot…";
+    }
+  }, 1500);
 }
 
 start();

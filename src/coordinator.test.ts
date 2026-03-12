@@ -809,12 +809,20 @@ process.on("SIGTERM", () => {
     });
 
     const currentMinutes = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`).then((value) => value.json()) as {
-      minute_job: { minute_job_id: string; claude_model: string | null; claude_effort: string | null } | null;
+      minute_job: {
+        minute_job_id: string;
+        claude_model: string | null;
+        claude_effort: string | null;
+        latest_version_seq: number;
+        last_update_at: string | null;
+      } | null;
       latest_version: { content_markdown: string } | null;
     };
     expect(currentMinutes.minute_job?.minute_job_id).toBe(started.minute_job.minute_job_id);
     expect(currentMinutes.minute_job?.claude_model).toBe("claude-3-5-haiku-latest");
     expect(currentMinutes.minute_job?.claude_effort).toBe("medium");
+    expect(currentMinutes.minute_job?.latest_version_seq).toBeGreaterThan(0);
+    expect(currentMinutes.minute_job?.last_update_at).toBeTruthy();
     expect(currentMinutes.latest_version?.content_markdown).toContain("Alpha minutes");
     expect(currentMinutes.latest_version?.content_markdown).toContain("Model: claude-3-5-haiku-latest");
     expect(currentMinutes.latest_version?.content_markdown).toContain("Effort: medium");
