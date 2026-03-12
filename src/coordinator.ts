@@ -320,10 +320,6 @@ export class CoordinatorApp {
       if (match && request.method === "GET") {
         return this.handleZoomMeetingTranscript(url, match[1]);
       }
-      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes\.md$/);
-      if (match && request.method === "GET") {
-        return this.handleZoomMeetingTranscript(url, match[1]);
-      }
       match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/attendees$/);
       if (match && request.method === "GET") {
         return this.handleZoomMeetingAttendees(url, match[1]);
@@ -354,10 +350,6 @@ export class CoordinatorApp {
         return this.handleListSpeech(url, match[1]);
       }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/transcript\.md$/);
-      if (match && request.method === "GET") {
-        return this.handleMarkdownTranscript(url, match[1]);
-      }
-      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\.md$/);
       if (match && request.method === "GET") {
         return this.handleMarkdownTranscript(url, match[1]);
       }
@@ -830,7 +822,7 @@ export class CoordinatorApp {
       stderr: "inherit",
       env: {
         ...process.env,
-        ZOOMER_WORKER_CONFIG_B64: encodeBase64Json(launchConfig),
+        METER_WORKER_CONFIG_B64: encodeBase64Json(launchConfig),
       },
     });
     const handle: WorkerHandle = {

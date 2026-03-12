@@ -62,7 +62,7 @@ afterEach(async () => {
   delete process.env.MISTRAL_REALTIME_WS_URL;
   delete process.env.MISTRAL_REALTIME_MODEL;
   delete process.env.MISTRAL_STREAMING_DELAY_MS;
-  delete process.env.ZOOMER_DISABLE_BROWSER_AUTOMATION;
+  delete process.env.METER_DISABLE_BROWSER_AUTOMATION;
 
   while (tempDirs.length > 0) {
     const dirPath = tempDirs.pop();
@@ -328,7 +328,7 @@ function buildWorkerLaunchConfig(
 }
 
 test("append helpers append instead of overwriting", async () => {
-  const dirPath = await createTempDir("zoomer-utils-");
+  const dirPath = await createTempDir("meter-utils-");
   const jsonPath = path.join(dirPath, "events.ndjson");
   const logPath = path.join(dirPath, "worker.log");
 
@@ -353,7 +353,7 @@ test("append helpers append instead of overwriting", async () => {
 });
 
 test("worker streams realtime Mistral transcripts and persists raw plus derived lines", async () => {
-  const dataRoot = await createTempDir("zoomer-worker-");
+  const dataRoot = await createTempDir("meter-worker-");
   const coordinatorToken = "coordinator-token-test";
   const coordinator = await startFakeCoordinator(coordinatorToken);
   const mistral = await startFakeMistralServer();
@@ -362,7 +362,7 @@ test("worker streams realtime Mistral transcripts and persists raw plus derived 
   process.env.MISTRAL_REALTIME_WS_URL = mistral.wsUrl;
   process.env.MISTRAL_REALTIME_MODEL = "fake-model";
   process.env.MISTRAL_STREAMING_DELAY_MS = "50";
-  process.env.ZOOMER_DISABLE_BROWSER_AUTOMATION = "1";
+  process.env.METER_DISABLE_BROWSER_AUTOMATION = "1";
 
   try {
     const layout = await createMeetingRunLayout(dataRoot, "meeting-run-test", 1_710_000_000_000, true);
@@ -527,11 +527,11 @@ test("worker streams realtime Mistral transcripts and persists raw plus derived 
 });
 
 test("worker writes a single MP3 archive from backend-owned PCM capture", async () => {
-  const dataRoot = await createTempDir("zoomer-archive-");
+  const dataRoot = await createTempDir("meter-archive-");
   const coordinatorToken = "coordinator-token-archive";
   const coordinator = await startFakeCoordinator(coordinatorToken);
 
-  process.env.ZOOMER_DISABLE_BROWSER_AUTOMATION = "1";
+  process.env.METER_DISABLE_BROWSER_AUTOMATION = "1";
 
   try {
     const layout = await createMeetingRunLayout(dataRoot, "meeting-run-test", 1_710_000_000_000, false);

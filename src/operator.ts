@@ -54,7 +54,7 @@ async function releaseRun(baseUrl: string, meetingRunId: string, payload: Rescue
 }
 
 export async function runMeterCommand(args: Map<string, string>): Promise<void> {
-  const baseUrl = getArg(args, "--base-url", "--coordinator-base-url") ?? process.env.ZOOMER_OPERATOR_BASE_URL ?? "http://127.0.0.1:3100";
+  const baseUrl = getArg(args, "--base-url", "--coordinator-base-url") ?? process.env.METER_OPERATOR_BASE_URL ?? "http://127.0.0.1:3100";
   const action = (getArg(args, "--action") ?? "status").trim().toLowerCase();
   const meetingRunId = getArg(args, "--meeting-run-id", "--run-id");
   const operator = getArg(args, "--operator")?.trim() || process.env.USER || "codex";

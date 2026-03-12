@@ -42,7 +42,7 @@ Meter is therefore a bridge between raw capture and legible meeting state. It is
 ```bash
 bun install
 export MISTRAL_API_KEY=...                      # optional unless using Mistral
-export ZOOMER_TRANSCRIPTION_PROVIDER=mistral   # or leave unset for no transcription
+export METER_TRANSCRIPTION_PROVIDER=mistral    # or leave unset for no transcription
 bun run server.ts --mode all
 ```
 
@@ -151,7 +151,7 @@ Important files:
 
 Optional debug output:
 
-- `audio/live/*.pcm` if `ZOOMER_PERSIST_LIVE_PCM=true`
+- `audio/live/*.pcm` if `METER_PERSIST_LIVE_PCM=true`
 
 By default, live PCM is not persisted. The durable audio artifact is the final MP3.
 
@@ -170,11 +170,9 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `GET /v1/meeting-runs/:id/speakers`
 - `GET /v1/meeting-runs/:id/audio`
 - `GET /v1/meeting-runs/:id/transcript.md`
-- `GET /v1/meeting-runs/:id/minutes.md`
 - `GET /v1/zoom-meetings/:meeting_id`
 - `GET /v1/zoom-meetings/:meeting_id/meeting-runs`
 - `GET /v1/zoom-meetings/:meeting_id/transcript.md`
-- `GET /v1/zoom-meetings/:meeting_id/minutes.md`
 - `GET /v1/zoom-meetings/:meeting_id/attendees`
 - `GET /v1/zoom-meetings/:meeting_id/attendees.md`
 - `GET /v1/zoom-meetings/:meeting_id/stream`
@@ -254,15 +252,15 @@ Core settings:
 
 | Flag | Env | Default |
 |------|-----|---------|
-| `--mode` | `ZOOMER_MODE` | `all` |
-| `--listen-host` | `ZOOMER_LISTEN_HOST` | `127.0.0.1` |
-| `--listen-port` | `ZOOMER_LISTEN_PORT` | `3100` |
-| `--data-root` | `ZOOMER_DATA_ROOT` | `./data` |
+| `--mode` | `METER_MODE` | `all` |
+| `--listen-host` | `METER_LISTEN_HOST` | `127.0.0.1` |
+| `--listen-port` | `METER_LISTEN_PORT` | `3100` |
+| `--data-root` | `METER_DATA_ROOT` | `./data` |
 | `--chrome-bin` | `CHROME_BIN` | `/usr/bin/chromium` |
 | `--default-bot-name` | `BOT_NAME` | `Meeting Bot` |
-| `--transcription-provider` | `ZOOMER_TRANSCRIPTION_PROVIDER` | `none` |
-| `--persist-archive-audio` | `ZOOMER_PERSIST_ARCHIVE_AUDIO` | `true` |
-| `--persist-live-pcm` | `ZOOMER_PERSIST_LIVE_PCM` | `false` |
+| `--transcription-provider` | `METER_TRANSCRIPTION_PROVIDER` | `none` |
+| `--persist-archive-audio` | `METER_PERSIST_ARCHIVE_AUDIO` | `true` |
+| `--persist-live-pcm` | `METER_PERSIST_LIVE_PCM` | `false` |
 
 Mistral settings:
 

@@ -325,12 +325,12 @@ export class WorkerProcess {
   }
 
   private browserAutomationEnabled(): boolean {
-    return process.env.ZOOMER_DISABLE_BROWSER_AUTOMATION !== "1";
+    return process.env.METER_DISABLE_BROWSER_AUTOMATION !== "1";
   }
 
   private async launchBrowserAutomation(): Promise<void> {
     if (!this.browserAutomationEnabled()) {
-      await this.log("browser automation disabled by ZOOMER_DISABLE_BROWSER_AUTOMATION=1");
+      await this.log("browser automation disabled by METER_DISABLE_BROWSER_AUTOMATION=1");
       return;
     }
     try {
@@ -574,11 +574,11 @@ export class WorkerProcess {
         open_chat_panel: this.launch.options.open_chat_panel,
       }),
     );
-    await cdpEval(cdp, `window.__zoomerCapture.installCaptureButton()`);
+    await cdpEval(cdp, `window.__meterCapture.installCaptureButton()`);
     const clickPoint = await cdpWaitFor(
       cdp,
       `(() => {
-        const buttonId = window.__zoomerCapture && window.__zoomerCapture.buttonId;
+        const buttonId = window.__meterCapture && window.__meterCapture.buttonId;
         const button = buttonId ? document.getElementById(buttonId) : null;
         if (!button) {
           return null;
@@ -609,14 +609,14 @@ export class WorkerProcess {
     const captureState = await cdpWaitFor(
       cdp,
       `(() => {
-        if (!window.__zoomerCapture) {
+        if (!window.__meterCapture) {
           return null;
         }
-        const phase = window.__zoomerCapture.state.phase;
+        const phase = window.__meterCapture.state.phase;
         if (phase === "streaming" || phase === "error") {
           return {
             phase,
-            error: window.__zoomerCapture.state.error,
+            error: window.__meterCapture.state.error,
           };
         }
         return null;

@@ -10,8 +10,8 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
   const wsUrl = `${options.worker_base_url.replace(/^http/, "ws")}/internal/browser/session?token=${options.browser_token}`;
 
   return `
-(function bootstrapZoomerCapture() {
-  if (window.__zoomerCapture) {
+(function bootstrapMeterCapture() {
+  if (window.__meterCapture) {
     return;
   }
 
@@ -29,7 +29,7 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
     liveStreamId: null,
     runPromise: null,
   };
-  const captureButtonId = "__zoomer_capture_btn";
+  const captureButtonId = "__meter_capture_btn";
 
   function setPhase(phase, error) {
     state.phase = phase;
@@ -90,7 +90,7 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
     const button = document.createElement("button");
     button.id = captureButtonId;
     button.type = "button";
-    button.ariaLabel = "Start Zoomer capture";
+    button.ariaLabel = "Start Meter capture";
     button.style.cssText = [
       "position:fixed",
       "top:12px",
@@ -785,7 +785,7 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
     return state.runPromise;
   }
 
-  window.__zoomerCapture = {
+  window.__meterCapture = {
     start,
     state,
     installCaptureButton,

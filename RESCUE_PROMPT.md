@@ -268,14 +268,14 @@ Common interventions:
 - click Zoom join/preview buttons
 - click a browser fallback like "Join from Your Browser"
 - inspect whether the meeting shell already exists
-- if the meeting shell is live but capture has not started, fetch `browser_bootstrap_url` and evaluate that script in the page, then inspect `window.__zoomerCapture`
+- if the meeting shell is live but capture has not started, fetch `browser_bootstrap_url` and evaluate that script in the page, then inspect `window.__meterCapture`
 
 If you need to recover capture bootstrap manually:
 
 1. get `browser_bootstrap_url` from rescue status
 2. fetch the script locally
 3. evaluate it in the page over CDP
-4. inspect `window.__zoomerCapture.state`
+4. inspect `window.__meterCapture.state`
 5. if appropriate, install/click the capture button and wait for the phase to become `streaming`
 
 ### 6. Decide Whether The Run Is Fixed
@@ -348,7 +348,7 @@ Symptoms:
 
 Likely actions:
 
-- inspect `window.__zoomerCapture`
+- inspect `window.__meterCapture`
 - use `browser_bootstrap_url`
 - re-evaluate bootstrap script if needed
 - verify the capture button was installed/clicked
