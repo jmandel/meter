@@ -663,6 +663,11 @@ function MinutesPanel({
   const minutesRunning = activeMinuteState === "starting" || activeMinuteState === "running" || activeMinuteState === "stopping" || activeMinuteState === "restarting";
   const draftMatchesRunning = (run.minutes?.user_prompt_body ?? "") === promptBody
     && (run.minutes?.user_final_prompt_body ?? "") === finalPromptBody;
+  const primaryAction = !run.minutes
+    ? { action: "start" as const, label: "Start minutes", busyLabel: "Starting minutes..." }
+    : minutesRunning
+      ? { action: "restart" as const, label: "Restart minutes", busyLabel: "Restarting..." }
+      : { action: "restart" as const, label: "Rerun minutes", busyLabel: "Restarting..." };
 
   const submit = async (action: "start" | "restart" | "stop") => {
     setError(null);
@@ -726,9 +731,9 @@ function MinutesPanel({
           />
         </label>
         <div className="minutes-actions">
-          {!run.minutes || !minutesRunning ? (
-            <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit("start")} type="button">
-              {requestState === "starting" ? "Starting minutes..." : "Start minutes"}
+          {!minutesRunning ? (
+            <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit(primaryAction.action)} type="button">
+              {requestState === (primaryAction.action === "start" ? "starting" : "restarting") ? primaryAction.busyLabel : primaryAction.label}
             </button>
           ) : (
             <>
@@ -954,7 +959,75 @@ function LiveRuns({
   );
 }
 
-function HistoryTable({ runs }: { runs: MeetingRunRecord[] }) {
+function HistoryRow({
+  run,
+  expanded,
+  onToggleExpanded,
+  onMinutesChanged,
+}: {
+  run: MeetingRunRecord;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onMinutesChanged: (meetingRunId: string) => void;
+}) {
+  return (
+    <>
+      <tr>
+        <td>
+          <div className="history-cell">
+            <span>{formatRoomLabel(run.room_id)}</span>
+            <small>Capture {shortId(run.meeting_run_id)}</small>
+            <a
+              className="history-link"
+              href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
+              rel="noreferrer"
+              target="_blank"
+            >
+              Open transcript
+            </a>
+            {run.minutes ? (
+              <a
+                className="history-link"
+                href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
+                rel="noreferrer"
+                target="_blank"
+              >
+                Open minutes
+              </a>
+            ) : null}
+            <button className="history-link history-button" onClick={onToggleExpanded} type="button">
+              {expanded ? "Hide minute controls" : run.minutes ? "Rerun minutes" : "Start minutes"}
+            </button>
+          </div>
+        </td>
+        <td>{run.bot_name}</td>
+        <td><StateBadge state={run.state} /></td>
+        <td>{formatTime(run.started_at ?? run.created_at)}</td>
+        <td>{formatDuration(run.started_at ?? run.created_at, run.ended_at)}</td>
+        <td>{run.stats.speech_segment_count}</td>
+        <td>{run.stats.chat_message_count}</td>
+        <td>{formatBytes(run.stats.archive_audio_bytes)}</td>
+      </tr>
+      {expanded ? (
+        <tr className="history-minutes-row">
+          <td colSpan={8}>
+            <MinutesPanel run={run} onChanged={() => onMinutesChanged(run.meeting_run_id)} />
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+function HistoryTable({
+  runs,
+  onMinutesChanged,
+}: {
+  runs: MeetingRunRecord[];
+  onMinutesChanged: (meetingRunId: string) => void;
+}) {
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+
   return (
     <section className="content-section">
       <div className="section-head">
@@ -983,39 +1056,13 @@ function HistoryTable({ runs }: { runs: MeetingRunRecord[] }) {
             </thead>
             <tbody>
               {runs.map((run) => (
-                <tr key={run.meeting_run_id}>
-                  <td>
-                    <div className="history-cell">
-                      <span>{formatRoomLabel(run.room_id)}</span>
-                      <small>Capture {shortId(run.meeting_run_id)}</small>
-                      <a
-                        className="history-link"
-                        href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        Open transcript
-                      </a>
-                      {run.minutes ? (
-                        <a
-                          className="history-link"
-                          href={`/v1/meeting-runs/${run.meeting_run_id}/minutes.md`}
-                          rel="noreferrer"
-                          target="_blank"
-                        >
-                          Open minutes
-                        </a>
-                      ) : null}
-                    </div>
-                  </td>
-                  <td>{run.bot_name}</td>
-                  <td><StateBadge state={run.state} /></td>
-                  <td>{formatTime(run.started_at ?? run.created_at)}</td>
-                  <td>{formatDuration(run.started_at ?? run.created_at, run.ended_at)}</td>
-                  <td>{run.stats.speech_segment_count}</td>
-                  <td>{run.stats.chat_message_count}</td>
-                  <td>{formatBytes(run.stats.archive_audio_bytes)}</td>
-                </tr>
+                <HistoryRow
+                  key={run.meeting_run_id}
+                  expanded={expandedRunId === run.meeting_run_id}
+                  onToggleExpanded={() => setExpandedRunId((current) => current === run.meeting_run_id ? null : run.meeting_run_id)}
+                  onMinutesChanged={onMinutesChanged}
+                  run={run}
+                />
               ))}
             </tbody>
           </table>
@@ -1233,7 +1280,7 @@ function App() {
             onStopRun={handleStopRun}
             onMinutesChanged={queueRunRefresh}
           />
-          <HistoryTable runs={historyRuns} />
+          <HistoryTable runs={historyRuns} onMinutesChanged={queueRunRefresh} />
         </section>
       </main>
     </div>
