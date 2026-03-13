@@ -35,6 +35,7 @@ import {
   errorResponse,
   getAvailablePort,
   nowUnixMs,
+  parseBoolean,
   randomToken,
   readJsonFile,
   sleep,
@@ -122,17 +123,17 @@ function parsePcmFrame(data: ArrayBuffer | Uint8Array): {
 export function buildChromeArgs(options: {
   cdpPort: number;
   chromeUserDataDir: string;
+  useFakeMediaDevice?: boolean;
 }): string[] {
-  return [
+  const args = [
     `--remote-debugging-port=${options.cdpPort}`,
     `--user-data-dir=${options.chromeUserDataDir}`,
     "--auto-select-desktop-capture-source=Zoom",
     "--auto-accept-this-tab-capture",
-    // Zoom's pre-join checks can complain in cloud hosts that do not expose a
-    // real microphone device. These flags make Chromium present a fake mic/cam
-    // and auto-grant media permissions without changing our display-audio
-    // capture path, which still comes from getDisplayMedia in the page.
-    "--use-fake-device-for-media-stream",
+    // Auto-accept media prompts without relying on Chromium's fake media
+    // device flag. In practice, --use-fake-device-for-media-stream can cause
+    // getDisplayMedia() audio to come from a generic default/fake source
+    // instead of the Zoom tab, which breaks transcription/archive capture.
     "--use-fake-ui-for-media-stream",
     "--autoplay-policy=no-user-gesture-required",
     "--no-first-run",
@@ -149,6 +150,10 @@ export function buildChromeArgs(options: {
     "--window-size=1280,960",
     "about:blank",
   ];
+  if (options.useFakeMediaDevice) {
+    args.splice(4, 0, "--use-fake-device-for-media-stream");
+  }
+  return args;
 }
 
 export class WorkerProcess {
@@ -440,6 +445,7 @@ export class WorkerProcess {
     const chromeArgs = buildChromeArgs({
       cdpPort: this.cdpPort,
       chromeUserDataDir: this.chromeUserDataDir,
+      useFakeMediaDevice: parseBoolean(process.env.METER_CHROME_USE_FAKE_MEDIA_DEVICE, false),
     });
     this.chrome = Bun.spawn([this.launch.app.chrome_bin, ...chromeArgs], {
       stdout: "ignore",
