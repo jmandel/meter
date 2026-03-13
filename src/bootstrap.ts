@@ -318,25 +318,52 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           }));
         }
 
+        function firstMatchingElement(selectors) {
+          for (const selector of selectors) {
+            const match = document.querySelector(selector);
+            if (match) {
+              return match;
+            }
+          }
+          return null;
+        }
+
+        function readSpeakerName(root) {
+          if (!root) {
+            return null;
+          }
+          const candidates = [
+            ".video-avatar__avatar-footer",
+            ".video-avatar__avatar-footer span",
+            ".video-avatar__avatar-name",
+            "span[role='none']",
+          ];
+          for (const selector of candidates) {
+            const text = root.querySelector(selector)?.textContent?.trim();
+            if (text) {
+              return text;
+            }
+          }
+          const fallback = root.textContent?.trim() || "";
+          return fallback || null;
+        }
+
         function scanSpeaker() {
-          const active = document.querySelector(
-            [
-              ".speaker-active-container__wrap",
-              ".speaker-active-container__video-frame",
-              "[class*='video-frame--active']",
-              "[class*='active-speaker']",
-            ].join(", "),
-          );
+          // Prefer the currently rendered main tile. In newer Zoom layouts this
+          // is a more reliable "who is speaking now" signal than the older
+          // active-speaker wrapper classes, which may be absent entirely.
+          const active = firstMatchingElement([
+            ".single-main-container__main-view",
+            ".single-main-container__video-frame",
+            ".speaker-active-container__wrap",
+            ".speaker-active-container__video-frame",
+            "[class*='video-frame--active']",
+            "[class*='active-speaker']",
+          ]);
           if (!active) {
             return;
           }
-          const name = (
-            active.querySelector(".video-avatar__avatar-name")?.textContent ||
-            active.querySelector(".video-avatar__avatar-footer span")?.textContent ||
-            active.querySelector("span[role='none']")?.textContent ||
-            active.textContent ||
-            ""
-          ).trim() || null;
+          const name = readSpeakerName(active);
           if (name && name !== currentSpeaker) {
             currentSpeaker = name;
             emitDomEvent("zoom.speaker.active", {

@@ -119,6 +119,38 @@ function parsePcmFrame(data: ArrayBuffer | Uint8Array): {
   };
 }
 
+export function buildChromeArgs(options: {
+  cdpPort: number;
+  chromeUserDataDir: string;
+}): string[] {
+  return [
+    `--remote-debugging-port=${options.cdpPort}`,
+    `--user-data-dir=${options.chromeUserDataDir}`,
+    "--auto-select-desktop-capture-source=Zoom",
+    "--auto-accept-this-tab-capture",
+    // Zoom's pre-join checks can complain in cloud hosts that do not expose a
+    // real microphone device. These flags make Chromium present a fake mic/cam
+    // and auto-grant media permissions without changing our display-audio
+    // capture path, which still comes from getDisplayMedia in the page.
+    "--use-fake-device-for-media-stream",
+    "--use-fake-ui-for-media-stream",
+    "--autoplay-policy=no-user-gesture-required",
+    "--no-first-run",
+    "--disable-default-apps",
+    "--disable-popup-blocking",
+    "--disable-translate",
+    "--disable-infobars",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-external-intent-requests",
+    "--enable-features=SharedArrayBuffer",
+    "--disable-features=ExternalProtocolDialog",
+    "--window-size=1280,960",
+    "about:blank",
+  ];
+}
+
 export class WorkerProcess {
   private readonly workerId = uuidv7();
   private readonly browserToken: string;
@@ -405,26 +437,10 @@ export class WorkerProcess {
     if (this.chrome) {
       return;
     }
-    const chromeArgs = [
-      `--remote-debugging-port=${this.cdpPort}`,
-      `--user-data-dir=${this.chromeUserDataDir}`,
-      "--auto-select-desktop-capture-source=Zoom",
-      "--auto-accept-this-tab-capture",
-      "--autoplay-policy=no-user-gesture-required",
-      "--no-first-run",
-      "--disable-default-apps",
-      "--disable-popup-blocking",
-      "--disable-translate",
-      "--disable-infobars",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-      "--disable-external-intent-requests",
-      "--enable-features=SharedArrayBuffer",
-      "--disable-features=ExternalProtocolDialog",
-      "--window-size=1280,960",
-      "about:blank",
-    ];
+    const chromeArgs = buildChromeArgs({
+      cdpPort: this.cdpPort,
+      chromeUserDataDir: this.chromeUserDataDir,
+    });
     this.chrome = Bun.spawn([this.launch.app.chrome_bin, ...chromeArgs], {
       stdout: "ignore",
       stderr: "inherit",
