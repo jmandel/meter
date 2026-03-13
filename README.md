@@ -75,6 +75,96 @@ bun run meter.ts claim --meeting-run-id <meeting_run_id> --operator codex --reas
 bun run meter.ts release --meeting-run-id <meeting_run_id> --operator codex
 ```
 
+## Cloud Host Notes
+
+Meter can run reliably on a cloud VM, but a few host-level details matter.
+
+- Bun
+  - use an absolute Bun path in automation or systemd, for example `/home/exedev/.bun/bin/bun`
+- Browser
+  - on some Ubuntu hosts, the `chromium-browser` package is only a Snap shim and is not usable
+  - prefer Google Chrome stable and point `CHROME_BIN` at the real binary, for example:
+
+```bash
+wget -qO- https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main' | sudo tee /etc/apt/sources.list.d/google-chrome.list
+sudo apt-get update
+sudo apt-get install -y google-chrome-stable
+```
+
+```bash
+export CHROME_BIN=/bin/google-chrome
+```
+
+- FFmpeg
+  - install it on the host; the archive pipeline expects it
+
+```bash
+sudo apt-get install -y ffmpeg
+```
+
+- Virtual display
+  - Meter currently uses a normal Chrome launch path, not `--headless`
+  - on cloud VMs, run Chrome under `Xvfb`
+
+```bash
+sudo apt-get install -y xvfb
+```
+
+Example systemd `ExecStart`:
+
+```ini
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x960x24" /home/exedev/.bun/bin/bun run server.ts --mode all --listen-host 0.0.0.0 --listen-port 8000
+```
+
+- Service bind address
+  - if you want the service reachable remotely, set:
+
+```bash
+export METER_LISTEN_HOST=0.0.0.0
+export METER_LISTEN_PORT=8000
+```
+
+- Microphone expectations
+  - Zoom may warn that no microphone is available on a VM
+  - do not try to solve this with Chrome fake-device flags; those can break Meter's tab-audio capture path
+  - if Zoom needs a mic-like device, expose one at the OS layer instead, for example with PulseAudio:
+
+```bash
+sudo apt-get install -y pulseaudio pulseaudio-utils
+pulseaudio --start
+pactl load-module module-remap-source master=auto_null.monitor source_name=VirtualMic source_properties=device.description=VirtualMic
+pactl set-default-source VirtualMic
+```
+
+Verify:
+
+```bash
+pactl info
+pactl list short sources
+curl -fsS http://127.0.0.1:8000/v1/health
+```
+
+Example user systemd unit:
+
+```ini
+[Unit]
+Description=Meter meeting capture server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/exedev/meter
+EnvironmentFile=/home/exedev/meter/.env
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x960x24" /home/exedev/.bun/bin/bun run server.ts --mode all --listen-host 0.0.0.0 --listen-port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
 ## What It Does
 
 - Launches one worker per meeting run.
