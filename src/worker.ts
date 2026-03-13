@@ -35,7 +35,6 @@ import {
   errorResponse,
   getAvailablePort,
   nowUnixMs,
-  parseBoolean,
   randomToken,
   readJsonFile,
   sleep,
@@ -123,9 +122,8 @@ function parsePcmFrame(data: ArrayBuffer | Uint8Array): {
 export function buildChromeArgs(options: {
   cdpPort: number;
   chromeUserDataDir: string;
-  useFakeMediaDevice?: boolean;
 }): string[] {
-  const args = [
+  return [
     `--remote-debugging-port=${options.cdpPort}`,
     `--user-data-dir=${options.chromeUserDataDir}`,
     "--auto-select-desktop-capture-source=Zoom",
@@ -150,10 +148,6 @@ export function buildChromeArgs(options: {
     "--window-size=1280,960",
     "about:blank",
   ];
-  if (options.useFakeMediaDevice) {
-    args.splice(4, 0, "--use-fake-device-for-media-stream");
-  }
-  return args;
 }
 
 export class WorkerProcess {
@@ -445,7 +439,6 @@ export class WorkerProcess {
     const chromeArgs = buildChromeArgs({
       cdpPort: this.cdpPort,
       chromeUserDataDir: this.chromeUserDataDir,
-      useFakeMediaDevice: parseBoolean(process.env.METER_CHROME_USE_FAKE_MEDIA_DEVICE, false),
     });
     this.chrome = Bun.spawn([this.launch.app.chrome_bin, ...chromeArgs], {
       stdout: "ignore",
