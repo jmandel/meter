@@ -469,6 +469,140 @@ test("renderMarkdownTranscript supports since with visible line timestamps and c
   expect(markdown).not.toContain("[cursor=");
 });
 
+test("renderMarkdownTranscript coalesces continuous unknown-speaker segments", () => {
+  const app = new CoordinatorApp(buildConfig());
+  const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
+    meetingRun: MeetingRunRecord,
+    speech: SpeechSegmentRecord[],
+    chat?: ChatMessageRecord[],
+    attendeeEvents?: EventRecord<ZoomAttendeePresencePayload>[],
+    options?: {
+      include?: Array<"speech" | "joins" | "chat">;
+      since_unix_ms?: number | null;
+    },
+  ) => string;
+
+  const speech: SpeechSegmentRecord[] = [
+    {
+      speech_segment_id: "seg-unknown-1",
+      event_id: 1,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      provider: "mistral",
+      provider_segment_id: "provider-seg-unknown-1",
+      text: "Let us go then.",
+      status: "final",
+      speaker_label: null,
+      speaker_confidence: null,
+      started_at: "2026-03-12T06:48:34.000Z",
+      ended_at: "2026-03-12T06:48:35.000Z",
+      emitted_at: "2026-03-12T06:48:35.100Z",
+    },
+    {
+      speech_segment_id: "seg-unknown-2",
+      event_id: 2,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      provider: "mistral",
+      provider_segment_id: "provider-seg-unknown-2",
+      text: "You and I.",
+      status: "final",
+      speaker_label: null,
+      speaker_confidence: null,
+      started_at: "2026-03-12T06:48:36.000Z",
+      ended_at: "2026-03-12T06:48:37.000Z",
+      emitted_at: "2026-03-12T06:48:37.100Z",
+    },
+    {
+      speech_segment_id: "seg-unknown-3",
+      event_id: 3,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      provider: "mistral",
+      provider_segment_id: "provider-seg-unknown-3",
+      text: "Good evening is spread out again.",
+      status: "final",
+      speaker_label: null,
+      speaker_confidence: null,
+      started_at: "2026-03-12T06:48:38.000Z",
+      ended_at: "2026-03-12T06:48:39.000Z",
+      emitted_at: "2026-03-12T06:48:39.100Z",
+    },
+  ];
+
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), speech, [], []);
+
+  expect(markdown).toContain("[00:34 spk=\"Unknown speaker\"] Let us go then. You and I. Good evening is spread out again.");
+});
+
+test("renderMarkdownTranscript de-duplicates grouped presence names", () => {
+  const app = new CoordinatorApp(buildConfig());
+  const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
+    meetingRun: MeetingRunRecord,
+    speech: SpeechSegmentRecord[],
+    chat?: ChatMessageRecord[],
+    attendeeEvents?: EventRecord<ZoomAttendeePresencePayload>[],
+    options?: {
+      include?: Array<"speech" | "joins" | "chat">;
+      since_unix_ms?: number | null;
+    },
+  ) => string;
+
+  const attendeeEvents: EventRecord<ZoomAttendeePresencePayload>[] = [
+    {
+      event_id: 10,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 10,
+      source: "zoom_dom",
+      kind: "zoom.attendee.joined",
+      ts: "2026-03-12T06:48:05.000Z",
+      payload: {
+        attendee_id: "zoom_user:1",
+        user_id: 1,
+        display_name: "Meeting Bot",
+        is_host: false,
+        is_co_host: false,
+        is_guest: false,
+        muted: false,
+        video_on: true,
+        audio_connection: "computer",
+        last_spoken_at_unix_ms: null,
+        backfilled: true,
+        details: null,
+      },
+    },
+    {
+      event_id: 11,
+      meeting_run_id: "meeting-run-test",
+      room_id: "zoom:2193058682",
+      seq: 11,
+      source: "zoom_dom",
+      kind: "zoom.attendee.joined",
+      ts: "2026-03-12T06:48:08.000Z",
+      payload: {
+        attendee_id: "zoom_user:2",
+        user_id: 2,
+        display_name: "Meeting Bot",
+        is_host: false,
+        is_co_host: false,
+        is_guest: false,
+        muted: false,
+        video_on: true,
+        audio_connection: "computer",
+        last_spoken_at_unix_ms: null,
+        backfilled: true,
+        details: null,
+      },
+    },
+  ];
+
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeech(), [], attendeeEvents);
+
+  expect(markdown).toContain("[00:05 present] Meeting Bot");
+  expect(markdown).not.toContain("Meeting Bot, Meeting Bot");
+});
+
 test("renderMarkdownTranscript never emits a cursor footer", () => {
   const app = new CoordinatorApp(buildConfig());
   const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (

@@ -316,6 +316,9 @@ export class CoordinatorApp {
     this.server = Bun.serve({
       hostname: this.config.listen_host,
       port: this.config.listen_port,
+      // SSE heartbeats are every 15s; Bun's default 10s idle timeout will
+      // tear down long-lived viewer streams underneath us unless we raise it.
+      idleTimeout: 120,
       routes: {
         "/": dashboard,
         "/minutes-view": minutesView,
@@ -2796,6 +2799,7 @@ export class CoordinatorApp {
           event: EventRecord<ZoomAttendeePresencePayload>;
         }
     > = [];
+    const unknownSpeakerMergeWindowMs = 15_000;
 
     for (const item of rawItems) {
       if (item.kind !== "speech") {
@@ -2803,10 +2807,20 @@ export class CoordinatorApp {
         continue;
       }
       const previous = transcriptItems[transcriptItems.length - 1];
-      if (previous && previous.kind === "speech" && item.speaker !== "Unknown speaker" && previous.speaker === item.speaker) {
-        previous.text = `${previous.text}${previous.text.endsWith("-") ? "" : " "}${item.text}`.trim();
-        previous.updated_at = item.updated_at ?? previous.updated_at;
-        continue;
+      if (previous && previous.kind === "speech") {
+        const previousUpdatedUnixMs = Date.parse(previous.updated_at ?? previous.display_at ?? "") || previous.sort_ts;
+        const sameNamedSpeaker = item.speaker !== "Unknown speaker" && previous.speaker === item.speaker;
+        // When speaker attribution is missing, favor a readable continuous turn
+        // over a burst of one-line "Unknown speaker" fragments. This is only a
+        // fallback for unlabeled adjacent speech, not an attribution heuristic.
+        const sameUnknownRun = item.speaker === "Unknown speaker"
+          && previous.speaker === "Unknown speaker"
+          && (item.sort_ts - previousUpdatedUnixMs) <= unknownSpeakerMergeWindowMs;
+        if (sameNamedSpeaker || sameUnknownRun) {
+          previous.text = `${previous.text}${previous.text.endsWith("-") ? "" : " "}${item.text}`.trim();
+          previous.updated_at = item.updated_at ?? previous.updated_at;
+          continue;
+        }
       }
       transcriptItems.push(item);
     }
@@ -2881,8 +2895,8 @@ export class CoordinatorApp {
           : item.event.payload.backfilled
           ? "present"
           : "joins";
-        const attendeeLabels = groupedEvents
-          .map((event) => event.payload.display_name?.trim() || "Unknown attendee")
+        const attendeeLabels = Array.from(new Set(groupedEvents
+          .map((event) => event.payload.display_name?.trim() || "Unknown attendee")))
           .join(", ");
         lines.push(`[${formatDisplayOffset(groupStartedAt)} ${label}] ${attendeeLabels}`);
         continue;
