@@ -668,7 +668,7 @@ function LiveRunCard({
                 </div>
                 <a
                   className="action-link"
-                  href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
+                  href={`/v1/meeting-runs/${run.meeting_run_id}/transcript/view`}
                   rel="noreferrer"
                   target="_blank"
                 >
@@ -759,7 +759,7 @@ function HistoryRow({
           <div className="history-actions">
             <a
               className="history-action"
-              href={`/v1/meeting-runs/${run.meeting_run_id}/transcript.md`}
+              href={`/v1/meeting-runs/${run.meeting_run_id}/transcript/view`}
               rel="noreferrer"
               target="_blank"
             >

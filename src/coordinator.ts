@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from "node
 
 import dashboard from "../ui/index.html";
 import minutesView from "../ui/minutes-view.html";
+import transcriptView from "../ui/transcript-view.html";
 
 import type {
   AttendeeSummaryRecord,
@@ -318,6 +319,7 @@ export class CoordinatorApp {
       routes: {
         "/": dashboard,
         "/minutes-view": minutesView,
+        "/transcript-view": transcriptView,
       },
       fetch: (request) => this.handleRequest(request),
     });
@@ -417,6 +419,10 @@ export class CoordinatorApp {
       if (match && request.method === "GET") {
         return this.handleZoomMeetingTranscript(url, match[1]);
       }
+      match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/transcript\/view$/);
+      if (match && request.method === "GET") {
+        return this.handleZoomMeetingTranscriptView(request, url, match[1]);
+      }
       match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes$/);
       if (match && request.method === "GET") {
         return this.handleZoomMeetingMinutes(url, match[1]);
@@ -465,6 +471,10 @@ export class CoordinatorApp {
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/transcript\.md$/);
       if (match && request.method === "GET") {
         return this.handleMarkdownTranscript(url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/transcript\/view$/);
+      if (match && request.method === "GET") {
+        return this.handleTranscriptView(request, match[1]);
       }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes$/);
       if (match && request.method === "GET") {
@@ -1455,11 +1465,11 @@ export class CoordinatorApp {
     if (!meetingRun) {
       return errorResponse(404, "not_found", "Meeting run not found");
     }
-    const redirectUrl = new URL("/minutes-view", this.resolvePublicBaseUrl(request));
+    const redirectUrl = new URL("/minutes-view", new URL(request.url).origin);
     redirectUrl.searchParams.set("details", `/v1/meeting-runs/${meetingRunId}/minutes`);
     redirectUrl.searchParams.set("stream", `/v1/meeting-runs/${meetingRunId}/minutes/stream`);
     redirectUrl.searchParams.set("markdown", `/v1/meeting-runs/${meetingRunId}/minutes.md`);
-    redirectUrl.searchParams.set("transcript", `/v1/meeting-runs/${meetingRunId}/transcript.md`);
+    redirectUrl.searchParams.set("transcript", `/v1/meeting-runs/${meetingRunId}/transcript/view`);
     redirectUrl.searchParams.set("start", `/v1/meeting-runs/${meetingRunId}/minutes/start`);
     redirectUrl.searchParams.set("restart", `/v1/meeting-runs/${meetingRunId}/minutes/restart`);
     redirectUrl.searchParams.set("stop", `/v1/meeting-runs/${meetingRunId}/minutes/stop`);
@@ -1472,11 +1482,11 @@ export class CoordinatorApp {
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
-    const redirectUrl = new URL("/minutes-view", this.resolvePublicBaseUrl(request));
+    const redirectUrl = new URL("/minutes-view", new URL(request.url).origin);
     redirectUrl.searchParams.set("details", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes`);
     redirectUrl.searchParams.set("stream", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes/stream${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
     redirectUrl.searchParams.set("markdown", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes.md${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
-    redirectUrl.searchParams.set("transcript", `/v1/meeting-runs/${meetingRun.meeting_run_id}/transcript.md`);
+    redirectUrl.searchParams.set("transcript", `/v1/meeting-runs/${meetingRun.meeting_run_id}/transcript/view`);
     redirectUrl.searchParams.set("start", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/start`);
     redirectUrl.searchParams.set("restart", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/restart`);
     redirectUrl.searchParams.set("stop", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/stop`);
@@ -2499,6 +2509,30 @@ export class CoordinatorApp {
     return this.renderMarkdownTranscriptResponse(url, meetingRun);
   }
 
+  private handleTranscriptView(request: Request, meetingRunId: string): Response {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const redirectUrl = new URL("/transcript-view", new URL(request.url).origin);
+    redirectUrl.searchParams.set("stream", `/v1/meeting-runs/${meetingRunId}/stream`);
+    redirectUrl.searchParams.set("markdown", `/v1/meeting-runs/${meetingRunId}/transcript.md`);
+    redirectUrl.searchParams.set("title", formatRoomLabel(meetingRun.room_id));
+    return Response.redirect(redirectUrl.toString(), 302);
+  }
+
+  private handleZoomMeetingTranscriptView(request: Request, url: URL, meetingId: string): Response {
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
+    }
+    const redirectUrl = new URL("/transcript-view", new URL(request.url).origin);
+    redirectUrl.searchParams.set("stream", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/stream${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
+    redirectUrl.searchParams.set("markdown", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/transcript.md${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
+    redirectUrl.searchParams.set("title", formatRoomLabel(meetingRun.room_id));
+    return Response.redirect(redirectUrl.toString(), 302);
+  }
+
   private parseTranscriptIncludes(url: URL): TranscriptIncludeKind[] | Response {
     const includeParams = url.searchParams
       .getAll("include")
@@ -3234,7 +3268,7 @@ export class CoordinatorApp {
       headers: {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
-        connection: "keep-alive",
+        "x-accel-buffering": "no",
       },
     });
   }
@@ -3358,7 +3392,7 @@ export class CoordinatorApp {
       headers: {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
-        connection: "keep-alive",
+        "x-accel-buffering": "no",
       },
     });
   }

@@ -105,9 +105,11 @@ const styles = `
   .status {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
     border-radius: 999px;
     padding: 8px 12px;
+    min-width: 132px;
     background: rgba(255, 255, 255, 0.7);
     border: 1px solid var(--border);
     color: var(--muted);
