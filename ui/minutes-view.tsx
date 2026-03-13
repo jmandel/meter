@@ -6,9 +6,11 @@ import { listMinutePromptTemplates, type MinutePromptTemplate } from "../src/min
 import {
   MINUTE_CLAUDE_EFFORT_OPTIONS,
   MINUTE_CLAUDE_MODEL_SUGGESTIONS,
+  MINUTE_OPENROUTER_MODEL_SUGGESTIONS,
   type MinuteDraftFields,
   type MinutePresetSource,
   type UiMinuteClaudeEffort,
+  type UiMinuteProvider,
   minutePromptRequestBody,
   useMinutePresetDraftManager,
 } from "./minute-prompt-drafts";
@@ -435,12 +437,14 @@ type MinuteClaudeEffort = "" | "low" | "medium" | "high" | "max";
 type MinuteJobRecord = {
   minute_job_id: string;
   state: MinuteJobState;
+  provider: "claude_tmux" | "openrouter_patch";
   tmux_session_name: string | null;
   prompt_template_id: string | null;
   prompt_label: string | null;
   user_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: Exclude<MinuteClaudeEffort, ""> | null;
+  openrouter_model: string | null;
   latest_version_seq: number;
   last_update_at: string | null;
 };
@@ -459,6 +463,8 @@ type MinuteDetailsResponse = {
 };
 
 type MinutePromptTemplatesResponse = {
+  default_provider?: UiMinuteProvider;
+  default_openrouter_model?: string | null;
   items: MinutePromptTemplate[];
 };
 
@@ -525,6 +531,15 @@ function formatTime(value: string | null): string {
     return "--";
   }
   return date.toLocaleString();
+}
+
+function describeMinuteBackend(minuteJob: MinuteJobRecord): string {
+  if (minuteJob.provider === "openrouter_patch") {
+    return minuteJob.openrouter_model ? `OpenRouter · ${minuteJob.openrouter_model}` : "OpenRouter";
+  }
+  const model = minuteJob.claude_model ?? "server default model";
+  const effort = minuteJob.claude_effort ?? "server default effort";
+  return `${model} · ${effort}`;
 }
 
 function getLeafNodes(container: Element): string[] {
@@ -936,6 +951,8 @@ function App() {
   const [minuteJob, setMinuteJob] = useState<MinuteJobRecord | null>(null);
   const [version, setVersion] = useState<MinuteVersionRecord | null>(null);
   const [minuteTemplates, setMinuteTemplates] = useState<MinutePromptTemplate[]>(BUILTIN_MINUTE_PROMPT_TEMPLATES);
+  const [defaultMinuteProvider, setDefaultMinuteProvider] = useState<UiMinuteProvider>("claude_tmux");
+  const [defaultOpenRouterModel, setDefaultOpenRouterModel] = useState("");
   const [content, setContent] = useState("");
   const [requestState, setRequestState] = useState<"idle" | "starting" | "restarting" | "stopping">("idle");
   const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting">("connecting");
@@ -954,17 +971,21 @@ function App() {
       return null;
     }
     return {
+      provider: minuteJob.provider ?? defaultMinuteProvider,
       promptTemplateId: minuteJob.prompt_template_id ?? BUILTIN_MINUTE_PROMPT_TEMPLATES[0]?.template_id ?? "formal-working-group-minutes",
       promptBody: minuteJob.user_prompt_body ?? "",
       claudeModel: minuteJob.claude_model ?? "",
       claudeEffort: minuteJob.claude_effort ?? "",
+      openrouterModel: minuteJob.openrouter_model ?? "",
     };
-  }, [minuteJob]);
+  }, [minuteJob, defaultMinuteProvider]);
   const minuteDraft = useMinutePresetDraftManager({
     templates: minuteTemplates,
     runningFields,
     runningPromptLabel: minuteJob?.prompt_label ?? null,
     preferRunningPreset: Boolean(minuteJob),
+    defaultProvider: defaultMinuteProvider,
+    defaultOpenRouterModel,
   });
 
   const renderedContent = useMemo(() => renderMinutesMarkdown(content), [content]);
@@ -1009,6 +1030,8 @@ function App() {
       if (payload.items.length > 0) {
         setMinuteTemplates(payload.items);
       }
+      setDefaultMinuteProvider(payload.default_provider === "openrouter_patch" ? "openrouter_patch" : "claude_tmux");
+      setDefaultOpenRouterModel(payload.default_openrouter_model?.trim() || "");
     } catch {
       // keep builtin fallback
     }
@@ -1125,7 +1148,7 @@ function App() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(action === "stop"
           ? {}
-          : minutePromptRequestBody(minuteTemplates, minuteDraft.currentFields, minuteDraft.promptLabel)),
+          : minutePromptRequestBody(minuteTemplates, minuteDraft.currentFields, minuteDraft.promptLabel, defaultMinuteProvider)),
       });
       if (!response.ok) {
         const payload = await response.json().catch(() => null);
@@ -1257,31 +1280,50 @@ function App() {
             <span>Minute prompt</span>
             <AutoGrowTextarea value={minuteDraft.promptBody} onChange={minuteDraft.setPromptBody} />
           </label>
-          <div className="field-grid">
-            <label className="field">
-              <span>Claude model</span>
-              <select
-                value={minuteDraft.claudeModel}
-                onChange={(event) => minuteDraft.setClaudeModel(event.target.value)}
-              >
-                <option value="">Server default</option>
-                {MINUTE_CLAUDE_MODEL_SUGGESTIONS.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Claude effort</span>
-              <select value={minuteDraft.claudeEffort} onChange={(event) => minuteDraft.setClaudeEffort(event.target.value as UiMinuteClaudeEffort)}>
-                <option value="">Server default</option>
-                {MINUTE_CLAUDE_EFFORT_OPTIONS.filter((value) => value).map((value) => (
-                  <option key={value} value={value}>{value[0].toUpperCase()}{value.slice(1)}</option>
-                ))}
-              </select>
-            </label>
-          </div>
+          {minuteDraft.provider === "claude_tmux" ? (
+            <div className="field-grid">
+              <label className="field">
+                <span>Claude model</span>
+                <select
+                  value={minuteDraft.claudeModel}
+                  onChange={(event) => minuteDraft.setClaudeModel(event.target.value)}
+                >
+                  <option value="">Server default</option>
+                  {MINUTE_CLAUDE_MODEL_SUGGESTIONS.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Claude effort</span>
+                <select value={minuteDraft.claudeEffort} onChange={(event) => minuteDraft.setClaudeEffort(event.target.value as UiMinuteClaudeEffort)}>
+                  <option value="">Server default</option>
+                  {MINUTE_CLAUDE_EFFORT_OPTIONS.filter((value) => value).map((value) => (
+                    <option key={value} value={value}>{value[0].toUpperCase()}{value.slice(1)}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          ) : (
+            <div className="field-grid">
+              <label className="field">
+                <span>OpenRouter model</span>
+                <select
+                  value={minuteDraft.openrouterModel}
+                  onChange={(event) => minuteDraft.setOpenRouterModel(event.target.value)}
+                >
+                  <option value="">Server default</option>
+                  {MINUTE_OPENROUTER_MODEL_SUGGESTIONS.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          )}
           <div className="button-row">
             <button className="primary-button" disabled={requestState !== "idle"} onClick={() => void submit(primaryAction)} type="button">
               {requestState === (primaryAction === "start" ? "starting" : "restarting")
@@ -1294,8 +1336,8 @@ function App() {
           </div>
           {minuteJob ? (
             <div className="meta-row">
-              <span>{minuteJob.claude_model ?? "server default model"}</span>
-              <span>{minuteJob.claude_effort ?? "server default effort"}</span>
+              <span>{minuteJob.provider === "openrouter_patch" ? "OpenRouter patch backend" : "Claude Code tmux backend"}</span>
+              <span>{describeMinuteBackend(minuteJob)}</span>
             </div>
           ) : null}
           {minuteJob?.tmux_session_name || copyNotice ? (

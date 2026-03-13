@@ -74,6 +74,7 @@ import {
   getMinutePromptTemplate,
   listMinutePromptTemplates,
 } from "./minute-prompts";
+import { DEFAULT_OPENROUTER_MINUTE_MODEL } from "./minute-models";
 import { parseSimulationScript, type SimulationScenario, type SimulationStep } from "./simulation";
 import { normalizeZoomJoinUrl } from "./zoom";
 
@@ -132,7 +133,7 @@ interface MinuteJobHandle {
   minute_job_id: string;
   meeting_run_id: string;
   room_id: string;
-  tmux_session_name: string;
+  tmux_session_name: string | null;
   working_dir: string;
   latest_minutes_path: string;
   stop_requested: boolean;
@@ -778,7 +779,9 @@ export class CoordinatorApp {
     const workingDir = this.minuteRunDir(meetingRun.meeting_run_id);
     mkdirSync(workingDir, { recursive: true });
     const latestMinutesPath = path.join(workingDir, "minutes.md");
-    const tmuxSessionName = `minutes-${meetingRun.meeting_run_id}`;
+    const tmuxSessionName = promptConfig.provider === "claude_tmux"
+      ? `minutes-${meetingRun.meeting_run_id}`
+      : null;
     const promptHash = this.hashText(JSON.stringify(promptConfig));
     const entryScript = this.minuteTakerEntryScript();
     const command = `${process.execPath} ${entryScript} --meeting-run-id ${meetingRun.meeting_run_id} --base-url ${this.config.coordinator_base_url}`;
@@ -788,6 +791,7 @@ export class CoordinatorApp {
       meeting_run_id: meetingRun.meeting_run_id,
       room_id: meetingRun.room_id,
       state: "starting",
+      provider: promptConfig.provider,
       tmux_session_name: tmuxSessionName,
       command,
       prompt_template_id: promptConfig.prompt_template_id,
@@ -796,6 +800,7 @@ export class CoordinatorApp {
       user_prompt_body: promptConfig.user_prompt_body,
       claude_model: promptConfig.claude_model,
       claude_effort: promptConfig.claude_effort,
+      openrouter_model: promptConfig.openrouter_model,
       working_dir: workingDir,
       latest_minutes_path: latestMinutesPath,
       started_at_unix_ms: now,
@@ -840,11 +845,13 @@ export class CoordinatorApp {
     const appended = this.storage.appendEvents([
       this.buildCoordinatorEvent(meetingRun.meeting_run_id, meetingRun.room_id, restartedFromMinuteJobId ? "minutes.job.restarting" : "minutes.job.started", {
         minute_job_id: minuteJobId,
+        provider: promptConfig.provider,
         prompt_template_id: promptConfig.prompt_template_id,
         tmux_session_name: tmuxSessionName,
         prompt_label: promptConfig.prompt_label,
         claude_model: promptConfig.claude_model,
         claude_effort: promptConfig.claude_effort,
+        openrouter_model: promptConfig.openrouter_model,
       }, startTs),
     ], startTs);
     this.eventBus.publish(appended.records);
@@ -927,17 +934,26 @@ export class CoordinatorApp {
     const promptTemplateId = template?.template_id ?? DEFAULT_MINUTE_PROMPT_TEMPLATE_ID;
     const promptLabel = input?.prompt_label?.trim() || template?.name || null;
     const userPromptBody = input?.user_prompt_body?.trim() || null;
-    const claudeModel = input?.claude_model?.trim() || process.env.METER_MINUTE_TAKER_MODEL?.trim() || null;
+    const requestedProvider = input?.provider?.trim() || process.env.METER_MINUTE_TAKER_PROVIDER?.trim() || "claude_tmux";
+    const provider = requestedProvider === "openrouter_patch" ? "openrouter_patch" : "claude_tmux";
+    const claudeModel = provider === "claude_tmux"
+      ? input?.claude_model?.trim() || process.env.METER_MINUTE_TAKER_MODEL?.trim() || null
+      : null;
     const requestedEffort = input?.claude_effort?.trim() || process.env.METER_MINUTE_TAKER_EFFORT?.trim() || null;
-    const claudeEffort = requestedEffort && ["low", "medium", "high", "max"].includes(requestedEffort)
+    const claudeEffort = provider === "claude_tmux" && requestedEffort && ["low", "medium", "high", "max"].includes(requestedEffort)
       ? requestedEffort as MinutePromptConfig["claude_effort"]
       : null;
+    const openrouterModel = provider === "openrouter_patch"
+      ? input?.openrouter_model?.trim() || process.env.METER_OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_MINUTE_MODEL
+      : null;
     return {
+      provider,
       prompt_template_id: promptTemplateId,
       prompt_label: promptLabel,
       user_prompt_body: userPromptBody,
       claude_model: claudeModel,
       claude_effort: claudeEffort,
+      openrouter_model: openrouterModel,
     };
   }
 
@@ -1399,8 +1415,15 @@ export class CoordinatorApp {
   }
 
   private handleListMinutePromptTemplates(): Response {
+    const defaultProvider = process.env.METER_MINUTE_TAKER_PROVIDER?.trim() === "openrouter_patch"
+      ? "openrouter_patch"
+      : "claude_tmux";
     return jsonResponse({
       default_template_id: DEFAULT_MINUTE_PROMPT_TEMPLATE_ID,
+      default_provider: defaultProvider,
+      default_claude_model: process.env.METER_MINUTE_TAKER_MODEL?.trim() || null,
+      default_claude_effort: process.env.METER_MINUTE_TAKER_EFFORT?.trim() || null,
+      default_openrouter_model: process.env.METER_OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_MINUTE_MODEL,
       items: listMinutePromptTemplates(),
     });
   }

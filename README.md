@@ -287,6 +287,9 @@ Current behavior:
 - the main dashboard lets you opt into minutes at capture start, then stop, restart, and re-steer minutes with prompt edits while the meeting is live
 - prompt drafts currently live in browser local storage, while the running prompt snapshot is stored with the minute job
 - restarting minutes replaces the visible live `minutes.md` for that meeting run; older versions remain available only as debug history through `minute_versions`
+- there are now two backends for the same managed minute-job contract:
+  - `claude_tmux`: the existing tmux + Claude Code flow
+  - `openrouter_patch`: a non-tmux worker that calls the OpenRouter chat completions API, receives structured text-edit operations, and writes `minutes.md` directly
 
 The user-editable prompt surface is intentionally broad:
 
@@ -297,11 +300,45 @@ The live minutes panel in the dashboard tails the rendered Markdown from the man
 
 Minute-taker launch defaults:
 
+- `METER_MINUTE_TAKER_PROVIDER`
+  - default managed minute backend: `claude_tmux` or `openrouter_patch`
 - `METER_MINUTE_TAKER_MODEL`
   - optional default Claude model for managed minute jobs
 - `METER_MINUTE_TAKER_EFFORT`
   - optional default Claude effort level for managed minute jobs: `low`, `medium`, `high`, or `max`
+- `METER_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY`
+  - required when `METER_MINUTE_TAKER_PROVIDER=openrouter_patch`
+- `METER_OPENROUTER_MODEL`
+  - default OpenRouter model id for managed minute jobs, for example `openai/gpt-4.1-mini`
+- `METER_OPENROUTER_BASE_URL`
+  - optional OpenRouter base URL, default `https://openrouter.ai/api/v1`
+- `METER_OPENROUTER_TITLE`
+  - optional title header sent to OpenRouter
+- `METER_OPENROUTER_REFERER`
+  - optional referer header sent to OpenRouter
 - the dashboard can override both per minute job, and browser-local prompt/model defaults can carry across meetings until reverted
+
+Minute job API examples:
+
+```bash
+curl -X POST http://127.0.0.1:3100/v1/meeting-runs/<meeting_run_id>/minutes/start \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider": "openrouter_patch",
+    "openrouter_model": "openai/gpt-4.1-mini",
+    "prompt_template_id": "decision-journal"
+  }'
+```
+
+```bash
+curl -X POST http://127.0.0.1:3100/v1/meeting-runs/<meeting_run_id>/minutes/restart \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider": "claude_tmux",
+    "claude_model": "sonnet",
+    "claude_effort": "medium"
+  }'
+```
 
 ## Configuration
 

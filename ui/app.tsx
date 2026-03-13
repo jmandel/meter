@@ -8,9 +8,11 @@ import {
 import {
   MINUTE_CLAUDE_EFFORT_OPTIONS,
   MINUTE_CLAUDE_MODEL_SUGGESTIONS,
+  MINUTE_OPENROUTER_MODEL_SUGGESTIONS,
   type MinuteDraftFields,
   type MinutePresetSource,
   type UiMinuteClaudeEffort,
+  type UiMinuteProvider,
   minutePromptRequestBody,
   useMinutePresetDraftManager,
 } from "./minute-prompt-drafts";
@@ -61,6 +63,7 @@ interface MinuteJobRecord {
   meeting_run_id: string;
   room_id: string;
   state: "idle" | "starting" | "running" | "stopping" | "restarting" | "completed" | "failed";
+  provider: UiMinuteProvider;
   tmux_session_name: string | null;
   prompt_template_id: string | null;
   prompt_label: string | null;
@@ -68,6 +71,7 @@ interface MinuteJobRecord {
   user_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: "low" | "medium" | "high" | "max" | null;
+  openrouter_model: string | null;
   latest_version_seq: number;
   started_at: string;
   ended_at: string | null;
@@ -75,6 +79,8 @@ interface MinuteJobRecord {
 }
 
 interface MinutePromptTemplatesResponse {
+  default_provider?: UiMinuteProvider;
+  default_openrouter_model?: string | null;
   items: MinutePromptTemplate[];
 }
 
@@ -277,9 +283,13 @@ function Screenshot({ meetingRunId }: { meetingRunId: string }) {
 function NewCapture({
   onCreated,
   minuteTemplates,
+  defaultMinuteProvider,
+  defaultOpenRouterModel,
 }: {
   onCreated: (run: MeetingRunRecord) => void;
   minuteTemplates: MinutePromptTemplate[];
+  defaultMinuteProvider: UiMinuteProvider;
+  defaultOpenRouterModel: string;
 }) {
   const enabledStorageKey = "meter:new-capture:minutes:enabled";
   const [joinUrl, setJoinUrl] = useState("");
@@ -292,6 +302,8 @@ function NewCapture({
     runningFields: null,
     runningPromptLabel: null,
     preferRunningPreset: false,
+    defaultProvider: defaultMinuteProvider,
+    defaultOpenRouterModel,
   });
 
   useEffect(() => {
@@ -320,7 +332,7 @@ function NewCapture({
         try {
           await postJson(
             `/v1/meeting-runs/${createdRun.meeting_run_id}/minutes/start`,
-            minutePromptRequestBody(minuteTemplates, minuteDraft.currentFields, minuteDraft.promptLabel),
+            minutePromptRequestBody(minuteTemplates, minuteDraft.currentFields, minuteDraft.promptLabel, defaultMinuteProvider),
           );
           const refreshed = await fetchJson<{ meeting_run: MeetingRunRecord }>(`/v1/meeting-runs/${createdRun.meeting_run_id}`);
           createdRun = refreshed.meeting_run;
@@ -349,10 +361,10 @@ function NewCapture({
       </div>
       <form className="capture-form" onSubmit={handleSubmit}>
         <label className="field">
-          <span>Zoom meeting URL</span>
+          <span>Zoom meeting</span>
           <input
             type="text"
-            placeholder="https://zoom.us/j/123456789?pwd=..."
+            placeholder="2193058682 or https://zoom.us/j/123456789?pwd=..."
             value={joinUrl}
             disabled={submitting}
             onChange={(inputEvent) => setJoinUrl(inputEvent.target.value)}
@@ -443,36 +455,56 @@ function NewCapture({
                 onChange={minuteDraft.setPromptBody}
               />
             </label>
-            <div className="minutes-config-grid">
-              <label className="field">
-                <span>Claude model</span>
-                <select
-                  value={minuteDraft.claudeModel}
-                  disabled={submitting}
-                  onChange={(inputEvent) => minuteDraft.setClaudeModel(inputEvent.target.value)}
-                >
-                  <option value="">Server default</option>
-                  {MINUTE_CLAUDE_MODEL_SUGGESTIONS.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Claude effort</span>
-                <select
-                  value={minuteDraft.claudeEffort}
-                  disabled={submitting}
-                  onChange={(inputEvent) => minuteDraft.setClaudeEffort(inputEvent.target.value as UiMinuteClaudeEffort)}
-                >
-                  <option value="">Server default</option>
-                  {MINUTE_CLAUDE_EFFORT_OPTIONS.filter((value) => value).map((value) => (
-                    <option key={value} value={value}>{value[0].toUpperCase()}{value.slice(1)}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
+            {minuteDraft.provider === "claude_tmux" ? (
+              <div className="minutes-config-grid">
+                <label className="field">
+                  <span>Claude model</span>
+                  <select
+                    value={minuteDraft.claudeModel}
+                    disabled={submitting}
+                    onChange={(inputEvent) => minuteDraft.setClaudeModel(inputEvent.target.value)}
+                  >
+                    <option value="">Server default</option>
+                    {MINUTE_CLAUDE_MODEL_SUGGESTIONS.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Claude effort</span>
+                  <select
+                    value={minuteDraft.claudeEffort}
+                    disabled={submitting}
+                    onChange={(inputEvent) => minuteDraft.setClaudeEffort(inputEvent.target.value as UiMinuteClaudeEffort)}
+                  >
+                    <option value="">Server default</option>
+                    {MINUTE_CLAUDE_EFFORT_OPTIONS.filter((value) => value).map((value) => (
+                      <option key={value} value={value}>{value[0].toUpperCase()}{value.slice(1)}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            ) : (
+              <div className="minutes-config-grid">
+                <label className="field">
+                  <span>OpenRouter model</span>
+                  <select
+                    value={minuteDraft.openrouterModel}
+                    disabled={submitting}
+                    onChange={(inputEvent) => minuteDraft.setOpenRouterModel(inputEvent.target.value)}
+                  >
+                    <option value="">Server default</option>
+                    {MINUTE_OPENROUTER_MODEL_SUGGESTIONS.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
           </>
         ) : null}
         <p className="field-hint">Starts immediately. Paste a Zoom link and choose the name shown in the meeting.</p>
@@ -808,6 +840,8 @@ function App() {
   const [runs, setRuns] = useState<MeetingRunRecord[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [minuteTemplates, setMinuteTemplates] = useState<MinutePromptTemplate[]>(BUILTIN_MINUTE_PROMPT_TEMPLATES);
+  const [defaultMinuteProvider, setDefaultMinuteProvider] = useState<UiMinuteProvider>("claude_tmux");
+  const [defaultOpenRouterModel, setDefaultOpenRouterModel] = useState("");
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
   const [pageError, setPageError] = useState<string | null>(null);
   const refreshQueueRef = useRef<Set<string>>(new Set());
@@ -842,6 +876,8 @@ function App() {
     setRuns(orderedRuns);
     setHealth(healthResponse);
     setMinuteTemplates(templatesResponse.items.length > 0 ? templatesResponse.items : BUILTIN_MINUTE_PROMPT_TEMPLATES);
+    setDefaultMinuteProvider(templatesResponse.default_provider === "openrouter_patch" ? "openrouter_patch" : "claude_tmux");
+    setDefaultOpenRouterModel(templatesResponse.default_openrouter_model?.trim() || "");
     setPageError(null);
   }, []);
 
@@ -937,7 +973,12 @@ function App() {
 
       <main className="page-layout">
         <aside className="sidebar">
-          <NewCapture minuteTemplates={minuteTemplates} onCreated={handleCreated} />
+          <NewCapture
+            minuteTemplates={minuteTemplates}
+            defaultMinuteProvider={defaultMinuteProvider}
+            defaultOpenRouterModel={defaultOpenRouterModel}
+            onCreated={handleCreated}
+          />
           <OverviewPanel
             health={health}
             connectionState={connectionState}

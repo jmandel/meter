@@ -723,11 +723,13 @@ if (config.reset_output) {
 }
 
 const prompt = (config.user_prompt_body ?? "default").trim() || "default";
+const provider = (config.provider ?? "claude_tmux").trim() || "claude_tmux";
 const promptTemplateId = (config.prompt_template_id ?? "").trim();
 const claudeModel = (config.claude_model ?? "").trim();
 const claudeEffort = (config.claude_effort ?? "").trim();
+const openrouterModel = (config.openrouter_model ?? "").trim();
 const write = (label) => {
-  writeFileSync(path.join(runDir, "minutes.md"), "# Minutes\\n\\nTemplate: " + promptTemplateId + "\\n\\nPrompt: " + prompt + "\\n\\nModel: " + claudeModel + "\\n\\nEffort: " + claudeEffort + "\\n\\nState: " + label + "\\n");
+  writeFileSync(path.join(runDir, "minutes.md"), "# Minutes\\n\\nProvider: " + provider + "\\n\\nTemplate: " + promptTemplateId + "\\n\\nPrompt: " + prompt + "\\n\\nModel: " + claudeModel + "\\n\\nEffort: " + claudeEffort + "\\n\\nOpenRouter Model: " + openrouterModel + "\\n\\nState: " + label + "\\n");
 };
 
 setTimeout(() => write("running"), 50);
@@ -785,6 +787,7 @@ process.on("SIGTERM", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        provider: "claude_tmux",
         prompt_template_id: "decision-journal",
         user_prompt_body: "Alpha minutes",
         claude_model: "claude-3-5-haiku-latest",
@@ -811,6 +814,7 @@ process.on("SIGTERM", () => {
     const currentMinutes = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`).then((value) => value.json()) as {
       minute_job: {
         minute_job_id: string;
+        provider: string;
         prompt_template_id: string | null;
         claude_model: string | null;
         claude_effort: string | null;
@@ -820,12 +824,14 @@ process.on("SIGTERM", () => {
       latest_version: { content_markdown: string } | null;
     };
     expect(currentMinutes.minute_job?.minute_job_id).toBe(started.minute_job.minute_job_id);
+    expect(currentMinutes.minute_job?.provider).toBe("claude_tmux");
     expect(currentMinutes.minute_job?.prompt_template_id).toBe("decision-journal");
     expect(currentMinutes.minute_job?.claude_model).toBe("claude-3-5-haiku-latest");
     expect(currentMinutes.minute_job?.claude_effort).toBe("medium");
     expect(currentMinutes.minute_job?.latest_version_seq).toBeGreaterThan(0);
     expect(currentMinutes.minute_job?.last_update_at).toBeTruthy();
     expect(currentMinutes.latest_version?.content_markdown).toContain("Alpha minutes");
+    expect(currentMinutes.latest_version?.content_markdown).toContain("Provider: claude_tmux");
     expect(currentMinutes.latest_version?.content_markdown).toContain("Template: decision-journal");
     expect(currentMinutes.latest_version?.content_markdown).toContain("Model: claude-3-5-haiku-latest");
     expect(currentMinutes.latest_version?.content_markdown).toContain("Effort: medium");
@@ -847,9 +853,9 @@ process.on("SIGTERM", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        provider: "openrouter_patch",
         user_prompt_body: "Beta minutes",
-        claude_model: "claude-3-7-sonnet-latest",
-        claude_effort: "low",
+        openrouter_model: "openai/gpt-4.1-mini",
       }),
     });
     expect(restartResponse.status).toBe(200);
@@ -859,19 +865,25 @@ process.on("SIGTERM", () => {
     await waitFor(async () => {
       const response = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes`);
       const body = await response.json() as {
-        minute_job: { minute_job_id: string; claude_model: string | null; claude_effort: string | null } | null;
+        minute_job: {
+          minute_job_id: string;
+          provider: string;
+          claude_model: string | null;
+          claude_effort: string | null;
+          openrouter_model: string | null;
+        } | null;
         latest_version: { content_markdown: string } | null;
       };
       return body.minute_job?.minute_job_id === restarted.minute_job.minute_job_id
-        && body.minute_job?.claude_model === "claude-3-7-sonnet-latest"
-        && body.minute_job?.claude_effort === "low"
+        && body.minute_job?.provider === "openrouter_patch"
+        && body.minute_job?.openrouter_model === "openai/gpt-4.1-mini"
         && body.latest_version?.content_markdown.includes("Beta minutes");
     });
 
     const markdownAfterRestart = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes.md`).then((value) => value.text());
     expect(markdownAfterRestart).toContain("Beta minutes");
-    expect(markdownAfterRestart).toContain("Model: claude-3-7-sonnet-latest");
-    expect(markdownAfterRestart).toContain("Effort: low");
+    expect(markdownAfterRestart).toContain("Provider: openrouter_patch");
+    expect(markdownAfterRestart).toContain("OpenRouter Model: openai/gpt-4.1-mini");
     expect(markdownAfterRestart).not.toContain("Alpha minutes");
 
     const stopResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/stop`, {

@@ -175,14 +175,18 @@ export type MinuteJobState =
   | "completed"
   | "failed";
 
+export type MinuteProvider = "claude_tmux" | "openrouter_patch";
+
 export type MinuteClaudeEffort = "low" | "medium" | "high" | "max";
 
 export interface MinutePromptConfig {
+  provider: MinuteProvider;
   prompt_template_id: string | null;
   prompt_label: string | null;
   user_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
+  openrouter_model: string | null;
 }
 
 export interface MinuteJobRecord {
@@ -190,6 +194,7 @@ export interface MinuteJobRecord {
   meeting_run_id: string;
   room_id: string;
   state: MinuteJobState;
+  provider: MinuteProvider;
   tmux_session_name: string | null;
   command: string | null;
   prompt_template_id: string | null;
@@ -198,6 +203,7 @@ export interface MinuteJobRecord {
   user_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
+  openrouter_model: string | null;
   working_dir: string;
   latest_minutes_path: string;
   latest_content_sha256: string | null;
@@ -222,11 +228,13 @@ export interface MinuteVersionRecord {
 }
 
 export interface StartMinuteJobRequest {
+  provider?: MinuteProvider | null;
   prompt_template_id?: string | null;
   prompt_label?: string | null;
   user_prompt_body?: string | null;
   claude_model?: string | null;
   claude_effort?: MinuteClaudeEffort | null;
+  openrouter_model?: string | null;
 }
 
 export interface RestartMinuteJobRequest extends StartMinuteJobRequest {

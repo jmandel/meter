@@ -24,6 +24,7 @@ import {
   formatChunkMessage,
   buildFinalMessage,
 } from "./prompt";
+import { runOpenRouterMinuteTaker } from "./openrouter-patch";
 import {
   createMinuteRescueState,
   getLargeQueueDepthThreshold,
@@ -34,6 +35,7 @@ import {
   shouldRescueQueuedMinutes,
   type MinuteRescueState,
 } from "./stall-rescue";
+import { DEFAULT_OPENROUTER_MINUTE_MODEL } from "../src/minute-models";
 
 interface Config {
   meetingId: string | null;
@@ -44,8 +46,10 @@ interface Config {
   finalizationSettleMs: number;
   minutesRoot: string;
   tmuxSession: string;
+  provider: "claude_tmux" | "openrouter_patch";
   claudeModel: string | null;
   claudeEffort: "low" | "medium" | "high" | "max" | null;
+  openrouterModel: string | null;
 }
 
 interface RunMetadata {
@@ -53,18 +57,22 @@ interface RunMetadata {
   meeting_run_id: string;
   room_id: string;
   base_url: string;
+  provider?: "claude_tmux" | "openrouter_patch";
   prompt_template_id?: string | null;
   prompt_label?: string | null;
   claude_model?: string | null;
   claude_effort?: "low" | "medium" | "high" | "max" | null;
+  openrouter_model?: string | null;
 }
 
 interface InjectedMinuteTakerConfig {
+  provider?: "claude_tmux" | "openrouter_patch";
   prompt_template_id?: string | null;
   prompt_label?: string | null;
   user_prompt_body?: string | null;
   claude_model?: string | null;
   claude_effort?: "low" | "medium" | "high" | "max" | null;
+  openrouter_model?: string | null;
   reset_output?: boolean;
   tmux_session?: string | null;
 }
@@ -114,6 +122,9 @@ function parseArgs(argv: string[]): Config {
     finalizationSettleMs: parseInt(args.get("--final-settle") ?? "8", 10) * 1000,
     minutesRoot: resolve(args.get("--minutes-root") ?? "./minutes"),
     tmuxSession: args.get("--tmux-session") ?? "", // resolved later
+    provider: (args.get("--provider")?.trim() || process.env.METER_MINUTE_TAKER_PROVIDER?.trim() || "claude_tmux") === "openrouter_patch"
+      ? "openrouter_patch"
+      : "claude_tmux",
     claudeModel: args.get("--claude-model")?.trim() || process.env.METER_MINUTE_TAKER_MODEL?.trim() || null,
     claudeEffort: (() => {
       const effort = args.get("--claude-effort")?.trim() || process.env.METER_MINUTE_TAKER_EFFORT?.trim() || null;
@@ -121,6 +132,7 @@ function parseArgs(argv: string[]): Config {
         ? effort as Config["claudeEffort"]
         : null;
     })(),
+    openrouterModel: args.get("--openrouter-model")?.trim() || process.env.METER_OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_MINUTE_MODEL,
   };
 }
 
@@ -317,6 +329,66 @@ async function runPollingLoop(
   }
 }
 
+async function runClaudeTmuxMinuteTaker(
+  client: MeterClient,
+  config: Config,
+  runId: string,
+  runDir: string,
+  meetingId: string,
+  injectedConfig: InjectedMinuteTakerConfig,
+  metadata: RunMetadata,
+): Promise<void> {
+  config.tmuxSession = injectedConfig.tmux_session?.trim() || config.tmuxSession;
+  if (!config.tmuxSession) {
+    config.tmuxSession = `minutes-${runId}`;
+  }
+
+  const tmux = await createSession(config.tmuxSession, runDir);
+  console.log(`Created tmux session "${config.tmuxSession}"`);
+
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log("\nShutting down...");
+    try {
+      await killSession(tmux);
+    } catch {
+      // Session may already be gone
+    }
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  await Bun.write(`${runDir}/.user-prompt.txt`, `${injectedConfig.user_prompt_body?.trim() ?? ""}\n`);
+  const systemPrompt = buildSystemPrompt({
+    meetingId,
+    meetingRunId: runId,
+    promptTemplateId: injectedConfig.prompt_template_id ?? null,
+    userPromptBody: injectedConfig.user_prompt_body ?? null,
+  });
+  await launchClaude(tmux, systemPrompt, {
+    model: metadata.claude_model,
+    effort: metadata.claude_effort,
+  });
+  console.log("Launched Claude in tmux session. Waiting for initialization...");
+  await sleep(2000);
+  await sendMessage(tmux, buildInitialPrompt());
+
+  console.log(`Polling every ${config.pollIntervalMs / 1000}s...`);
+  console.log(`Attach to session: tmux attach -t ${config.tmuxSession}`);
+  console.log(`Output: ${runDir}/minutes.md`);
+  console.log(`Preview: bun run minute-taker/preview.ts --meeting-run-id ${runId}`);
+  console.log("");
+
+  const tracker = createTracker();
+  await runPollingLoop(client, config, runId, runDir, injectedConfig, tracker, tmux);
+
+  console.log("Minute-taker finished.");
+  await shutdown();
+}
+
 async function main() {
   const config = parseArgs(Bun.argv.slice(2));
   const injectedConfig = readInjectedConfig();
@@ -335,78 +407,53 @@ async function main() {
     meeting_run_id: runId,
     room_id: meetingRun.room_id,
     base_url: config.baseUrl,
+    provider: injectedConfig.provider?.trim() === "openrouter_patch" ? "openrouter_patch" : config.provider,
     prompt_template_id: injectedConfig.prompt_template_id ?? null,
     prompt_label: injectedConfig.prompt_label ?? null,
     claude_model: injectedConfig.claude_model?.trim() || config.claudeModel,
     claude_effort: injectedConfig.claude_effort?.trim() || config.claudeEffort,
+    openrouter_model: injectedConfig.openrouter_model?.trim() || config.openrouterModel,
   };
-  if (injectedConfig.reset_output) {
+  const resetOutput = injectedConfig.reset_output ?? true;
+  if (resetOutput) {
+    // Direct CLI replays are regeneration requests, not resumptions. Clear prior
+    // artifacts by default so a new pass does not silently inherit stale minutes,
+    // chunks, or debug files from an older run. Managed starts/restarts also set
+    // reset_output explicitly, so both paths follow the same "fresh output"
+    // contract unless someone intentionally opts out.
     rmSync(`${runDir}/minutes.md`, { force: true });
     rmSync(`${runDir}/chunks`, { recursive: true, force: true });
     rmSync(`${runDir}/.system-prompt.txt`, { force: true });
     rmSync(`${runDir}/.launch-claude.sh`, { force: true });
     rmSync(`${runDir}/.user-prompt.txt`, { force: true });
+    rmSync(`${runDir}/.openrouter-last-request.json`, { force: true });
+    rmSync(`${runDir}/.openrouter-last-response.json`, { force: true });
+    rmSync(`${runDir}/.openrouter-last-apply.json`, { force: true });
     mkdirSync(`${runDir}/chunks`, { recursive: true });
   }
   await Bun.write(`${runDir}/run.json`, `${JSON.stringify(metadata, null, 2)}\n`);
   console.log(`Run directory: ${runDir}`);
-
-  // Default tmux session name
-  config.tmuxSession = injectedConfig.tmux_session?.trim() || config.tmuxSession;
-  if (!config.tmuxSession) {
-    config.tmuxSession = `minutes-${runId}`;
+  const provider = metadata.provider ?? "claude_tmux";
+  if (provider === "openrouter_patch") {
+    const tracker = createTracker();
+    await runOpenRouterMinuteTaker({
+      client,
+      tracker,
+      config: {
+        meetingId,
+        meetingRunId: runId,
+        runDir,
+        pollIntervalMs: config.pollIntervalMs,
+        promptTemplateId: injectedConfig.prompt_template_id ?? null,
+        userPromptBody: injectedConfig.user_prompt_body ?? null,
+        openrouterModel: metadata.openrouter_model ?? null,
+      },
+    });
+    console.log("OpenRouter minute-taker finished.");
+    return;
   }
 
-  // Create tmux session with run dir as cwd
-  const tmux = await createSession(config.tmuxSession, runDir);
-  console.log(`Created tmux session "${config.tmuxSession}"`);
-
-  // Graceful shutdown
-  let shuttingDown = false;
-  const shutdown = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log("\nShutting down...");
-    try {
-      await killSession(tmux);
-    } catch {
-      // Session may already be gone
-    }
-    process.exit(0);
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
-
-  // Launch Claude with run dir as cwd -- prompts use relative paths
-  await Bun.write(`${runDir}/.user-prompt.txt`, `${injectedConfig.user_prompt_body?.trim() ?? ""}\n`);
-  const systemPrompt = buildSystemPrompt({
-    meetingId,
-    meetingRunId: runId,
-    promptTemplateId: injectedConfig.prompt_template_id ?? null,
-    userPromptBody: injectedConfig.user_prompt_body ?? null,
-  });
-  await launchClaude(tmux, systemPrompt, {
-    model: metadata.claude_model,
-    effort: metadata.claude_effort,
-  });
-  console.log("Launched Claude in tmux session. Waiting for initialization...");
-  await sleep(2000);
-
-  // Send initial orientation prompt
-  await sendMessage(tmux, buildInitialPrompt());
-
-  console.log(`Polling every ${config.pollIntervalMs / 1000}s...`);
-  console.log(`Attach to session: tmux attach -t ${config.tmuxSession}`);
-  console.log(`Output: ${runDir}/minutes.md`);
-  console.log(`Preview: bun run minute-taker/preview.ts --meeting-run-id ${runId}`);
-  console.log("");
-
-  // Run the polling loop
-  const tracker = createTracker();
-  await runPollingLoop(client, config, runId, runDir, injectedConfig, tracker, tmux);
-
-  console.log("Minute-taker finished.");
-  await shutdown();
+  await runClaudeTmuxMinuteTaker(client, config, runId, runDir, meetingId, injectedConfig, metadata);
 }
 
 main().catch((error) => {

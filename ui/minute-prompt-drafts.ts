@@ -5,6 +5,7 @@ import {
   DEFAULT_MINUTE_PROMPT_TEMPLATE_ID,
   type MinutePromptTemplate,
 } from "../src/minute-prompts";
+import { CURATED_OPENROUTER_MINUTE_MODELS } from "../src/minute-models";
 
 const MINUTE_LOCAL_DEFAULTS_STORAGE_BASE = "meter:minutes:local-default";
 const MINUTE_LOCAL_PRESETS_STORAGE_KEY = `${MINUTE_LOCAL_DEFAULTS_STORAGE_BASE}:presets`;
@@ -16,15 +17,21 @@ export const MINUTE_CLAUDE_MODEL_SUGGESTIONS = [
   "sonnet",
   "haiku",
 ] as const;
+export const MINUTE_OPENROUTER_MODEL_SUGGESTIONS = [
+  ...CURATED_OPENROUTER_MINUTE_MODELS,
+] as const;
 
 export type UiMinuteClaudeEffort = (typeof MINUTE_CLAUDE_EFFORT_OPTIONS)[number];
+export type UiMinuteProvider = "claude_tmux" | "openrouter_patch";
 export type MinutePresetSource = "run" | `template:${string}` | `preset:${string}`;
 
 export interface MinuteDraftFields {
+  provider: UiMinuteProvider;
   promptTemplateId: string;
   promptBody: string;
   claudeModel: string;
   claudeEffort: UiMinuteClaudeEffort;
+  openrouterModel: string;
 }
 
 export interface LocalMinutePreset extends MinuteDraftFields {
@@ -51,11 +58,19 @@ function normalizeMinuteClaudeModel(value: string | null | undefined): string {
   return value?.trim() ?? "";
 }
 
+function normalizeMinuteProvider(value: string | null | undefined, fallback: UiMinuteProvider): UiMinuteProvider {
+  return value === "openrouter_patch" ? "openrouter_patch" : fallback;
+}
+
 function normalizeMinuteClaudeEffort(value: string | null | undefined): UiMinuteClaudeEffort {
   if (value === "low" || value === "medium" || value === "high" || value === "max") {
     return value;
   }
   return "";
+}
+
+function normalizeMinuteOpenRouterModel(value: string | null | undefined): string {
+  return value?.trim() ?? "";
 }
 
 function getMinutePromptTemplateById(
@@ -82,34 +97,46 @@ function normalizeMinutePromptTemplateId(
   return getMinutePromptTemplateById(templates, templateId)?.template_id ?? DEFAULT_MINUTE_PROMPT_TEMPLATE_ID;
 }
 
-export function defaultMinuteDraftFields(templates: MinutePromptTemplate[]): MinuteDraftFields {
+export function defaultMinuteDraftFields(
+  templates: MinutePromptTemplate[],
+  defaultProvider: UiMinuteProvider = "claude_tmux",
+  defaultOpenRouterModel = "",
+): MinuteDraftFields {
   const promptTemplateId = normalizeMinutePromptTemplateId(templates, DEFAULT_MINUTE_PROMPT_TEMPLATE_ID);
   return {
+    provider: defaultProvider,
     promptTemplateId,
     promptBody: getTemplatePromptBody(templates, promptTemplateId),
     claudeModel: "",
     claudeEffort: "",
+    openrouterModel: defaultProvider === "openrouter_patch" ? defaultOpenRouterModel.trim() : "",
   };
 }
 
 export function normalizeMinuteDraftFields(
   templates: MinutePromptTemplate[],
   fields: MinuteDraftFields,
+  defaultProvider: UiMinuteProvider = "claude_tmux",
 ): MinuteDraftFields {
+  const provider = normalizeMinuteProvider(fields.provider, defaultProvider);
   const promptTemplateId = normalizeMinutePromptTemplateId(templates, fields.promptTemplateId);
   return {
+    provider,
     promptTemplateId,
     promptBody: fields.promptBody?.trim() ? fields.promptBody : getTemplatePromptBody(templates, promptTemplateId),
     claudeModel: normalizeMinuteClaudeModel(fields.claudeModel),
     claudeEffort: normalizeMinuteClaudeEffort(fields.claudeEffort),
+    openrouterModel: provider === "openrouter_patch" ? normalizeMinuteOpenRouterModel(fields.openrouterModel) : "",
   };
 }
 
 export function minuteDraftFieldsEqual(left: MinuteDraftFields, right: MinuteDraftFields): boolean {
-  return left.promptTemplateId === right.promptTemplateId
+  return left.provider === right.provider
+    && left.promptTemplateId === right.promptTemplateId
     && left.promptBody === right.promptBody
     && left.claudeModel === right.claudeModel
-    && left.claudeEffort === right.claudeEffort;
+    && left.claudeEffort === right.claudeEffort
+    && left.openrouterModel === right.openrouterModel;
 }
 
 function sortMinutePresets(presets: LocalMinutePreset[]): LocalMinutePreset[] {
@@ -129,10 +156,12 @@ function normalizeLocalMinutePreset(
     return null;
   }
   const normalized = normalizeMinuteDraftFields(templates, {
+    provider: typeof candidate.provider === "string" ? candidate.provider as UiMinuteProvider : "claude_tmux",
     promptTemplateId: typeof candidate.promptTemplateId === "string" ? candidate.promptTemplateId : DEFAULT_MINUTE_PROMPT_TEMPLATE_ID,
     promptBody: typeof candidate.promptBody === "string" ? candidate.promptBody : DEFAULT_MINUTE_PROMPT_BODY,
     claudeModel: typeof candidate.claudeModel === "string" ? candidate.claudeModel : "",
     claudeEffort: typeof candidate.claudeEffort === "string" ? candidate.claudeEffort as UiMinuteClaudeEffort : "",
+    openrouterModel: typeof candidate.openrouterModel === "string" ? candidate.openrouterModel : "",
   });
   return {
     name,
@@ -191,10 +220,12 @@ function migrateLegacyMinuteLocalDefaults(
   }
 
   const legacyPresetFields = normalizeMinuteDraftFields(templates, {
+    provider: "claude_tmux",
     promptTemplateId: DEFAULT_MINUTE_PROMPT_TEMPLATE_ID,
     promptBody: legacyPrompt ?? DEFAULT_MINUTE_PROMPT_BODY,
     claudeModel: legacyModel ?? "",
     claudeEffort: normalizeMinuteClaudeEffort(legacyEffort),
+    openrouterModel: "",
   });
   cleanupLegacy();
 
@@ -275,9 +306,11 @@ function minuteDraftFieldsForSource(
   source: MinutePresetSource,
   presets: LocalMinutePreset[],
   runningFields: MinuteDraftFields | null,
+  defaultProvider: UiMinuteProvider,
+  defaultOpenRouterModel: string,
 ): MinuteDraftFields {
   if (source === "run" && runningFields) {
-    return normalizeMinuteDraftFields(templates, runningFields);
+    return normalizeMinuteDraftFields(templates, runningFields, defaultProvider);
   }
   const presetName = minutePresetNameFromSource(source);
   if (presetName) {
@@ -287,14 +320,16 @@ function minuteDraftFieldsForSource(
     }
   }
   const templateId = minuteTemplateIdFromSource(source) ?? DEFAULT_MINUTE_PROMPT_TEMPLATE_ID;
-  return defaultMinuteDraftFields(templates).promptTemplateId === templateId
-    ? defaultMinuteDraftFields(templates)
+  return defaultMinuteDraftFields(templates, defaultProvider, defaultOpenRouterModel).promptTemplateId === templateId
+    ? defaultMinuteDraftFields(templates, defaultProvider, defaultOpenRouterModel)
     : normalizeMinuteDraftFields(templates, {
+      provider: defaultProvider,
       promptTemplateId: templateId,
       promptBody: getTemplatePromptBody(templates, templateId),
       claudeModel: "",
       claudeEffort: "",
-    });
+      openrouterModel: defaultProvider === "openrouter_patch" ? defaultOpenRouterModel : "",
+    }, defaultProvider);
 }
 
 function minuteSourceLabel(
@@ -337,25 +372,35 @@ export function serializeMinuteClaudeEffort(value: UiMinuteClaudeEffort): "low" 
   return value || null;
 }
 
+export function serializeMinuteOpenRouterModel(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 export function minutePromptRequestBody(
   templates: MinutePromptTemplate[],
   fields: MinuteDraftFields,
   promptLabel: string | null,
+  defaultProvider: UiMinuteProvider = "claude_tmux",
 ): {
+  provider: UiMinuteProvider | null;
   prompt_template_id: string;
   prompt_label: string | null;
   user_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: "low" | "medium" | "high" | "max" | null;
+  openrouter_model: string | null;
 } {
-  const normalized = normalizeMinuteDraftFields(templates, fields);
+  const normalized = normalizeMinuteDraftFields(templates, fields, defaultProvider);
   const fallbackPrompt = getTemplatePromptBody(templates, normalized.promptTemplateId);
   return {
+    provider: normalized.provider === defaultProvider ? null : normalized.provider,
     prompt_template_id: normalized.promptTemplateId,
     prompt_label: promptLabel,
     user_prompt_body: serializeMinutePromptBody(normalized.promptBody, fallbackPrompt),
-    claude_model: serializeMinuteClaudeModel(normalized.claudeModel),
-    claude_effort: serializeMinuteClaudeEffort(normalized.claudeEffort),
+    claude_model: normalized.provider === "claude_tmux" ? serializeMinuteClaudeModel(normalized.claudeModel) : null,
+    claude_effort: normalized.provider === "claude_tmux" ? serializeMinuteClaudeEffort(normalized.claudeEffort) : null,
+    openrouter_model: normalized.provider === "openrouter_patch" ? serializeMinuteOpenRouterModel(normalized.openrouterModel) : null,
   };
 }
 
@@ -364,24 +409,30 @@ export function useMinutePresetDraftManager({
   runningFields,
   runningPromptLabel,
   preferRunningPreset,
+  defaultProvider = "claude_tmux",
+  defaultOpenRouterModel = "",
 }: {
   templates: MinutePromptTemplate[];
   runningFields: MinuteDraftFields | null;
   runningPromptLabel: string | null;
   preferRunningPreset: boolean;
+  defaultProvider?: UiMinuteProvider;
+  defaultOpenRouterModel?: string;
 }) {
   const [presets, setPresets] = useState<LocalMinutePreset[]>([]);
   const [selectedSource, setSelectedSource] = useState<MinutePresetSource>(minuteTemplateSource(DEFAULT_MINUTE_PROMPT_TEMPLATE_ID));
+  const [provider, setProvider] = useState<UiMinuteProvider>(defaultProvider);
   const [promptTemplateId, setPromptTemplateId] = useState(DEFAULT_MINUTE_PROMPT_TEMPLATE_ID);
   const [promptBody, setPromptBody] = useState(DEFAULT_MINUTE_PROMPT_BODY);
   const [claudeModel, setClaudeModel] = useState("");
   const [claudeEffort, setClaudeEffort] = useState<UiMinuteClaudeEffort>("");
+  const [openrouterModel, setOpenRouterModel] = useState(defaultOpenRouterModel);
   const [presetNameDraft, setPresetNameDraft] = useState("");
   const [presetError, setPresetError] = useState<string | null>(null);
 
   const normalizedRunningFields = useMemo(
-    () => (runningFields ? normalizeMinuteDraftFields(templates, runningFields) : null),
-    [templates, runningFields],
+    () => (runningFields ? normalizeMinuteDraftFields(templates, runningFields, defaultProvider) : null),
+    [templates, runningFields, defaultProvider],
   );
 
   useEffect(() => {
@@ -393,23 +444,25 @@ export function useMinutePresetDraftManager({
       : preferRunningPreset && normalizedRunningFields
         ? "run"
         : minuteTemplateSource(DEFAULT_MINUTE_PROMPT_TEMPLATE_ID);
-    const fields = minuteDraftFieldsForSource(templates, nextSource, loadedPresets, normalizedRunningFields);
+    const fields = minuteDraftFieldsForSource(templates, nextSource, loadedPresets, normalizedRunningFields, defaultProvider, defaultOpenRouterModel);
     setSelectedSource(nextSource);
+    setProvider(fields.provider);
     setPromptTemplateId(fields.promptTemplateId);
     setPromptBody(fields.promptBody);
     setClaudeModel(fields.claudeModel);
     setClaudeEffort(fields.claudeEffort);
+    setOpenRouterModel(fields.openrouterModel);
     setPresetNameDraft(minutePresetNameFromSource(nextSource) ?? "");
     setPresetError(null);
-  }, [templates, normalizedRunningFields, preferRunningPreset]);
+  }, [templates, normalizedRunningFields, preferRunningPreset, defaultProvider, defaultOpenRouterModel]);
 
   const currentFields = useMemo(
-    () => normalizeMinuteDraftFields(templates, { promptTemplateId, promptBody, claudeModel, claudeEffort }),
-    [templates, promptTemplateId, promptBody, claudeModel, claudeEffort],
+    () => normalizeMinuteDraftFields(templates, { provider, promptTemplateId, promptBody, claudeModel, claudeEffort, openrouterModel }, defaultProvider),
+    [templates, provider, promptTemplateId, promptBody, claudeModel, claudeEffort, openrouterModel, defaultProvider],
   );
   const selectedFields = useMemo(
-    () => minuteDraftFieldsForSource(templates, selectedSource, presets, normalizedRunningFields),
-    [templates, selectedSource, presets, normalizedRunningFields],
+    () => minuteDraftFieldsForSource(templates, selectedSource, presets, normalizedRunningFields, defaultProvider, defaultOpenRouterModel),
+    [templates, selectedSource, presets, normalizedRunningFields, defaultProvider, defaultOpenRouterModel],
   );
   const hasUnsavedChanges = !minuteDraftFieldsEqual(currentFields, selectedFields);
   const selectedPresetName = minutePresetNameFromSource(selectedSource);
@@ -420,16 +473,18 @@ export function useMinutePresetDraftManager({
     : null;
 
   const applySource = useCallback((source: MinutePresetSource, nextPresets = presets) => {
-    const fields = minuteDraftFieldsForSource(templates, source, nextPresets, normalizedRunningFields);
+    const fields = minuteDraftFieldsForSource(templates, source, nextPresets, normalizedRunningFields, defaultProvider, defaultOpenRouterModel);
     setSelectedSource(source);
+    setProvider(fields.provider);
     setPromptTemplateId(fields.promptTemplateId);
     setPromptBody(fields.promptBody);
     setClaudeModel(fields.claudeModel);
     setClaudeEffort(fields.claudeEffort);
+    setOpenRouterModel(fields.openrouterModel);
     setPresetNameDraft(minutePresetNameFromSource(source) ?? "");
     setPresetError(null);
     persistSelectedMinutePresetSource(source);
-  }, [templates, presets, normalizedRunningFields]);
+  }, [templates, presets, normalizedRunningFields, defaultProvider, defaultOpenRouterModel]);
 
   const selectSource = useCallback((source: MinutePresetSource) => {
     applySource(source);
@@ -449,7 +504,7 @@ export function useMinutePresetDraftManager({
       setPresetError("Choose a name other than Default or This run's saved settings.");
       return;
     }
-    if (minuteDraftFieldsEqual(currentFields, defaultMinuteDraftFields(templates))) {
+    if (minuteDraftFieldsEqual(currentFields, defaultMinuteDraftFields(templates, defaultProvider, defaultOpenRouterModel))) {
       setPresetError("This matches Meter default. Use a built-in template instead.");
       return;
     }
@@ -464,7 +519,7 @@ export function useMinutePresetDraftManager({
     writeStoredMinutePresets(nextPresets);
     setPresets(nextPresets);
     applySource(minutePresetSourceForName(trimmedName), nextPresets);
-  }, [applySource, currentFields, presetNameDraft, presets, templates]);
+  }, [applySource, currentFields, presetNameDraft, presets, templates, defaultProvider, defaultOpenRouterModel]);
 
   const deleteSelectedPreset = useCallback(() => {
     if (!selectedPresetName) {
@@ -477,14 +532,16 @@ export function useMinutePresetDraftManager({
   }, [applySource, normalizedRunningFields, preferRunningPreset, presets, selectedPresetName]);
 
   const resetDraftToSelected = useCallback(() => {
-    const fields = minuteDraftFieldsForSource(templates, selectedSource, presets, normalizedRunningFields);
+    const fields = minuteDraftFieldsForSource(templates, selectedSource, presets, normalizedRunningFields, defaultProvider, defaultOpenRouterModel);
+    setProvider(fields.provider);
     setPromptTemplateId(fields.promptTemplateId);
     setPromptBody(fields.promptBody);
     setClaudeModel(fields.claudeModel);
     setClaudeEffort(fields.claudeEffort);
+    setOpenRouterModel(fields.openrouterModel);
     setPresetNameDraft(minutePresetNameFromSource(selectedSource) ?? "");
     setPresetError(null);
-  }, [templates, selectedSource, presets, normalizedRunningFields]);
+  }, [templates, selectedSource, presets, normalizedRunningFields, defaultProvider, defaultOpenRouterModel]);
 
   return {
     presets,
@@ -493,9 +550,15 @@ export function useMinutePresetDraftManager({
     selectedLabel: minuteSourceLabel(templates, selectedSource, runningPromptLabel),
     selectedTemplateId,
     selectedTemplate,
+    provider,
     promptBody,
     claudeModel,
     claudeEffort,
+    openrouterModel,
+    setProvider: (nextValue: UiMinuteProvider) => {
+      setProvider(nextValue);
+      setPresetError(null);
+    },
     setPromptBody: (nextValue: string) => {
       setPromptBody(nextValue);
       setPresetError(null);
@@ -506,6 +569,10 @@ export function useMinutePresetDraftManager({
     },
     setClaudeEffort: (nextValue: UiMinuteClaudeEffort) => {
       setClaudeEffort(nextValue);
+      setPresetError(null);
+    },
+    setOpenRouterModel: (nextValue: string) => {
+      setOpenRouterModel(nextValue);
       setPresetError(null);
     },
     selectSource,

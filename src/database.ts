@@ -10,6 +10,7 @@ import type {
   ErrorRaisedPayload,
   EventEnvelope,
   EventRecord,
+  MinuteProvider,
   MinuteClaudeEffort,
   MinuteJobRecord,
   MinuteJobState,
@@ -95,6 +96,7 @@ interface MinuteJobInsertInput {
   meeting_run_id: string;
   room_id: string;
   state: MinuteJobState;
+  provider: MinuteProvider;
   tmux_session_name: string | null;
   command: string | null;
   prompt_template_id: string | null;
@@ -103,6 +105,7 @@ interface MinuteJobInsertInput {
   user_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
+  openrouter_model: string | null;
   working_dir: string;
   latest_minutes_path: string;
   started_at_unix_ms: number;
@@ -111,6 +114,7 @@ interface MinuteJobInsertInput {
 
 interface MinuteJobPatch {
   state?: MinuteJobState;
+  provider?: MinuteProvider;
   tmux_session_name?: string | null;
   command?: string | null;
   prompt_template_id?: string | null;
@@ -119,6 +123,7 @@ interface MinuteJobPatch {
   user_prompt_body?: string | null;
   claude_model?: string | null;
   claude_effort?: MinuteClaudeEffort | null;
+  openrouter_model?: string | null;
   latest_content_sha256?: string | null;
   latest_version_seq?: number;
   ended_at_unix_ms?: number | null;
@@ -132,6 +137,7 @@ interface MinuteJobRow {
   meeting_run_id: string;
   room_id: string;
   state: MinuteJobState;
+  provider: MinuteProvider;
   tmux_session_name: string | null;
   command: string | null;
   prompt_template_id: string | null;
@@ -140,6 +146,7 @@ interface MinuteJobRow {
   user_prompt_body: string | null;
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
+  openrouter_model: string | null;
   working_dir: string;
   latest_minutes_path: string;
   latest_content_sha256: string | null;
@@ -334,6 +341,7 @@ export class AppDatabase {
         meeting_run_id TEXT NOT NULL REFERENCES meeting_runs(meeting_run_id),
         room_id TEXT NOT NULL REFERENCES rooms(room_id),
         state TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT 'claude_tmux',
         tmux_session_name TEXT,
         command TEXT,
         prompt_template_id TEXT,
@@ -342,6 +350,7 @@ export class AppDatabase {
         user_prompt_body TEXT,
         claude_model TEXT,
         claude_effort TEXT,
+        openrouter_model TEXT,
         working_dir TEXT NOT NULL,
         latest_minutes_path TEXT NOT NULL,
         latest_content_sha256 TEXT,
@@ -394,8 +403,10 @@ export class AppDatabase {
     this.ensureColumn("chat_messages", "chat_type", "TEXT");
     this.ensureColumn("chat_messages", "details_json", "TEXT");
     this.ensureColumn("minute_jobs", "prompt_template_id", "TEXT");
+    this.ensureColumn("minute_jobs", "provider", "TEXT NOT NULL DEFAULT 'claude_tmux'");
     this.ensureColumn("minute_jobs", "claude_model", "TEXT");
     this.ensureColumn("minute_jobs", "claude_effort", "TEXT");
+    this.ensureColumn("minute_jobs", "openrouter_model", "TEXT");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_chat_messages_main_chat_message_id ON chat_messages(main_chat_message_id);");
   }
 
@@ -1006,6 +1017,7 @@ export class AppDatabase {
       meeting_run_id: row.meeting_run_id,
       room_id: row.room_id,
       state: row.state,
+      provider: row.provider,
       tmux_session_name: row.tmux_session_name,
       command: row.command,
       prompt_template_id: row.prompt_template_id,
@@ -1014,6 +1026,7 @@ export class AppDatabase {
       user_prompt_body: row.user_prompt_body,
       claude_model: row.claude_model,
       claude_effort: row.claude_effort,
+      openrouter_model: row.openrouter_model,
       working_dir: row.working_dir,
       latest_minutes_path: row.latest_minutes_path,
       latest_content_sha256: row.latest_content_sha256,
@@ -1084,6 +1097,7 @@ export class AppDatabase {
           meeting_run_id,
           room_id,
           state,
+          provider,
           tmux_session_name,
           command,
           prompt_template_id,
@@ -1092,6 +1106,7 @@ export class AppDatabase {
           user_prompt_body,
           claude_model,
           claude_effort,
+          openrouter_model,
           working_dir,
           latest_minutes_path,
           latest_content_sha256,
@@ -1102,13 +1117,14 @@ export class AppDatabase {
           restarted_from_minute_job_id,
           last_error_code,
           last_error_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, NULL, NULL, ?, NULL, NULL)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, NULL, NULL, ?, NULL, NULL)
       `)
       .run(
         input.minute_job_id,
         input.meeting_run_id,
         input.room_id,
         input.state,
+        input.provider,
         input.tmux_session_name,
         input.command,
         input.prompt_template_id,
@@ -1117,6 +1133,7 @@ export class AppDatabase {
         input.user_prompt_body,
         input.claude_model,
         input.claude_effort,
+        input.openrouter_model,
         input.working_dir,
         input.latest_minutes_path,
         input.started_at_unix_ms,
