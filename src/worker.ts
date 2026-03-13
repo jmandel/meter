@@ -128,11 +128,6 @@ export function buildChromeArgs(options: {
     `--user-data-dir=${options.chromeUserDataDir}`,
     "--auto-select-desktop-capture-source=Zoom",
     "--auto-accept-this-tab-capture",
-    // Auto-accept media prompts without relying on Chromium's fake media
-    // device flag. In practice, --use-fake-device-for-media-stream can cause
-    // getDisplayMedia() audio to come from a generic default/fake source
-    // instead of the Zoom tab, which breaks transcription/archive capture.
-    "--use-fake-ui-for-media-stream",
     "--autoplay-policy=no-user-gesture-required",
     "--no-first-run",
     "--disable-default-apps",

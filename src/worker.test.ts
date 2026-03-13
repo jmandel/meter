@@ -8,7 +8,7 @@ test("buildChromeArgs avoids fake media devices by default to preserve tab audio
     chromeUserDataDir: "/tmp/meter-chrome-profile",
   });
 
-  expect(args).toContain("--use-fake-ui-for-media-stream");
+  expect(args).not.toContain("--use-fake-ui-for-media-stream");
   expect(args).not.toContain("--use-fake-device-for-media-stream");
   expect(args).toContain("--auto-accept-this-tab-capture");
   expect(args).toContain("--auto-select-desktop-capture-source=Zoom");
