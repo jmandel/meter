@@ -348,22 +348,98 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           return fallback || null;
         }
 
-        function scanSpeaker() {
-          // Prefer the currently rendered main tile. In newer Zoom layouts this
-          // is a more reliable "who is speaking now" signal than the older
-          // active-speaker wrapper classes, which may be absent entirely.
-          const active = firstMatchingElement([
-            ".single-main-container__main-view",
+        function firstVisibleMatchingElement(selectors) {
+          for (const selector of selectors) {
+            for (const match of document.querySelectorAll(selector)) {
+              const rect = match.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                return match;
+              }
+            }
+          }
+          return null;
+        }
+
+        function getSpeakerCandidateFromStore() {
+          const store = resolveReduxStore();
+          if (!store) {
+            return null;
+          }
+          const state = store.getState?.() || {};
+          const attendeeList = Array.isArray(state.attendeesList?.attendeesList)
+            ? state.attendeesList.attendeesList
+            : [];
+          const attendeeByUserId = new Map(
+            attendeeList.map((attendee) => [toFiniteNumber(attendee?.userId), attendee]),
+          );
+          const renderedVideoLists = [
+            state.video?.currentSpeakerActiveVideo,
+            state.video?.currentMultiSpeakerActiveVideo,
+            state.video?.activeSpeakerList,
+            state.video?.currentRenderVideo,
+            state.video?.currentSuspensionAllVideos,
+          ];
+          for (const list of renderedVideoLists) {
+            if (!Array.isArray(list) || list.length === 0) {
+              continue;
+            }
+            for (const item of list) {
+              const name = item?.user?.displayName?.trim() || item?.displayName?.trim() || null;
+              if (name) {
+                return name;
+              }
+            }
+          }
+          const asnIds = state.audio?.asnIds;
+          if (asnIds && typeof asnIds === "object") {
+            for (const value of Object.values(asnIds)) {
+              const attendee = attendeeByUserId.get(toFiniteNumber(value));
+              const name = attendee?.displayName?.trim() || null;
+              if (name) {
+                return name;
+              }
+            }
+          }
+          let freshestSpeaker = null;
+          let freshestSpokenAt = 0;
+          for (const attendee of attendeeList) {
+            const spokenAt = toFiniteNumber(attendee?.lastSpokenTime) ?? 0;
+            const name = attendee?.displayName?.trim() || null;
+            if (name && spokenAt > freshestSpokenAt) {
+              freshestSpeaker = name;
+              freshestSpokenAt = spokenAt;
+            }
+          }
+          return freshestSpeaker;
+        }
+
+        function getSpeakerCandidateFromDom() {
+          const active = firstVisibleMatchingElement([
             ".single-main-container__video-frame",
+            ".single-main-container__main-view",
             ".speaker-active-container__wrap",
             ".speaker-active-container__video-frame",
             "[class*='video-frame--active']",
             "[class*='active-speaker']",
           ]);
-          if (!active) {
-            return;
+          const activeName = readSpeakerName(active);
+          if (activeName) {
+            return activeName;
           }
-          const name = readSpeakerName(active);
+          const suspended = firstVisibleMatchingElement([
+            ".single-suspension-container__video-frame",
+            ".suspension-window-container .video-avatar__avatar",
+            ".suspension-window-container",
+          ]);
+          return readSpeakerName(suspended);
+        }
+
+        function scanSpeaker() {
+          // Prefer store-backed active/rendered video state. When Zoom is in a
+          // screen-share layout, DOM placeholders for the main tile may still
+          // exist with zero height while the actual visible speaker is in a
+          // suspended floating tile.
+          const name = getSpeakerCandidateFromStore() || getSpeakerCandidateFromDom();
           if (name && name !== currentSpeaker) {
             currentSpeaker = name;
             emitDomEvent("zoom.speaker.active", {

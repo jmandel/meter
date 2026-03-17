@@ -20,3 +20,23 @@ test("renderBootstrapScript prefers main-tile speaker selectors before legacy ac
   expect(legacyIndex).toBeGreaterThan(-1);
   expect(mainViewIndex).toBeLessThan(legacyIndex);
 });
+
+test("renderBootstrapScript includes store-backed speaker fallbacks and suspended-tile selectors", () => {
+  const script = renderBootstrapScript({
+    browser_token: "token",
+    meeting_run_id: "meeting-run-id",
+    room_id: "zoom:2193058682",
+    worker_base_url: "http://127.0.0.1:3100",
+    open_chat_panel: true,
+  });
+
+  expect(script).toContain("currentSpeakerActiveVideo");
+  expect(script).toContain("currentMultiSpeakerActiveVideo");
+  expect(script).toContain("activeSpeakerList");
+  expect(script).toContain("currentRenderVideo");
+  expect(script).toContain("currentSuspensionAllVideos");
+  expect(script).toContain("firstVisibleMatchingElement");
+  expect(script).toContain(".single-suspension-container__video-frame");
+  expect(script).toContain(".suspension-window-container .video-avatar__avatar");
+  expect(script).toContain("getSpeakerCandidateFromStore() || getSpeakerCandidateFromDom()");
+});
