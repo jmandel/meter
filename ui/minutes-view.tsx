@@ -980,7 +980,16 @@ function App() {
       claudeEffort: minuteJob.claude_effort ?? "",
       openrouterModel: minuteJob.openrouter_model ?? "",
     };
-  }, [minuteJob, defaultMinuteProvider]);
+  }, [
+    minuteJob?.minute_job_id,
+    minuteJob?.provider,
+    minuteJob?.prompt_template_id,
+    minuteJob?.user_prompt_body,
+    minuteJob?.claude_model,
+    minuteJob?.claude_effort,
+    minuteJob?.openrouter_model,
+    defaultMinuteProvider,
+  ]);
   const minuteDraft = useMinutePresetDraftManager({
     templates: minuteTemplates,
     runningFields,
@@ -1156,8 +1165,26 @@ function App() {
         const payload = await response.json().catch(() => null);
         throw new Error(payload?.error?.message ?? `Failed to ${action} minutes`);
       }
-      await loadDetails(true);
-      await fetchLatestMarkdown("poll");
+      const payload = await response.json().catch(() => null) as { minute_job?: MinuteJobRecord | null } | null;
+      if (action === "stop") {
+        await loadDetails(true);
+        await fetchLatestMarkdown("poll");
+      } else {
+        const nextMinuteJob = payload?.minute_job ?? null;
+        if (nextMinuteJob) {
+          setMinuteJob(nextMinuteJob);
+        }
+        setVersion(null);
+        setContent("");
+        lastMarkdownRef.current = "";
+        previousLeafTextsRef.current = new Set();
+        pendingSelectionRef.current = null;
+        setUpdatedLabel("Waiting for first minute snapshot…");
+        setStatusLabel(action === "start" ? "Starting" : "Restarting");
+        setStreamState("connecting");
+        setSettingsOpen(false);
+        await loadDetails(false).catch(() => undefined);
+      }
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : `Failed to ${action} minutes`);
     } finally {
