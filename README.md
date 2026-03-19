@@ -260,6 +260,7 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `GET /v1/meeting-runs`
 - `GET /v1/meeting-runs/:id`
 - `POST /v1/meeting-runs/:id/stop`
+- `POST /v1/meeting-runs/:id/resume`
 - `GET /v1/meeting-runs/:id/rescue`
 - `POST /v1/meeting-runs/:id/rescue/claim`
 - `POST /v1/meeting-runs/:id/rescue/release`
@@ -291,6 +292,8 @@ By default, live PCM is not persisted. The durable audio artifact is the final M
 - `GET /v1/meeting-runs/:id/stream`
 
 The transcript markdown endpoint is intended for easy manual inspection and prompt insertion. It returns plain markdown as text, not a downloaded file. By default it includes speech, attendee joins/leaves, and chat in one time-ordered log.
+
+If you resume a completed run with `POST /v1/meeting-runs/:id/resume`, Meter creates a successor run. Zoom-level transcript and minute surfaces follow that resume chain so the resumed capture can continue as one logical transcript/minutes document without mutating the original run id.
 
 Recurring-meeting aliases:
 

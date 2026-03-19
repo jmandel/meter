@@ -74,6 +74,7 @@ interface InjectedMinuteTakerConfig {
   claude_effort?: "low" | "medium" | "high" | "max" | null;
   openrouter_model?: string | null;
   reset_output?: boolean;
+  resume_existing_minutes?: boolean;
   tmux_session?: string | null;
 }
 
@@ -291,7 +292,7 @@ async function runPollingLoop(
           await writeChunk(runDir, chunk.segmentIndex, chunk.content);
 
           // Paste chunk content directly into Claude's conversation
-          const msg = formatChunkMessage(chunk);
+          const msg = formatChunkMessage(chunk, injectedConfig.resume_existing_minutes === true);
           await pasteMessage(tmux, msg);
           rescueState = noteChunkSent(rescueState, chunk.segmentIndex);
 
@@ -374,7 +375,7 @@ async function runClaudeTmuxMinuteTaker(
   });
   console.log("Launched Claude in tmux session. Waiting for initialization...");
   await sleep(2000);
-  await sendMessage(tmux, buildInitialPrompt());
+  await sendMessage(tmux, buildInitialPrompt(injectedConfig.resume_existing_minutes === true));
 
   console.log(`Polling every ${config.pollIntervalMs / 1000}s...`);
   console.log(`Attach to session: tmux attach -t ${config.tmuxSession}`);

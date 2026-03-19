@@ -46,7 +46,7 @@ function buildTempConfig(tempDir: string): InternalConfig {
   };
 }
 
-function buildMeetingRun(): MeetingRunRecord {
+function buildMeetingRun(overrides: Partial<MeetingRunRecord> = {}): MeetingRunRecord {
   return {
     meeting_run_id: "meeting-run-test",
     room_id: "zoom:2193058682",
@@ -88,6 +88,7 @@ function buildMeetingRun(): MeetingRunRecord {
       archive_audio_bytes: 0,
     },
     last_error: null,
+    ...overrides,
   };
 }
 
@@ -718,6 +719,202 @@ test("resolveMeetingRunForRoom prefers an active run over older history", () => 
   const resolved = app.resolveMeetingRunForRoom("zoom:2193058682");
 
   expect(resolved?.meeting_run_id).toBe("run-capturing");
+});
+
+test("handleZoomMeetingTranscript combines resumed runs for the same Zoom meeting", async () => {
+  const app = new CoordinatorApp(buildConfig()) as any;
+  app.storage = {
+    listMeetingRunRecords: () => [
+      buildMeetingRun({
+        meeting_run_id: "run-1",
+        state: "completed",
+        started_at: "2026-03-12T06:48:00.000Z",
+        ended_at: "2026-03-12T06:50:00.000Z",
+        created_at: "2026-03-12T06:48:00.000Z",
+      }),
+      buildMeetingRun({
+        meeting_run_id: "run-2",
+        tags: ["meter:resume-root:run-1", "meter:resumed-from:run-1"],
+        state: "capturing",
+        started_at: "2026-03-12T06:50:10.000Z",
+        ended_at: null,
+        created_at: "2026-03-12T06:50:10.000Z",
+        updated_at: "2026-03-12T06:50:20.000Z",
+      }),
+    ],
+    listEventRecords: ({ kind }: { kind: string }) => {
+      if (kind === "transcription.segment.final") {
+        return [
+          {
+            event_id: 1,
+            meeting_run_id: "run-1",
+            room_id: "zoom:2193058682",
+            seq: 1,
+            source: "transcription",
+            kind,
+            ts: "2026-03-12T06:48:12.100Z",
+            payload: {
+              speech_segment_id: "seg-1",
+              provider: "mistral",
+              provider_segment_id: "provider-seg-1",
+              text: "Opening remarks",
+              status: "final",
+              speaker_label: "Judge mobile",
+              started_at_unix_ms: Date.parse("2026-03-12T06:48:10.000Z"),
+              ended_at_unix_ms: Date.parse("2026-03-12T06:48:12.000Z"),
+            },
+          },
+          {
+            event_id: 2,
+            meeting_run_id: "run-2",
+            room_id: "zoom:2193058682",
+            seq: 1,
+            source: "transcription",
+            kind,
+            ts: "2026-03-12T06:50:15.100Z",
+            payload: {
+              speech_segment_id: "seg-2",
+              provider: "mistral",
+              provider_segment_id: "provider-seg-2",
+              text: "Resumed discussion",
+              status: "final",
+              speaker_label: "Josh Mandel",
+              started_at_unix_ms: Date.parse("2026-03-12T06:50:14.000Z"),
+              ended_at_unix_ms: Date.parse("2026-03-12T06:50:15.000Z"),
+            },
+          },
+        ];
+      }
+      return [];
+    },
+  };
+
+  const response = app.handleZoomMeetingTranscript(new URL("http://127.0.0.1:3100/v1/zoom-meetings/2193058682/transcript.md"), "2193058682");
+  expect(response.status).toBe(200);
+  const markdown = await response.text();
+  expect(markdown).toContain("Opening remarks");
+  expect(markdown).toContain("Resumed discussion");
+});
+
+test("patchMeetingRunFromEvents marks a run stopping when Zoom reports the meeting left", () => {
+  const app = new CoordinatorApp(buildConfig()) as any;
+  const patches: Array<{ meetingRunId: string; patch: Record<string, unknown> }> = [];
+  app.storage = {
+    patchMeetingRun: (meetingRunId: string, patch: Record<string, unknown>) => {
+      patches.push({ meetingRunId, patch });
+    },
+  };
+  app.getMeetingRun = () => buildMeetingRun();
+
+  app.patchMeetingRunFromEvents("meeting-run-test", [{
+    event_id: 1,
+    meeting_run_id: "meeting-run-test",
+    room_id: "zoom:2193058682",
+    seq: 1,
+    source: "zoom_dom",
+    kind: "zoom.meeting.left",
+    ts: "2026-03-12T06:49:00.000Z",
+    ts_unix_ms: Date.parse("2026-03-12T06:49:00.000Z"),
+    payload: {
+      reason: "ended",
+    },
+  }]);
+
+  expect(patches).toHaveLength(1);
+  expect(patches[0]?.meetingRunId).toBe("meeting-run-test");
+  expect(patches[0]?.patch.state).toBe("stopping");
+});
+
+test("handleResumeMeetingRun creates a successor run and seeds resumed minutes", async () => {
+  const app = new CoordinatorApp(buildConfig()) as any;
+  const tempDir = mkdtempSync(path.join("/tmp", "meter-resume-test-"));
+  const sourceRun = buildMeetingRun({
+    meeting_run_id: "run-completed",
+    state: "completed",
+    ended_at: "2026-03-12T06:50:00.000Z",
+  });
+  const resumedRun = buildMeetingRun({
+    meeting_run_id: "run-resumed",
+    state: "pending",
+    created_at: "2026-03-12T06:51:00.000Z",
+    updated_at: "2026-03-12T06:51:00.000Z",
+  });
+  const spawnedMinutes: Array<{ meetingRunId: string; seed: string | null }> = [];
+
+  app.getMeetingRun = (meetingRunId: string) => (meetingRunId === "run-completed" ? sourceRun : resumedRun);
+  app.initializeMeetingRun = async () => ({
+    meeting_run_id: "run-resumed",
+    layout: await createMeetingRunLayout(tempDir, "run-resumed", Date.parse("2026-03-12T06:51:00.000Z"), false),
+  });
+  app.spawnWorker = async () => undefined;
+  app.spawnMinuteJob = async (meetingRun: MeetingRunRecord, _promptConfig: unknown, _restartedFrom: string | null, seed: string | null) => {
+    spawnedMinutes.push({ meetingRunId: meetingRun.meeting_run_id, seed });
+    return {
+      minute_job_id: "minute-job-resumed",
+      meeting_run_id: meetingRun.meeting_run_id,
+    };
+  };
+  app.getLatestMinuteJob = (meetingRunId: string) => (
+    meetingRunId === "run-completed"
+      ? {
+          minute_job_id: "minute-job-source",
+          meeting_run_id: "run-completed",
+          room_id: "zoom:2193058682",
+          state: "completed",
+          provider: "openrouter_patch",
+          tmux_session_name: null,
+          command: null,
+          prompt_template_id: "default",
+          prompt_label: "Default",
+          prompt_hash: null,
+          user_prompt_body: "Keep concise minutes",
+          claude_model: null,
+          claude_effort: null,
+          openrouter_model: "openai/gpt-4.1-mini",
+          working_dir: "/tmp/meter-test",
+          latest_minutes_path: "/tmp/meter-test/minutes.md",
+          latest_content_sha256: null,
+          latest_version_seq: 1,
+          started_at: "2026-03-12T06:48:00.000Z",
+          ended_at: "2026-03-12T06:50:00.000Z",
+          last_update_at: "2026-03-12T06:50:00.000Z",
+          restarted_from_minute_job_id: null,
+          last_error: null,
+        }
+      : null
+  );
+  app.storage = {
+    getMeetingRunRecord: (meetingRunId: string) => (meetingRunId === "run-resumed" ? resumedRun : sourceRun),
+    getLatestMinuteVersionForMinuteJob: () => ({
+      minute_version_id: "minute-version-source",
+      minute_job_id: "minute-job-source",
+      meeting_run_id: "run-completed",
+      room_id: "zoom:2193058682",
+      seq: 1,
+      status: "final",
+      content_markdown: "# Minutes\n\nExisting notes",
+      content_sha256: "sha",
+      created_at: "2026-03-12T06:50:00.000Z",
+    }),
+    listMeetingRunRecords: () => [resumedRun, sourceRun],
+  };
+
+  const response = await app.handleResumeMeetingRun(
+    new Request("http://127.0.0.1:3100/v1/meeting-runs/run-completed/resume", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    }),
+    "run-completed",
+  );
+  expect(response.status).toBe(201);
+  expect(spawnedMinutes).toEqual([
+    {
+      meetingRunId: "run-resumed",
+      seed: "# Minutes\n\nExisting notes",
+    },
+  ]);
+  rmSync(tempDir, { recursive: true, force: true });
 });
 
 test("renderAutomatedRescuePrompt injects meeting context into the prompt", async () => {

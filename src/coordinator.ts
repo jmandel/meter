@@ -39,6 +39,7 @@ import type {
   MinutePromptConfig,
   MinuteVersionRecord,
   RestartMinuteJobRequest,
+  ResumeMeetingRunRequest,
   StartMinuteJobRequest,
   StopMinuteJobRequest,
   TranscriptionSegmentPayload,
@@ -463,6 +464,10 @@ export class CoordinatorApp {
       if (match && request.method === "POST") {
         return this.handleStopMeetingRun(match[1]);
       }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/resume$/);
+      if (match && request.method === "POST") {
+        return await this.handleResumeMeetingRun(request, match[1]);
+      }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/events$/);
       if (match && request.method === "GET") {
         return this.handleListEvents(url, match[1]);
@@ -786,12 +791,16 @@ export class CoordinatorApp {
     meetingRun: MeetingRunRecord,
     promptConfig: MinutePromptConfig,
     restartedFromMinuteJobId: string | null,
+    seedMinutesMarkdown: string | null = null,
   ): Promise<MinuteJobRecord> {
     const now = nowUnixMs();
     const minuteJobId = uuidv7(now);
     const workingDir = this.minuteRunDir(meetingRun.meeting_run_id);
     mkdirSync(workingDir, { recursive: true });
     const latestMinutesPath = path.join(workingDir, "minutes.md");
+    if (seedMinutesMarkdown !== null) {
+      await Bun.write(latestMinutesPath, seedMinutesMarkdown);
+    }
     const tmuxSessionName = promptConfig.provider === "claude_tmux"
       ? `minutes-${meetingRun.meeting_run_id}`
       : null;
@@ -828,7 +837,8 @@ export class CoordinatorApp {
         ...process.env,
         METER_MINUTE_TAKER_CONFIG_B64: encodeBase64Json({
           ...promptConfig,
-          reset_output: true,
+          reset_output: seedMinutesMarkdown === null,
+          resume_existing_minutes: seedMinutesMarkdown !== null,
           tmux_session: tmuxSessionName,
         }),
       },
@@ -941,6 +951,31 @@ export class CoordinatorApp {
     return createHash("sha256").update(text).digest("hex");
   }
 
+  private buildMinutePromptConfigFromMinuteJob(minuteJob: MinuteJobRecord): MinutePromptConfig {
+    return {
+      provider: minuteJob.provider,
+      prompt_template_id: minuteJob.prompt_template_id,
+      prompt_label: minuteJob.prompt_label,
+      user_prompt_body: minuteJob.user_prompt_body,
+      claude_model: minuteJob.claude_model,
+      claude_effort: minuteJob.claude_effort,
+      openrouter_model: minuteJob.openrouter_model,
+    };
+  }
+
+  private getSeedMinutesMarkdown(meetingRun: MeetingRunRecord): string | null {
+    const previousRun = this.getPreviousMeetingRun(meetingRun);
+    if (!previousRun) {
+      return null;
+    }
+    const previousMinuteJob = this.getLatestMinuteJob(previousRun.meeting_run_id);
+    if (!previousMinuteJob) {
+      return null;
+    }
+    const latestVersion = this.storage.getLatestMinuteVersionForMinuteJob(previousMinuteJob.minute_job_id);
+    return latestVersion?.content_markdown ?? null;
+  }
+
   private buildMinutePromptConfig(input: StartMinuteJobRequest | RestartMinuteJobRequest | null | undefined): MinutePromptConfig {
     const requestedTemplateId = input?.prompt_template_id?.trim() || DEFAULT_MINUTE_PROMPT_TEMPLATE_ID;
     const template = getMinutePromptTemplate(requestedTemplateId);
@@ -995,6 +1030,83 @@ export class CoordinatorApp {
 
   private resolveMeetingRunForZoomMeeting(meetingId: string, explicitMeetingRunId?: string | null): MeetingRunRecord | null {
     return this.resolveMeetingRunForRoom(this.zoomRoomIdFromMeetingId(meetingId), explicitMeetingRunId);
+  }
+
+  private listMeetingRunsForRoom(roomId: string): MeetingRunRecord[] {
+    return this.storage.listMeetingRunRecords({
+      room_id: roomId,
+      limit: 1_000,
+    });
+  }
+
+  private getResumeRootMeetingRunId(meetingRun: MeetingRunRecord): string | null {
+    const rootTag = meetingRun.tags.find((tag) => tag.startsWith("meter:resume-root:"));
+    if (!rootTag) {
+      return null;
+    }
+    const value = rootTag.slice("meter:resume-root:".length).trim();
+    return value || null;
+  }
+
+  private listMeetingRunsForZoomMeeting(meetingId: string, explicitMeetingRunId?: string | null): MeetingRunRecord[] {
+    if (explicitMeetingRunId) {
+      const explicit = this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId);
+      if (!explicit) {
+        return [];
+      }
+      const rootMeetingRunId = this.getResumeRootMeetingRunId(explicit);
+      if (!rootMeetingRunId) {
+        return [explicit];
+      }
+      return this.listMeetingRunsForRoom(explicit.room_id)
+        .filter((candidate) => candidate.meeting_run_id === rootMeetingRunId || this.getResumeRootMeetingRunId(candidate) === rootMeetingRunId)
+        .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at));
+    }
+    const current = this.resolveMeetingRunForZoomMeeting(meetingId);
+    if (!current) {
+      return [];
+    }
+    const rootMeetingRunId = this.getResumeRootMeetingRunId(current);
+    if (!rootMeetingRunId) {
+      return [current];
+    }
+    return this.listMeetingRunsForRoom(current.room_id)
+      .filter((candidate) => candidate.meeting_run_id === rootMeetingRunId || this.getResumeRootMeetingRunId(candidate) === rootMeetingRunId)
+      .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at));
+  }
+
+  private buildTranscriptMeetingContext(meetingRuns: MeetingRunRecord[]): MeetingRunRecord | null {
+    if (meetingRuns.length === 0) {
+      return null;
+    }
+    const sorted = [...meetingRuns].sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at));
+    const earliest = sorted[0] as MeetingRunRecord;
+    const latest = sorted[sorted.length - 1] as MeetingRunRecord;
+    return {
+      ...latest,
+      started_at: earliest.started_at ?? earliest.created_at,
+      created_at: earliest.created_at,
+      normalized_join_url: earliest.normalized_join_url,
+    };
+  }
+
+  private getPreviousMeetingRun(meetingRun: MeetingRunRecord): MeetingRunRecord | null {
+    const resumeRootMeetingRunId = this.getResumeRootMeetingRunId(meetingRun);
+    if (!resumeRootMeetingRunId) {
+      return null;
+    }
+    const priorRuns = this.listMeetingRunsForRoom(meetingRun.room_id)
+      .filter((candidate) => candidate.meeting_run_id !== meetingRun.meeting_run_id)
+      .filter((candidate) => candidate.meeting_run_id === resumeRootMeetingRunId || this.getResumeRootMeetingRunId(candidate) === resumeRootMeetingRunId)
+      .filter((candidate) => Date.parse(candidate.created_at) < Date.parse(meetingRun.created_at))
+      .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+    return priorRuns[0] ?? null;
+  }
+
+  private resolveMeetingRunWithMinutesForRoom(roomId: string): MeetingRunRecord | null {
+    const meetingRuns = this.listMeetingRunsForRoom(roomId);
+    return meetingRuns.find((item) => this.getLatestMinuteJob(item.meeting_run_id) !== null)
+      ?? this.resolveMeetingRunForRoom(roomId);
   }
 
   private recoverWorkerHandle(meetingRun: MeetingRunRecord, workerId: string | null): WorkerHandle | null {
@@ -1065,7 +1177,7 @@ export class CoordinatorApp {
         if (!meetingRun.started_at && patch.started_at_unix_ms === undefined) {
           patch.started_at_unix_ms = event.ts_unix_ms;
         }
-      } else if (event.kind === "audio.capture.stopped") {
+      } else if (event.kind === "audio.capture.stopped" || event.kind === "zoom.meeting.left") {
         patch.state = "stopping";
       } else if (event.kind === "system.worker.started") {
         patch.state = "starting";
@@ -1209,6 +1321,82 @@ export class CoordinatorApp {
     }
 
     return jsonResponse({ meeting_run: this.storage.getMeetingRunRecord(actualMeetingRunId) }, { status: 201 });
+  }
+
+  private async handleResumeMeetingRun(request: Request, meetingRunId: string): Promise<Response> {
+    const sourceRun = this.getMeetingRun(meetingRunId);
+    if (!sourceRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    if (!["completed", "failed", "aborted"].includes(sourceRun.state)) {
+      return errorResponse(409, "meeting_run_not_terminal", "Only terminal meeting runs can be resumed");
+    }
+
+    const body = await parseJsonBody<ResumeMeetingRunRequest>(request).catch(() => ({} as ResumeMeetingRunRequest));
+    const resumeRootMeetingRunId = this.getResumeRootMeetingRunId(sourceRun) ?? sourceRun.meeting_run_id;
+    const options = buildMeetingRunOptions(this.config, body.options ?? sourceRun.options);
+    const botName = body.bot_name?.trim() || sourceRun.bot_name || this.config.default_bot_name;
+    const tags = Array.from(new Set([
+      ...(sourceRun.tags ?? []),
+      ...((body.tags ?? []).map((item) => item.trim()).filter(Boolean)),
+      `meter:resume-root:${resumeRootMeetingRunId}`,
+      `meter:resumed-from:${sourceRun.meeting_run_id}`,
+    ]));
+    const initialized = await this.initializeMeetingRun({
+      normalized: normalizeZoomJoinUrl(sourceRun.normalized_join_url),
+      requested_by: body.requested_by ?? sourceRun.requested_by ?? null,
+      bot_name: botName,
+      tags,
+      options,
+    });
+
+    const workerLaunchConfig: WorkerLaunchConfig = {
+      app: this.config,
+      meeting_run_id: initialized.meeting_run_id,
+      room_id: sourceRun.room_id,
+      normalized_join_url: sourceRun.normalized_join_url,
+      bot_name: botName,
+      requested_by: body.requested_by ?? sourceRun.requested_by ?? null,
+      tags,
+      options,
+      paths: initialized.layout,
+      browser_token: randomToken(24),
+    };
+
+    try {
+      await this.spawnWorker(workerLaunchConfig);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.storage.patchMeetingRun(initialized.meeting_run_id, {
+        state: "failed",
+        updated_at_unix_ms: nowUnixMs(),
+        last_error_code: "worker_spawn_failed",
+        last_error_message: message,
+      });
+      return errorResponse(500, "worker_spawn_failed", "Failed to start worker", { message });
+    }
+
+    const shouldResumeMinutes = body.resume_minutes ?? Boolean(this.getLatestMinuteJob(sourceRun.meeting_run_id));
+    if (shouldResumeMinutes) {
+      const sourceMinuteJob = this.getLatestMinuteJob(sourceRun.meeting_run_id);
+      const seedMinutesMarkdown = sourceMinuteJob
+        ? this.storage.getLatestMinuteVersionForMinuteJob(sourceMinuteJob.minute_job_id)?.content_markdown ?? null
+        : null;
+      const promptConfig = sourceMinuteJob
+        ? this.buildMinutePromptConfigFromMinuteJob(sourceMinuteJob)
+        : this.buildMinutePromptConfig(null);
+      await this.spawnMinuteJob(
+        this.storage.getMeetingRunRecord(initialized.meeting_run_id) as MeetingRunRecord,
+        promptConfig,
+        null,
+        seedMinutesMarkdown,
+      );
+    }
+
+    return jsonResponse({
+      resumed_from_meeting_run_id: sourceRun.meeting_run_id,
+      meeting_run: this.storage.getMeetingRunRecord(initialized.meeting_run_id),
+    }, { status: 201 });
   }
 
   private async handleStartSimulation(request: Request): Promise<Response> {
@@ -1456,7 +1644,10 @@ export class CoordinatorApp {
   }
 
   private handleZoomMeetingMinutes(url: URL, meetingId: string): Response {
-    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const explicitMeetingRunId = url.searchParams.get("meeting_run_id");
+    const meetingRun = explicitMeetingRunId
+      ? this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId)
+      : this.resolveMeetingRunWithMinutesForRoom(this.zoomRoomIdFromMeetingId(meetingId));
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
@@ -1486,10 +1677,10 @@ export class CoordinatorApp {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
     const redirectUrl = new URL("/minutes-view", new URL(request.url).origin);
-    redirectUrl.searchParams.set("details", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes`);
+    redirectUrl.searchParams.set("details", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
     redirectUrl.searchParams.set("stream", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes/stream${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
     redirectUrl.searchParams.set("markdown", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes.md${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
-    redirectUrl.searchParams.set("transcript", `/v1/meeting-runs/${meetingRun.meeting_run_id}/transcript/view`);
+    redirectUrl.searchParams.set("transcript", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/transcript/view${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
     redirectUrl.searchParams.set("start", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/start`);
     redirectUrl.searchParams.set("restart", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/restart`);
     redirectUrl.searchParams.set("stop", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/stop`);
@@ -1507,7 +1698,7 @@ export class CoordinatorApp {
       return errorResponse(409, "minutes_already_running", "Minutes are already running for this meeting run");
     }
     const body = await parseJsonBody<StartMinuteJobRequest>(request).catch(() => ({} as StartMinuteJobRequest));
-    const minuteJob = await this.spawnMinuteJob(meetingRun, this.buildMinutePromptConfig(body), null);
+    const minuteJob = await this.spawnMinuteJob(meetingRun, this.buildMinutePromptConfig(body), null, this.getSeedMinutesMarkdown(meetingRun));
     return jsonResponse({ minute_job: minuteJob }, { status: 201 });
   }
 
@@ -1561,7 +1752,10 @@ export class CoordinatorApp {
   }
 
   private handleZoomMeetingMinutesMarkdown(url: URL, meetingId: string, request: Request): Response {
-    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const explicitMeetingRunId = url.searchParams.get("meeting_run_id");
+    const meetingRun = explicitMeetingRunId
+      ? this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId)
+      : this.resolveMeetingRunWithMinutesForRoom(this.zoomRoomIdFromMeetingId(meetingId));
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
@@ -2497,11 +2691,12 @@ export class CoordinatorApp {
   }
 
   private handleZoomMeetingTranscript(url: URL, meetingId: string): Response {
-    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const meetingRuns = this.listMeetingRunsForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const meetingRun = this.buildTranscriptMeetingContext(meetingRuns);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
-    return this.renderMarkdownTranscriptResponse(url, meetingRun);
+    return this.renderMarkdownTranscriptResponse(url, meetingRun, meetingRuns);
   }
 
   private handleMarkdownTranscript(url: URL, meetingRunId: string): Response {
@@ -2582,7 +2777,7 @@ export class CoordinatorApp {
     return meetingStartUnixMs + ((((hours * 60) + minutes) * 60 + seconds) * 1000) + millis;
   }
 
-  private renderMarkdownTranscriptResponse(url: URL, meetingRun: MeetingRunRecord): Response {
+  private renderMarkdownTranscriptResponse(url: URL, meetingRun: MeetingRunRecord, meetingRuns?: MeetingRunRecord[]): Response {
     const includes = this.parseTranscriptIncludes(url);
     if (includes instanceof Response) {
       return includes;
@@ -2593,25 +2788,15 @@ export class CoordinatorApp {
     if (sinceParam && sinceUnixMs === null) {
       return errorResponse(400, "invalid_request", "`since` must be a parseable timestamp");
     }
+    const scopedMeetingRuns = meetingRuns && meetingRuns.length > 0 ? meetingRuns : [meetingRun];
     const speech = includeSet.has("speech")
-      ? this.listTranscriptSpeechRecords(meetingRun.meeting_run_id)
+      ? this.listTranscriptSpeechRecordsForMeetingRuns(scopedMeetingRuns)
       : [];
     const chat = includeSet.has("chat")
-      ? this.listTranscriptChatRecords(meetingRun.meeting_run_id)
+      ? this.listTranscriptChatRecordsForMeetingRuns(scopedMeetingRuns)
       : [];
     const attendeeEvents = includeSet.has("joins")
-      ? [
-          ...this.storage.listEventRecords({
-            meeting_run_id: meetingRun.meeting_run_id,
-            kind: "zoom.attendee.joined",
-            limit: 10_000,
-          }),
-          ...this.storage.listEventRecords({
-            meeting_run_id: meetingRun.meeting_run_id,
-            kind: "zoom.attendee.left",
-            limit: 10_000,
-          }),
-        ].sort((left, right) => left.event_id - right.event_id || left.seq - right.seq) as EventRecord<ZoomAttendeePresencePayload>[]
+      ? this.listAttendeePresenceEventsForMeetingRuns(scopedMeetingRuns)
       : [];
     const markdown = this.renderMarkdownTranscript(meetingRun, speech, chat, attendeeEvents, {
       include: includes,
@@ -2626,8 +2811,16 @@ export class CoordinatorApp {
   }
 
   private listTranscriptSpeechRecords(meetingRunId: string): SpeechSegmentRecord[] {
+    return this.listTranscriptSpeechRecordsForMeetingRuns([this.getMeetingRun(meetingRunId)].filter((value): value is MeetingRunRecord => Boolean(value)));
+  }
+
+  private listTranscriptSpeechRecordsForMeetingRuns(meetingRuns: MeetingRunRecord[]): SpeechSegmentRecord[] {
+    if (meetingRuns.length === 0) {
+      return [];
+    }
     const events = this.storage.listEventRecords({
-      meeting_run_id: meetingRunId,
+      meeting_run_id: meetingRuns.length === 1 ? meetingRuns[0]?.meeting_run_id ?? null : null,
+      room_id: meetingRuns.length > 1 ? meetingRuns[0]?.room_id ?? null : null,
       kind: "transcription.segment.final",
       limit: 10_000,
     }) as EventRecord<TranscriptionSegmentPayload>[];
@@ -2658,8 +2851,16 @@ export class CoordinatorApp {
   }
 
   private listTranscriptChatRecords(meetingRunId: string): ChatMessageRecord[] {
+    return this.listTranscriptChatRecordsForMeetingRuns([this.getMeetingRun(meetingRunId)].filter((value): value is MeetingRunRecord => Boolean(value)));
+  }
+
+  private listTranscriptChatRecordsForMeetingRuns(meetingRuns: MeetingRunRecord[]): ChatMessageRecord[] {
+    if (meetingRuns.length === 0) {
+      return [];
+    }
     const events = this.storage.listEventRecords({
-      meeting_run_id: meetingRunId,
+      meeting_run_id: meetingRuns.length === 1 ? meetingRuns[0]?.meeting_run_id ?? null : null,
+      room_id: meetingRuns.length > 1 ? meetingRuns[0]?.room_id ?? null : null,
       kind: "zoom.chat.message",
       limit: 10_000,
     }) as EventRecord<ZoomChatMessagePayload>[];
@@ -2691,6 +2892,28 @@ export class CoordinatorApp {
       });
     }
     return [...latestByChatId.values()].sort((left, right) => left.event_id - right.event_id);
+  }
+
+  private listAttendeePresenceEventsForMeetingRuns(meetingRuns: MeetingRunRecord[]): EventRecord<ZoomAttendeePresencePayload>[] {
+    if (meetingRuns.length === 0) {
+      return [];
+    }
+    const meetingRunId = meetingRuns.length === 1 ? meetingRuns[0]?.meeting_run_id ?? null : null;
+    const roomId = meetingRuns.length > 1 ? meetingRuns[0]?.room_id ?? null : null;
+    return [
+      ...this.storage.listEventRecords({
+        meeting_run_id: meetingRunId,
+        room_id: roomId,
+        kind: "zoom.attendee.joined",
+        limit: 10_000,
+      }),
+      ...this.storage.listEventRecords({
+        meeting_run_id: meetingRunId,
+        room_id: roomId,
+        kind: "zoom.attendee.left",
+        limit: 10_000,
+      }),
+    ].sort((left, right) => left.event_id - right.event_id || left.seq - right.seq) as EventRecord<ZoomAttendeePresencePayload>[];
   }
 
   private renderMarkdownTranscript(
@@ -2929,11 +3152,15 @@ export class CoordinatorApp {
   }
 
   private handleZoomMeetingAttendees(url: URL, meetingId: string): Response {
-    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const meetingRuns = this.listMeetingRunsForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const meetingRun = this.buildTranscriptMeetingContext(meetingRuns);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
-    return jsonResponse(this.listResponse(this.listAttendeeSummaries(meetingRun)));
+    return jsonResponse(this.listResponse(this.buildAttendeeSummaries(
+      meetingRun,
+      this.listAttendeePresenceEventsForMeetingRuns(meetingRuns),
+    )));
   }
 
   private handleMarkdownAttendees(meetingRunId: string): Response {
@@ -2951,11 +3178,15 @@ export class CoordinatorApp {
   }
 
   private handleZoomMeetingMarkdownAttendees(url: URL, meetingId: string): Response {
-    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const meetingRuns = this.listMeetingRunsForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const meetingRun = this.buildTranscriptMeetingContext(meetingRuns);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
-    const markdown = this.renderMarkdownAttendees(meetingRun, this.listAttendeeSummaries(meetingRun));
+    const markdown = this.renderMarkdownAttendees(
+      meetingRun,
+      this.buildAttendeeSummaries(meetingRun, this.listAttendeePresenceEventsForMeetingRuns(meetingRuns)),
+    );
     return new Response(markdown, {
       headers: {
         "content-type": "text/markdown; charset=utf-8",
@@ -3224,7 +3455,7 @@ export class CoordinatorApp {
 
         const initialMeetingRun = filters.meeting_run_id
           ? this.getMeetingRun(filters.meeting_run_id)
-          : (filters.room_id ? this.resolveMeetingRunForRoom(filters.room_id) : null);
+          : (filters.room_id ? this.resolveMeetingRunWithMinutesForRoom(filters.room_id) : null);
         const initialMinuteJob = initialMeetingRun ? this.getLatestMinuteJob(initialMeetingRun.meeting_run_id) : null;
         const initialLatestVersion = initialMinuteJob
           ? this.storage.getLatestMinuteVersionForMinuteJob(initialMinuteJob.minute_job_id)
@@ -3412,26 +3643,28 @@ export class CoordinatorApp {
   }
 
   private handleZoomMeetingStream(request: Request, url: URL, meetingId: string): Response {
-    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const explicitMeetingRunId = url.searchParams.get("meeting_run_id");
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
     return this.handleEventStream(request, {
-      meeting_run_id: meetingRun.meeting_run_id,
-      room_id: null,
+      meeting_run_id: explicitMeetingRunId ? meetingRun.meeting_run_id : null,
+      room_id: explicitMeetingRunId ? null : meetingRun.room_id,
       kind: url.searchParams.get("kind"),
       source: url.searchParams.get("source"),
     });
   }
 
   private handleZoomMeetingMinutesStream(request: Request, url: URL, meetingId: string): Response {
-    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, url.searchParams.get("meeting_run_id"));
+    const explicitMeetingRunId = url.searchParams.get("meeting_run_id");
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
     return this.handleMinuteStream(request, {
-      meeting_run_id: meetingRun.meeting_run_id,
-      room_id: null,
+      meeting_run_id: explicitMeetingRunId ? meetingRun.meeting_run_id : null,
+      room_id: explicitMeetingRunId ? null : meetingRun.room_id,
     });
   }
 

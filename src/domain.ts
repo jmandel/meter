@@ -97,6 +97,14 @@ export interface CreateMeetingRunRequest {
   options?: Partial<MeetingRunOptions>;
 }
 
+export interface ResumeMeetingRunRequest {
+  bot_name?: string;
+  requested_by?: string | null;
+  tags?: string[];
+  options?: Partial<MeetingRunOptions>;
+  resume_minutes?: boolean | null;
+}
+
 export interface MeetingRunOptions {
   open_chat_panel: boolean;
   enable_transcription: boolean;
@@ -467,7 +475,7 @@ export interface AudioCaptureStartedPayload {
 }
 
 export interface AudioCaptureStoppedPayload {
-  reason: "ended" | "manual" | "error";
+  reason: "ended" | "manual" | "error" | "audio-track-ended";
 }
 
 export interface AudioChunkWrittenPayload {
@@ -659,7 +667,7 @@ export interface BrowserCaptureStartedMessage {
 
 export interface BrowserCaptureStoppedMessage {
   type: "capture.stopped";
-  reason: "ended" | "manual" | "error";
+  reason: "ended" | "manual" | "error" | "audio-track-ended";
   ts_unix_ms: number;
 }
 

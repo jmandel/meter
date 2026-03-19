@@ -299,6 +299,7 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
         }));
 
         let currentSpeaker = null;
+        let meetingExitReported = false;
         function emitDomEvent(kind, payload, raw) {
           if (session.readyState !== WebSocket.OPEN) {
             return;
@@ -316,6 +317,34 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
               payload,
             },
           }));
+        }
+
+        function reportMeetingExit(reason) {
+          if (meetingExitReported) {
+            return;
+          }
+          meetingExitReported = true;
+          emitDomEvent("zoom.meeting.left", {
+            page_url: location.href,
+            reason,
+            left_at_unix_ms: Date.now(),
+          });
+          setPhase("stopped");
+          emitLifecycleStop(session, "ended");
+          try {
+            session.close();
+          } catch {}
+        }
+
+        function reportCaptureStopped(reason) {
+          if (meetingExitReported) {
+            return;
+          }
+          setPhase("stopped");
+          emitLifecycleStop(session, reason);
+          try {
+            session.close();
+          } catch {}
         }
 
         function firstMatchingElement(selectors) {
@@ -432,6 +461,48 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
             ".suspension-window-container",
           ]);
           return readSpeakerName(suspended);
+        }
+
+        function detectMeetingEndedReason() {
+          if (state.phase !== "streaming") {
+            return null;
+          }
+          const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim().toLowerCase();
+          const endedPhrases = [
+            "this meeting has ended",
+            "ended this meeting",
+            "left the meeting",
+            "you have left the meeting",
+            "removed you from the meeting",
+            "you have been removed",
+            "has been ended by host",
+          ];
+          for (const phrase of endedPhrases) {
+            if (bodyText.includes(phrase)) {
+              return phrase;
+            }
+          }
+          const hasMeetingApp = Boolean(document.getElementById("meeting-app"));
+          if (hasMeetingApp) {
+            return null;
+          }
+          const visibleLabels = Array.from(document.querySelectorAll("button,[role='button'],a"))
+            .flatMap((element) => {
+              if (!(element instanceof HTMLElement)) {
+                return [];
+              }
+              const rect = element.getBoundingClientRect();
+              if (!rect.width || !rect.height) {
+                return [];
+              }
+              const label = (element.getAttribute("aria-label") || element.textContent || "").trim().toLowerCase();
+              return label ? [label] : [];
+            });
+          if (visibleLabels.some((label) => /leave meeting|return to home|ok|close/.test(label))
+            && /(ended|left the meeting|removed)/.test(bodyText)) {
+            return "post-meeting-shell";
+          }
+          return null;
         }
 
         function scanSpeaker() {
@@ -841,16 +912,23 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           });
         }
 
+        const meetingExitPoll = setInterval(() => {
+          const reason = detectMeetingEndedReason();
+          if (reason) {
+            reportMeetingExit(reason);
+            clearInterval(meetingExitPoll);
+          }
+        }, 2000);
+
         audioTracks[0].addEventListener("ended", () => {
-          setPhase("stopped");
-          emitLifecycleStop(session, "ended");
-          session.close();
+          reportCaptureStopped("audio-track-ended");
           if (audioContext) {
             void audioContext.close();
           }
         });
 
         session.addEventListener("close", () => {
+          clearInterval(meetingExitPoll);
           if (state.phase !== "error" && state.phase !== "stopped") {
             setPhase("stopped");
           }

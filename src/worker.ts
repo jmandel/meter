@@ -3,6 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type {
   AppendEventsBatchRequest,
+  ArtifactWrittenPayload,
   AudioCaptureStartedPayload,
   AudioChunkWrittenPayload,
   BrowserConsolePayload,
@@ -48,6 +49,7 @@ interface RuntimePaths {
   event_journal_path: string;
   archive_audio_dir: string;
   archive_mp3_path: string;
+  screenshots_dir: string;
   live_pcm_dir: string | null;
   worker_log_path: string;
   browser_log_path: string;
@@ -59,6 +61,9 @@ interface RuntimePaths {
   transcripts_provider_raw_path: string;
   transcripts_segments_path: string;
 }
+
+const PERIODIC_SCREENSHOT_INTERVAL_MS = 60_000;
+const PERIODIC_SCREENSHOT_JPEG_QUALITY = 25;
 
 interface PendingEventBatch {
   first_seq: number;
@@ -186,12 +191,15 @@ export class WorkerProcess {
   private cdp?: CDPSession;
   private heartbeatTimer?: Timer;
   private captureHealthTimer?: Timer;
+  private periodicScreenshotTimer?: Timer;
   private server?: Bun.Server;
   private readonly chromeUserDataDir: string;
   private readonly startedAtUnixMs = nowUnixMs();
   private endedAtUnixMs: number | null = null;
   private transcriptionAdapter: TranscriptionAdapter = new NoopTranscriptionAdapter();
   private transcriptionInitialized = false;
+  private screenshotSeq = 1;
+  private screenshotCaptureInFlight = false;
   private doneResolve?: () => void;
   private donePromise = new Promise<void>((resolve) => {
     this.doneResolve = resolve;
@@ -204,6 +212,7 @@ export class WorkerProcess {
       event_journal_path: launch.paths.event_journal_path,
       archive_audio_dir: launch.paths.archive_audio_dir,
       archive_mp3_path: path.join(launch.paths.archive_audio_dir, "meeting.mp3"),
+      screenshots_dir: path.join(launch.paths.data_dir, "artifacts", "screenshots"),
       live_pcm_dir: launch.paths.live_pcm_dir,
       worker_log_path: launch.paths.worker_log_path,
       browser_log_path: launch.paths.browser_log_path,
@@ -660,6 +669,50 @@ export class WorkerProcess {
     this.captureHealthTimer = setInterval(() => {
       void this.monitorCaptureHealth();
     }, 5000);
+  }
+
+  private startPeriodicScreenshotCapture(): void {
+    if (this.periodicScreenshotTimer) {
+      return;
+    }
+    this.periodicScreenshotTimer = setInterval(() => {
+      void this.capturePeriodicScreenshot();
+    }, PERIODIC_SCREENSHOT_INTERVAL_MS);
+  }
+
+  private async capturePeriodicScreenshot(): Promise<void> {
+    if (this.screenshotCaptureInFlight || !this.cdp || this.stopping || this.state !== "capturing") {
+      return;
+    }
+    this.screenshotCaptureInFlight = true;
+    try {
+      const screenshot = await this.cdp.send("Page.captureScreenshot", {
+        format: "jpeg",
+        quality: PERIODIC_SCREENSHOT_JPEG_QUALITY,
+      }) as { data?: string };
+      if (!screenshot?.data) {
+        throw new Error("CDP did not return screenshot data");
+      }
+      const createdAtUnixMs = nowUnixMs();
+      const artifactId = uuidv7(createdAtUnixMs);
+      const filePath = path.join(this.paths.screenshots_dir, `${String(this.screenshotSeq).padStart(6, "0")}.jpg`);
+      this.screenshotSeq += 1;
+      const bytes = Buffer.from(screenshot.data, "base64");
+      await Bun.write(filePath, bytes, { createPath: true });
+      const payload: ArtifactWrittenPayload = {
+        artifact_id: artifactId,
+        kind: "screenshot",
+        path: filePath,
+        content_type: "image/jpeg",
+        byte_length: bytes.byteLength,
+      };
+      await this.emitEvent("browser", "artifact.written", payload, undefined, createdAtUnixMs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.browserLog(`periodic screenshot capture failed: ${message}`);
+    } finally {
+      this.screenshotCaptureInFlight = false;
+    }
   }
 
   private async monitorCaptureHealth(): Promise<void> {
@@ -1157,19 +1210,40 @@ export class WorkerProcess {
     this.lastTranscriptionActivityAtUnixMs = message.ts_unix_ms;
     await this.setState("capturing");
     await this.ensureArchiveEncoder(message);
+    this.startPeriodicScreenshotCapture();
     await this.browserLog(`capture started archive=${message.archive_stream_id} live=${message.live_stream_id}`);
     await this.emitEvent("audio_capture", "audio.capture.started", payload, message, message.ts_unix_ms);
     await this.getTranscriptionAdapter().start(payload);
   }
 
+  private isRecoverableCaptureStopReason(reason: BrowserCaptureStoppedMessage["reason"]): boolean {
+    return reason === "audio-track-ended";
+  }
+
   private async handleCaptureStopped(message: BrowserCaptureStoppedMessage): Promise<void> {
-    this.browserCaptureExpected = false;
+    const recoverable = this.isRecoverableCaptureStopReason(message.reason);
+    this.browserCaptureExpected = recoverable;
     this.transcriptionSessionActive = false;
     await this.browserLog(`capture stopped reason=${message.reason}`);
     await this.emitEvent("audio_capture", "audio.capture.stopped", {
       reason: message.reason,
     }, message, message.ts_unix_ms);
     await this.getTranscriptionAdapter().stop(message.reason);
+    if (recoverable) {
+      await this.browserLog(`capture stop reason=${message.reason} is recoverable; restarting browser capture bootstrap`);
+      if (this.cdp && !this.captureRecoveryInFlight && !this.stopping && !isTerminalState(this.state)) {
+        this.captureRecoveryInFlight = true;
+        try {
+          await this.injectCaptureBootstrap(this.cdp);
+        } catch (error) {
+          const messageText = error instanceof Error ? error.message : String(error);
+          await this.browserLog(`recoverable capture restart failed: ${messageText}`);
+        } finally {
+          this.captureRecoveryInFlight = false;
+        }
+      }
+      return;
+    }
     if (this.launch.options.auto_stop_when_meeting_ends) {
       void this.complete("completed");
     }
@@ -1183,6 +1257,9 @@ export class WorkerProcess {
     }
     await this.browserLog(`dom event ${event.kind}`);
     await this.emitEvent(event.source, event.kind, event.payload, message, event.ts_unix_ms);
+    if (event.kind === "zoom.meeting.left" && this.launch.options.auto_stop_when_meeting_ends && !this.stopping && !isTerminalState(this.state)) {
+      void this.complete("completed");
+    }
   }
 
   private withCurrentSpeaker(kind: EventKind, payload: unknown): unknown {
@@ -1465,6 +1542,9 @@ export class WorkerProcess {
     }
     if (this.captureHealthTimer) {
       clearInterval(this.captureHealthTimer);
+    }
+    if (this.periodicScreenshotTimer) {
+      clearInterval(this.periodicScreenshotTimer);
     }
     await this.attemptGracefulLeave();
     await this.stopChrome();

@@ -526,6 +526,98 @@ test("worker streams realtime Mistral transcripts and persists raw plus derived 
   }
 });
 
+test("worker does not complete the run when browser capture reports audio-track-ended", async () => {
+  const dataRoot = await createTempDir("meter-worker-recoverable-stop-");
+  const coordinatorToken = "coordinator-token-recoverable-stop";
+  const coordinator = await startFakeCoordinator(coordinatorToken);
+
+  process.env.METER_DISABLE_BROWSER_AUTOMATION = "1";
+
+  try {
+    const layout = await createMeetingRunLayout(dataRoot, "meeting-run-test", 1_710_000_000_000, false);
+    const launch = buildWorkerLaunchConfig(coordinator.baseUrl, coordinatorToken, dataRoot, layout);
+    launch.app.transcription_provider = "none";
+    launch.options.enable_transcription = false;
+
+    const worker = new WorkerProcess(launch);
+    const workerPromise = worker.start();
+
+    const registration = await Promise.race([
+      coordinator.state.registration.promise,
+      sleep(2_000).then(() => {
+        throw new Error("Worker did not register");
+      }),
+    ]);
+
+    const browserWs = await openWebSocket(
+      `ws://127.0.0.1:${registration.ingest_port}/internal/browser/session?token=${launch.browser_token}`,
+    );
+
+    const baseTs = 1_710_000_300_000;
+    const hello: BrowserHelloMessage = {
+      type: "hello",
+      page_url: "https://zoom.us/j/123456789",
+      user_agent: "bun-test",
+      ts_unix_ms: baseTs,
+    };
+    const captureStarted: BrowserCaptureStartedMessage = {
+      type: "capture.started",
+      archive_stream_id: "archive-1",
+      live_stream_id: "live-1",
+      archive_content_type: "audio/mpeg",
+      archive_codec: "mp3",
+      pcm_sample_rate_hz: 16_000,
+      pcm_channels: 1,
+      ts_unix_ms: baseTs + 5,
+    };
+    const captureStopped: BrowserCaptureStoppedMessage = {
+      type: "capture.stopped",
+      reason: "audio-track-ended",
+      ts_unix_ms: baseTs + 2_000,
+    };
+    const meetingLeft: BrowserDomEventMessage = {
+      type: "dom.event",
+      event: {
+        meeting_run_id: "meeting-run-test",
+        room_id: "room-test",
+        seq: 0,
+        source: "zoom_dom",
+        kind: "zoom.meeting.left",
+        ts_unix_ms: baseTs + 4_000,
+        payload: {
+          reason: "this meeting has ended",
+          left_at_unix_ms: baseTs + 4_000,
+          page_url: "https://zoom.us/post-meeting",
+        },
+      },
+    };
+
+    browserWs.send(JSON.stringify(hello));
+    browserWs.send(JSON.stringify(captureStarted));
+    browserWs.send(JSON.stringify(captureStopped));
+    await sleep(250);
+
+    expect(coordinator.state.completedRun).toBeNull();
+    expect(
+      coordinator.state.events.find((event) => event.kind === "audio.capture.stopped")?.payload,
+    ).toMatchObject({
+      reason: "audio-track-ended",
+    });
+
+    browserWs.send(JSON.stringify(meetingLeft));
+
+    await Promise.race([
+      coordinator.state.completion.promise,
+      sleep(4_000).then(() => {
+        throw new Error("Worker did not complete after explicit meeting end");
+      }),
+    ]);
+    await workerPromise;
+  } finally {
+    coordinator.server.stop(true);
+  }
+});
+
 test("worker writes a single MP3 archive from backend-owned PCM capture", async () => {
   const dataRoot = await createTempDir("meter-archive-");
   const coordinatorToken = "coordinator-token-archive";

@@ -25,18 +25,24 @@ export function buildSystemPrompt(config: {
   return `${base}\n\n## Minutes Guidance\n\n${userPromptBody}`;
 }
 
-export function buildInitialPrompt(): string {
+export function buildInitialPrompt(resumeExistingMinutes = false): string {
+  if (resumeExistingMinutes) {
+    return "I'm resuming an existing minutes.md. Transcript chunks will be pasted directly into this conversation. Read and continue updating the current minutes.md instead of starting over, use the transcript's join/leave lines as the attendee source, tolerate repeated growing speaker turns, and record action items inline as TODO(Name): ...";
+  }
   return "I'm ready to take meeting minutes. Transcript chunks will be pasted directly into this conversation. I'll maintain minutes.md incrementally, use the transcript's join/leave lines as the attendee source, tolerate repeated growing speaker turns, and record action items inline as TODO(Name): ...";
 }
 
 export function formatChunkMessage(
   chunk: { segmentIndex: number; content: string; isFirst: boolean },
+  resumeExistingMinutes = false,
 ): string {
   const header = chunk.isFirst
     ? `--- Transcript chunk ${chunk.segmentIndex} (initial) ---`
     : `--- Transcript chunk ${chunk.segmentIndex} ---`;
   const instruction = chunk.isFirst
-    ? "Create minutes.md with initial minutes. Use join/leave lines in the transcript to maintain attendees. If you include an attendees section, use one bullet per person, never one comma-separated mega-bullet."
+    ? resumeExistingMinutes
+      ? "Update the existing minutes.md with this resumed transcript content. Preserve the current structure and continue the document instead of replacing it. If you include an attendees section, use one bullet per person, never one comma-separated mega-bullet."
+      : "Create minutes.md with initial minutes. Use join/leave lines in the transcript to maintain attendees. If you include an attendees section, use one bullet per person, never one comma-separated mega-bullet."
     : "Update minutes.md with this content. The first line may repeat a previously seen growing speaker turn.";
   return `${header}\n${chunk.content}\n--- end chunk ---\n${instruction}`;
 }
