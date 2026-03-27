@@ -60,6 +60,7 @@ function buildMeetingRun(overrides: Partial<MeetingRunRecord> = {}): MeetingRunR
     ended_at: null,
     created_at: "2026-03-12T06:48:00.000Z",
     updated_at: "2026-03-12T06:48:05.000Z",
+    minutes_enabled: false,
     worker: null,
     paths: {
       data_dir: "/tmp/meter-test",
@@ -470,6 +471,32 @@ test("renderMarkdownTranscript supports since with visible line timestamps and c
   expect(markdown).not.toContain("[cursor=");
 });
 
+test("renderMarkdownTranscript supports until with visible line timestamps", () => {
+  const app = new CoordinatorApp(buildConfig());
+  const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
+    meetingRun: MeetingRunRecord,
+    speech: SpeechSegmentRecord[],
+    chat?: ChatMessageRecord[],
+    attendeeEvents?: EventRecord<ZoomAttendeePresencePayload>[],
+    options?: {
+      include?: Array<"speech" | "joins" | "chat">;
+      since_unix_ms?: number | null;
+      until_unix_ms?: number | null;
+    },
+  ) => string;
+
+  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeechWithGrowingTurn(), buildChat(), buildAttendeeEvents(), {
+    include: ["speech", "joins", "chat"],
+    until_unix_ms: Date.parse("2026-03-12T06:48:21.000Z"),
+  });
+
+  expect(markdown).toContain("# 2193058682");
+  expect(markdown).toContain("[00:10 spk=\"Judge mobile\"] Opening remarks continued thought");
+  expect(markdown).toContain("[00:20 chat id=1 replies=1 from=\"Judge mobile\" to=Everyone] Ahoy");
+  expect(markdown).toContain("[00:21 chat id=2 reply-to=1 from=\"Josh Mandel\" to=Everyone] Reply text");
+  expect(markdown).not.toContain("[00:30 spk=\"Josh Mandel\"] Follow up");
+});
+
 test("renderMarkdownTranscript coalesces continuous unknown-speaker segments", () => {
   const app = new CoordinatorApp(buildConfig());
   const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
@@ -832,6 +859,7 @@ test("handleResumeMeetingRun creates a successor run and seeds resumed minutes",
     meeting_run_id: "run-completed",
     state: "completed",
     ended_at: "2026-03-12T06:50:00.000Z",
+    minutes_enabled: true,
   });
   const resumedRun = buildMeetingRun({
     meeting_run_id: "run-resumed",
@@ -847,8 +875,13 @@ test("handleResumeMeetingRun creates a successor run and seeds resumed minutes",
     layout: await createMeetingRunLayout(tempDir, "run-resumed", Date.parse("2026-03-12T06:51:00.000Z"), false),
   });
   app.spawnWorker = async () => undefined;
-  app.spawnMinuteJob = async (meetingRun: MeetingRunRecord, _promptConfig: unknown, _restartedFrom: string | null, seed: string | null) => {
-    spawnedMinutes.push({ meetingRunId: meetingRun.meeting_run_id, seed });
+  app.spawnMinuteJob = async (
+    meetingRun: MeetingRunRecord,
+    _promptConfig: unknown,
+    _restartedFrom: string | null,
+    options?: { seed_minutes_markdown?: string | null },
+  ) => {
+    spawnedMinutes.push({ meetingRunId: meetingRun.meeting_run_id, seed: options?.seed_minutes_markdown ?? null });
     return {
       minute_job_id: "minute-job-resumed",
       meeting_run_id: meetingRun.meeting_run_id,
@@ -915,6 +948,182 @@ test("handleResumeMeetingRun creates a successor run and seeds resumed minutes",
     },
   ]);
   rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("handleResumeMeetingRun does not resume minutes when they were disabled on the source run", async () => {
+  const app = new CoordinatorApp(buildConfig()) as any;
+  const tempDir = mkdtempSync(path.join("/tmp", "meter-resume-test-"));
+  const sourceRun = buildMeetingRun({
+    meeting_run_id: "run-completed",
+    state: "completed",
+    ended_at: "2026-03-12T06:50:00.000Z",
+    minutes_enabled: false,
+  });
+  const resumedRun = buildMeetingRun({
+    meeting_run_id: "run-resumed",
+    state: "pending",
+    created_at: "2026-03-12T06:51:00.000Z",
+    updated_at: "2026-03-12T06:51:00.000Z",
+  });
+  const spawnedMinutes: Array<{ meetingRunId: string; seed: string | null }> = [];
+
+  app.getMeetingRun = (meetingRunId: string) => (meetingRunId === "run-completed" ? sourceRun : resumedRun);
+  app.initializeMeetingRun = async () => ({
+    meeting_run_id: "run-resumed",
+    layout: await createMeetingRunLayout(tempDir, "run-resumed", Date.parse("2026-03-12T06:51:00.000Z"), false),
+  });
+  app.spawnWorker = async () => undefined;
+  app.spawnMinuteJob = async (meetingRun: MeetingRunRecord, _promptConfig: unknown, _restartedFrom: string | null, options?: { seed_minutes_markdown?: string | null }) => {
+    spawnedMinutes.push({ meetingRunId: meetingRun.meeting_run_id, seed: options?.seed_minutes_markdown ?? null });
+    return {
+      minute_job_id: "minute-job-resumed",
+      meeting_run_id: meetingRun.meeting_run_id,
+    };
+  };
+  app.getLatestMinuteJob = () => ({
+    minute_job_id: "minute-job-source",
+    meeting_run_id: "run-completed",
+    room_id: "zoom:2193058682",
+    state: "completed",
+    provider: "openrouter_patch",
+    tmux_session_name: null,
+    command: null,
+    prompt_template_id: "default",
+    prompt_label: "Default",
+    prompt_hash: null,
+    user_prompt_body: "Keep concise minutes",
+    claude_model: null,
+    claude_effort: null,
+    openrouter_model: "openai/gpt-4.1-mini",
+    working_dir: "/tmp/meter-test",
+    latest_minutes_path: "/tmp/meter-test/minutes.md",
+    latest_content_sha256: null,
+    latest_version_seq: 1,
+    started_at: "2026-03-12T06:48:00.000Z",
+    ended_at: "2026-03-12T06:50:00.000Z",
+    last_update_at: "2026-03-12T06:50:00.000Z",
+    restarted_from_minute_job_id: null,
+    last_error: null,
+  });
+  app.storage = {
+    getMeetingRunRecord: (meetingRunId: string) => (meetingRunId === "run-resumed" ? resumedRun : sourceRun),
+    getLatestMinuteVersionForMinuteJob: () => ({
+      minute_version_id: "minute-version-source",
+      minute_job_id: "minute-job-source",
+      meeting_run_id: "run-completed",
+      room_id: "zoom:2193058682",
+      seq: 1,
+      status: "final",
+      content_markdown: "# Minutes\n\nExisting notes",
+      content_sha256: "sha",
+      created_at: "2026-03-12T06:50:00.000Z",
+    }),
+    listMeetingRunRecords: () => [resumedRun, sourceRun],
+  };
+
+  const response = await app.handleResumeMeetingRun(
+    new Request("http://127.0.0.1:3100/v1/meeting-runs/run-completed/resume", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    }),
+    "run-completed",
+  );
+  expect(response.status).toBe(201);
+  expect(spawnedMinutes).toEqual([]);
+  rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("handleRecoverMinutes seeds the latest minutes snapshot and uses recover mode", async () => {
+  const app = new CoordinatorApp(buildConfig()) as any;
+  const meetingRun = buildMeetingRun({
+    meeting_run_id: "run-live",
+    state: "capturing",
+    minutes_enabled: true,
+  });
+  const spawned: Array<{
+    meetingRunId: string;
+    restartedFrom: string | null;
+    seed: string | null;
+    launchMode: string | null;
+  }> = [];
+  const latestMinuteJob = {
+    minute_job_id: "minute-job-source",
+    meeting_run_id: "run-live",
+    room_id: "zoom:2193058682",
+    state: "failed",
+    provider: "openrouter_patch",
+    tmux_session_name: null,
+    command: null,
+    prompt_template_id: "default",
+    prompt_label: "Default",
+    prompt_hash: null,
+    user_prompt_body: "Keep concise minutes",
+    claude_model: null,
+    claude_effort: null,
+    openrouter_model: "openai/gpt-4.1-mini",
+    working_dir: "/tmp/meter-test",
+    latest_minutes_path: "/tmp/meter-test/minutes.md",
+    latest_content_sha256: null,
+    latest_version_seq: 1,
+    started_at: "2026-03-12T06:48:00.000Z",
+    ended_at: "2026-03-12T06:50:00.000Z",
+    last_update_at: "2026-03-12T06:50:00.000Z",
+    restarted_from_minute_job_id: null,
+    last_error: null,
+  };
+
+  app.getMeetingRun = () => meetingRun;
+  app.getLatestMinuteJob = () => latestMinuteJob;
+  app.spawnMinuteJob = async (
+    run: MeetingRunRecord,
+    _promptConfig: unknown,
+    restartedFrom: string | null,
+    options?: { seed_minutes_markdown?: string | null; launch_mode?: string | null },
+  ) => {
+    spawned.push({
+      meetingRunId: run.meeting_run_id,
+      restartedFrom,
+      seed: options?.seed_minutes_markdown ?? null,
+      launchMode: options?.launch_mode ?? null,
+    });
+    return {
+      minute_job_id: "minute-job-recovered",
+      meeting_run_id: run.meeting_run_id,
+    };
+  };
+  app.storage = {
+    getLatestMinuteVersionForMinuteJob: () => ({
+      minute_version_id: "minute-version-source",
+      minute_job_id: "minute-job-source",
+      meeting_run_id: "run-live",
+      room_id: "zoom:2193058682",
+      seq: 1,
+      status: "final",
+      content_markdown: "# Minutes\n\nRecovered notes",
+      content_sha256: "sha",
+      created_at: "2026-03-12T06:50:00.000Z",
+    }),
+  };
+
+  const response = await app.handleRecoverMinutes(
+    new Request("http://127.0.0.1:3100/v1/meeting-runs/run-live/minutes/recover", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    }),
+    "run-live",
+  );
+
+  expect(response.status).toBe(201);
+  expect(spawned).toEqual([
+    {
+      meetingRunId: "run-live",
+      restartedFrom: "minute-job-source",
+      seed: "# Minutes\n\nRecovered notes",
+      launchMode: "recover",
+    },
+  ]);
 });
 
 test("renderAutomatedRescuePrompt injects meeting context into the prompt", async () => {
@@ -1112,6 +1321,7 @@ process.on("SIGTERM", () => {
       tags: [],
       options: buildMeetingRun().options,
       paths: layout,
+      minutes_enabled: false,
     });
 
     const startResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/start`, {

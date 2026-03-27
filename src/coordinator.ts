@@ -39,6 +39,7 @@ import type {
   MinutePromptConfig,
   MinuteVersionRecord,
   RestartMinuteJobRequest,
+  RecoverMinuteJobRequest,
   ResumeMeetingRunRequest,
   StartMinuteJobRequest,
   StopMinuteJobRequest,
@@ -146,6 +147,8 @@ interface MinuteJobHandle {
   debounce_timer: Timer | null;
   poll_timer: Timer | null;
 }
+
+type MinuteJobLaunchMode = "normal" | "restart_replay" | "recover";
 
 interface SseSubscriber {
   send(record: EventRecord): void;
@@ -500,6 +503,10 @@ export class CoordinatorApp {
       if (match && request.method === "POST") {
         return await this.handleRestartMinutes(request, match[1]);
       }
+      match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/recover$/);
+      if (match && request.method === "POST") {
+        return await this.handleRecoverMinutes(request, match[1]);
+      }
       match = url.pathname.match(/^\/v1\/meeting-runs\/([^/]+)\/minutes\/stop$/);
       if (match && request.method === "POST") {
         return await this.handleStopMinutes(request, match[1]);
@@ -791,13 +798,17 @@ export class CoordinatorApp {
     meetingRun: MeetingRunRecord,
     promptConfig: MinutePromptConfig,
     restartedFromMinuteJobId: string | null,
-    seedMinutesMarkdown: string | null = null,
+    options?: {
+      seed_minutes_markdown?: string | null;
+      launch_mode?: MinuteJobLaunchMode;
+    },
   ): Promise<MinuteJobRecord> {
     const now = nowUnixMs();
     const minuteJobId = uuidv7(now);
     const workingDir = this.minuteRunDir(meetingRun.meeting_run_id);
     mkdirSync(workingDir, { recursive: true });
     const latestMinutesPath = path.join(workingDir, "minutes.md");
+    const seedMinutesMarkdown = options?.seed_minutes_markdown ?? null;
     if (seedMinutesMarkdown !== null) {
       await Bun.write(latestMinutesPath, seedMinutesMarkdown);
     }
@@ -840,6 +851,7 @@ export class CoordinatorApp {
           reset_output: seedMinutesMarkdown === null,
           resume_existing_minutes: seedMinutesMarkdown !== null,
           tmux_session: tmuxSessionName,
+          launch_mode: options?.launch_mode ?? "normal",
         }),
       },
     });
@@ -862,6 +874,10 @@ export class CoordinatorApp {
     this.minuteJobsByMeetingRunId.set(meetingRun.meeting_run_id, handle);
     this.minuteJobsByMinuteJobId.set(minuteJobId, handle);
     this.watchMinuteJob(handle);
+    this.storage.patchMeetingRun(meetingRun.meeting_run_id, {
+      minutes_enabled: true,
+      updated_at_unix_ms: nowUnixMs(),
+    });
 
     this.storage.patchMinuteJob(minuteJobId, { state: "running" });
     const startTs = nowUnixMs();
@@ -1258,6 +1274,7 @@ export class CoordinatorApp {
       tags: input.tags,
       options: input.options,
       paths: layout,
+      minutes_enabled: false,
     });
 
     const createdEvent = this.buildCoordinatorEvent(actualMeetingRunId, input.normalized.room_id, "system.meeting_run.created", {
@@ -1376,7 +1393,7 @@ export class CoordinatorApp {
       return errorResponse(500, "worker_spawn_failed", "Failed to start worker", { message });
     }
 
-    const shouldResumeMinutes = body.resume_minutes ?? Boolean(this.getLatestMinuteJob(sourceRun.meeting_run_id));
+    const shouldResumeMinutes = body.resume_minutes ?? sourceRun.minutes_enabled;
     if (shouldResumeMinutes) {
       const sourceMinuteJob = this.getLatestMinuteJob(sourceRun.meeting_run_id);
       const seedMinutesMarkdown = sourceMinuteJob
@@ -1389,7 +1406,10 @@ export class CoordinatorApp {
         this.storage.getMeetingRunRecord(initialized.meeting_run_id) as MeetingRunRecord,
         promptConfig,
         null,
-        seedMinutesMarkdown,
+        {
+          seed_minutes_markdown: seedMinutesMarkdown,
+          launch_mode: "normal",
+        },
       );
     }
 
@@ -1666,6 +1686,7 @@ export class CoordinatorApp {
     redirectUrl.searchParams.set("transcript", `/v1/meeting-runs/${meetingRunId}/transcript/view`);
     redirectUrl.searchParams.set("start", `/v1/meeting-runs/${meetingRunId}/minutes/start`);
     redirectUrl.searchParams.set("restart", `/v1/meeting-runs/${meetingRunId}/minutes/restart`);
+    redirectUrl.searchParams.set("recover", `/v1/meeting-runs/${meetingRunId}/minutes/recover`);
     redirectUrl.searchParams.set("stop", `/v1/meeting-runs/${meetingRunId}/minutes/stop`);
     redirectUrl.searchParams.set("title", formatRoomLabel(meetingRun.room_id));
     return Response.redirect(redirectUrl.toString(), 302);
@@ -1683,6 +1704,7 @@ export class CoordinatorApp {
     redirectUrl.searchParams.set("transcript", `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/transcript/view${url.searchParams.get("meeting_run_id") ? `?meeting_run_id=${encodeURIComponent(url.searchParams.get("meeting_run_id") as string)}` : ""}`);
     redirectUrl.searchParams.set("start", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/start`);
     redirectUrl.searchParams.set("restart", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/restart`);
+    redirectUrl.searchParams.set("recover", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/recover`);
     redirectUrl.searchParams.set("stop", `/v1/meeting-runs/${meetingRun.meeting_run_id}/minutes/stop`);
     redirectUrl.searchParams.set("title", formatRoomLabel(meetingRun.room_id));
     return Response.redirect(redirectUrl.toString(), 302);
@@ -1698,7 +1720,10 @@ export class CoordinatorApp {
       return errorResponse(409, "minutes_already_running", "Minutes are already running for this meeting run");
     }
     const body = await parseJsonBody<StartMinuteJobRequest>(request).catch(() => ({} as StartMinuteJobRequest));
-    const minuteJob = await this.spawnMinuteJob(meetingRun, this.buildMinutePromptConfig(body), null, this.getSeedMinutesMarkdown(meetingRun));
+    const minuteJob = await this.spawnMinuteJob(meetingRun, this.buildMinutePromptConfig(body), null, {
+      seed_minutes_markdown: this.getSeedMinutesMarkdown(meetingRun),
+      launch_mode: "normal",
+    });
     return jsonResponse({ minute_job: minuteJob }, { status: 201 });
   }
 
@@ -1716,8 +1741,41 @@ export class CoordinatorApp {
       current.stop_requested = true;
       await this.terminateMinuteJob(current);
     }
-    const minuteJob = await this.spawnMinuteJob(meetingRun, this.buildMinutePromptConfig(body), restartedFrom);
+    const promptConfig = this.buildMinutePromptConfig(body);
+    const minuteJob = await this.spawnMinuteJob(meetingRun, promptConfig, restartedFrom, {
+      launch_mode: promptConfig.provider === "openrouter_patch" ? "restart_replay" : "normal",
+    });
     return jsonResponse({ minute_job: minuteJob }, { status: restartedFrom ? 200 : 201 });
+  }
+
+  private async handleRecoverMinutes(request: Request, meetingRunId: string): Promise<Response> {
+    const meetingRun = this.getMeetingRun(meetingRunId);
+    if (!meetingRun) {
+      return errorResponse(404, "not_found", "Meeting run not found");
+    }
+    const existing = this.minuteJobsByMeetingRunId.get(meetingRunId);
+    if (existing && !existing.completed) {
+      return errorResponse(409, "minutes_already_running", "Minutes are already running for this meeting run");
+    }
+    await parseJsonBody<RecoverMinuteJobRequest>(request).catch(() => ({} as RecoverMinuteJobRequest));
+    const latestMinuteJob = this.getLatestMinuteJob(meetingRunId);
+    if (!latestMinuteJob) {
+      return errorResponse(409, "minutes_not_recoverable", "No prior minute job exists for this meeting run");
+    }
+    const latestVersion = this.storage.getLatestMinuteVersionForMinuteJob(latestMinuteJob.minute_job_id);
+    if (!latestVersion) {
+      return errorResponse(409, "minutes_not_recoverable", "No prior minutes snapshot exists for this meeting run");
+    }
+    const minuteJob = await this.spawnMinuteJob(
+      meetingRun,
+      this.buildMinutePromptConfigFromMinuteJob(latestMinuteJob),
+      latestMinuteJob.minute_job_id,
+      {
+        seed_minutes_markdown: latestVersion.content_markdown,
+        launch_mode: "recover",
+      },
+    );
+    return jsonResponse({ minute_job: minuteJob }, { status: 201 });
   }
 
   private async handleStopMinutes(request: Request, meetingRunId: string): Promise<Response> {
@@ -1732,6 +1790,10 @@ export class CoordinatorApp {
     current.stop_requested = true;
     this.storage.patchMinuteJob(current.minute_job_id, {
       state: "stopping",
+    });
+    this.storage.patchMeetingRun(meetingRunId, {
+      minutes_enabled: false,
+      updated_at_unix_ms: nowUnixMs(),
     });
     await this.terminateMinuteJob(current);
     return jsonResponse({ ok: true });
@@ -2777,6 +2839,10 @@ export class CoordinatorApp {
     return meetingStartUnixMs + ((((hours * 60) + minutes) * 60 + seconds) * 1000) + millis;
   }
 
+  private parseTranscriptUntilValue(meetingRun: MeetingRunRecord, raw: string | null): number | null {
+    return this.parseTranscriptSinceValue(meetingRun, raw);
+  }
+
   private renderMarkdownTranscriptResponse(url: URL, meetingRun: MeetingRunRecord, meetingRuns?: MeetingRunRecord[]): Response {
     const includes = this.parseTranscriptIncludes(url);
     if (includes instanceof Response) {
@@ -2784,9 +2850,17 @@ export class CoordinatorApp {
     }
     const includeSet = new Set<TranscriptIncludeKind>(includes);
     const sinceParam = url.searchParams.get("since");
+    const untilParam = url.searchParams.get("until");
     const sinceUnixMs = this.parseTranscriptSinceValue(meetingRun, sinceParam);
+    const untilUnixMs = this.parseTranscriptUntilValue(meetingRun, untilParam);
     if (sinceParam && sinceUnixMs === null) {
       return errorResponse(400, "invalid_request", "`since` must be a parseable timestamp");
+    }
+    if (untilParam && untilUnixMs === null) {
+      return errorResponse(400, "invalid_request", "`until` must be a parseable timestamp");
+    }
+    if (sinceUnixMs !== null && untilUnixMs !== null && untilUnixMs < sinceUnixMs) {
+      return errorResponse(400, "invalid_request", "`until` must not be earlier than `since`");
     }
     const scopedMeetingRuns = meetingRuns && meetingRuns.length > 0 ? meetingRuns : [meetingRun];
     const speech = includeSet.has("speech")
@@ -2801,6 +2875,7 @@ export class CoordinatorApp {
     const markdown = this.renderMarkdownTranscript(meetingRun, speech, chat, attendeeEvents, {
       include: includes,
       since_unix_ms: sinceUnixMs,
+      until_unix_ms: untilUnixMs,
     });
     return new Response(markdown, {
       headers: {
@@ -2924,6 +2999,7 @@ export class CoordinatorApp {
     options?: {
       include?: TranscriptIncludeKind[];
       since_unix_ms?: number | null;
+      until_unix_ms?: number | null;
     },
   ): string {
     const includeSet = new Set<TranscriptIncludeKind>(options?.include ?? ["speech", "joins", "chat"]);
@@ -2931,6 +3007,7 @@ export class CoordinatorApp {
     const includeJoins = includeSet.has("joins");
     const includeChat = includeSet.has("chat");
     const sinceUnixMs = options?.since_unix_ms ?? null;
+    const untilUnixMs = options?.until_unix_ms ?? null;
     const heading = meetingRun.room_id.startsWith("zoom:") ? meetingRun.room_id.slice(5) : meetingRun.room_id;
     const startedAt = meetingRun.started_at ?? meetingRun.created_at;
     const meetingStartUnixMs = Date.parse(startedAt ?? "");
@@ -3058,9 +3135,16 @@ export class CoordinatorApp {
       return Date.parse(item.event.ts ?? "") || 0;
     };
 
-    const filteredTranscriptItems = sinceUnixMs === null
-      ? transcriptItems
-      : transcriptItems.filter((item) => transcriptItemDisplayUnixMs(item) >= sinceUnixMs);
+    const filteredTranscriptItems = transcriptItems.filter((item) => {
+      const displayUnixMs = transcriptItemDisplayUnixMs(item);
+      if (sinceUnixMs !== null && displayUnixMs < sinceUnixMs) {
+        return false;
+      }
+      if (untilUnixMs !== null && displayUnixMs > untilUnixMs) {
+        return false;
+      }
+      return true;
+    });
 
     const lines = sinceUnixMs === null
       ? [
@@ -3071,7 +3155,7 @@ export class CoordinatorApp {
           "## Transcript",
           "",
           `_Defaults to \`speech,joins,chat\`. Use \`?include=${[...includeSet].join(",")}\` or any comma-separated subset to narrow it._`,
-          "_Use `?since=<timestamp>` with a visible line timestamp like `00:30` to fetch from that point onward. Pagination returns complete rendered turns, so the first returned line may repeat text you already saw._",
+          "_Use `?since=<timestamp>` or `?until=<timestamp>` with a visible line timestamp like `00:30` to bound the transcript. Pagination returns complete rendered turns, so a boundary line may repeat text you already saw._",
           "",
         ]
       : [];

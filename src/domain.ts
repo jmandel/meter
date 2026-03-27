@@ -166,6 +166,7 @@ export interface MeetingRunRecord {
   ended_at: string | null;
   created_at: string;
   updated_at: string;
+  minutes_enabled: boolean;
   worker: WorkerSummary | null;
   paths: MeetingRunPaths;
   options: MeetingRunOptions;
@@ -246,6 +247,10 @@ export interface StartMinuteJobRequest {
 }
 
 export interface RestartMinuteJobRequest extends StartMinuteJobRequest {
+  reason?: string | null;
+}
+
+export interface RecoverMinuteJobRequest {
   reason?: string | null;
 }
 

@@ -49,11 +49,17 @@ export async function findActiveRun(
 export async function fetchTranscriptMd(
   client: MeterClient,
   meetingRunId: string,
-  since?: string,
+  options?: {
+    since?: string;
+    until?: string;
+  },
 ): Promise<string> {
   let url = `${client.baseUrl}/v1/meeting-runs/${meetingRunId}/transcript.md?include=speech,joins,chat`;
-  if (since) {
-    url += `&since=${encodeURIComponent(since)}`;
+  if (options?.since) {
+    url += `&since=${encodeURIComponent(options.since)}`;
+  }
+  if (options?.until) {
+    url += `&until=${encodeURIComponent(options.until)}`;
   }
   return fetchText(url);
 }

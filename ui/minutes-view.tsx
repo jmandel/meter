@@ -482,6 +482,7 @@ type Paths = {
   detailsPath: string | null;
   startPath: string | null;
   restartPath: string | null;
+  recoverPath: string | null;
   stopPath: string | null;
   streamPath: string;
   markdownPath: string;
@@ -505,6 +506,7 @@ function getPaths(): Paths {
       detailsPath: search.get("details"),
       startPath: search.get("start"),
       restartPath: search.get("restart"),
+      recoverPath: search.get("recover"),
       stopPath: search.get("stop"),
       transcriptPath: search.get("transcript"),
       streamPath: current.replace(/\/view(\?.*)?$/, "/stream$1"),
@@ -516,6 +518,7 @@ function getPaths(): Paths {
     detailsPath: search.get("details"),
     startPath: search.get("start"),
     restartPath: search.get("restart"),
+    recoverPath: search.get("recover"),
     stopPath: search.get("stop"),
     transcriptPath: search.get("transcript"),
     streamPath,
@@ -956,7 +959,7 @@ function App() {
   const [defaultMinuteProvider, setDefaultMinuteProvider] = useState<UiMinuteProvider>("claude_tmux");
   const [defaultOpenRouterModel, setDefaultOpenRouterModel] = useState("");
   const [content, setContent] = useState("");
-  const [requestState, setRequestState] = useState<"idle" | "starting" | "restarting" | "stopping">("idle");
+  const [requestState, setRequestState] = useState<"idle" | "starting" | "restarting" | "recovering" | "stopping">("idle");
   const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting">("connecting");
   const [statusLabel, setStatusLabel] = useState("Connecting");
   const [error, setError] = useState<string | null>(null);
@@ -1146,19 +1149,35 @@ function App() {
     };
   }, [paths.streamPath]);
 
-  const submit = async (action: "start" | "restart" | "stop") => {
-    const endpoint = action === "start" ? paths.startPath : action === "restart" ? paths.restartPath : paths.stopPath;
+  const submit = async (action: "start" | "restart" | "recover" | "stop") => {
+    const endpoint = action === "start"
+      ? paths.startPath
+      : action === "restart"
+        ? paths.restartPath
+        : action === "recover"
+          ? paths.recoverPath
+          : paths.stopPath;
     if (!endpoint) {
       return;
     }
     setError(null);
-    setRequestState(action === "start" ? "starting" : action === "restart" ? "restarting" : "stopping");
+    setRequestState(
+      action === "start"
+        ? "starting"
+        : action === "restart"
+          ? "restarting"
+          : action === "recover"
+            ? "recovering"
+            : "stopping",
+    );
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(action === "stop"
           ? {}
+          : action === "recover"
+            ? {}
           : minutePromptRequestBody(minuteTemplates, minuteDraft.currentFields, minuteDraft.promptLabel, defaultMinuteProvider)),
       });
       if (!response.ok) {
@@ -1175,15 +1194,28 @@ function App() {
           setMinuteJob(nextMinuteJob);
         }
         setVersion(null);
-        setContent("");
-        lastMarkdownRef.current = "";
-        previousLeafTextsRef.current = new Set();
-        pendingSelectionRef.current = null;
-        setUpdatedLabel("Waiting for first minute snapshot…");
-        setStatusLabel(action === "start" ? "Starting" : "Restarting");
+        if (action !== "recover") {
+          setContent("");
+          lastMarkdownRef.current = "";
+          previousLeafTextsRef.current = new Set();
+          pendingSelectionRef.current = null;
+          setUpdatedLabel("Waiting for first minute snapshot…");
+        } else {
+          setUpdatedLabel("Recovering from the latest saved minutes…");
+        }
+        setStatusLabel(
+          action === "start"
+            ? "Starting"
+            : action === "restart"
+              ? "Restarting"
+              : "Recovering",
+        );
         setStreamState("connecting");
         setSettingsOpen(false);
         await loadDetails(false).catch(() => undefined);
+        if (action === "recover") {
+          await fetchLatestMarkdown("poll");
+        }
       }
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : `Failed to ${action} minutes`);
@@ -1208,8 +1240,17 @@ function App() {
   };
 
   const currentState = minuteJob?.state ?? "idle";
-  const primaryAction = minuteJob ? "restart" : "start";
-  const primaryLabel = minuteJob ? "Restart minutes" : "Start minutes";
+  const canRecover = Boolean(
+    minuteJob
+    && paths.recoverPath
+    && !["starting", "running", "restarting", "stopping"].includes(currentState),
+  );
+  const primaryAction = !minuteJob ? "start" : canRecover ? "recover" : "restart";
+  const primaryLabel = !minuteJob
+    ? "Start minutes"
+    : canRecover
+      ? "Recover minutes"
+      : "Restart minutes";
   const workspaceClassName = `workspace ${settingsOpen ? "with-settings" : "viewer-only"}`;
   const settingsToggleLabel = settingsOpen ? "Hide settings" : minuteJob ? "Minute settings" : "Configure minutes";
 
@@ -1355,10 +1396,25 @@ function App() {
           )}
           <div className="button-row">
             <button className="primary-button" disabled={requestState !== "idle"} onClick={() => void submit(primaryAction)} type="button">
-              {requestState === (primaryAction === "start" ? "starting" : "restarting")
-                ? primaryAction === "start" ? "Starting…" : "Restarting…"
+              {requestState === (
+                primaryAction === "start"
+                  ? "starting"
+                  : primaryAction === "restart"
+                    ? "restarting"
+                    : "recovering"
+              )
+                ? primaryAction === "start"
+                  ? "Starting…"
+                  : primaryAction === "restart"
+                    ? "Restarting…"
+                    : "Recovering…"
                 : primaryLabel}
             </button>
+            {canRecover ? (
+              <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit("restart")} type="button">
+                Restart from scratch
+              </button>
+            ) : null}
             <button className="ghost-button" disabled={requestState !== "idle" || !minuteJob || !["starting", "running", "restarting", "stopping"].includes(currentState)} onClick={() => void submit("stop")} type="button">
               {requestState === "stopping" ? "Stopping…" : "Stop minutes"}
             </button>

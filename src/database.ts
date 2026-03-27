@@ -51,6 +51,7 @@ interface MeetingRunInsertInput {
   tags: string[];
   options: MeetingRunOptions;
   paths: MeetingRunPaths;
+  minutes_enabled: boolean;
 }
 
 interface MeetingRunPatch {
@@ -64,6 +65,7 @@ interface MeetingRunPatch {
   updated_at_unix_ms?: number;
   last_error_code?: string | null;
   last_error_message?: string | null;
+  minutes_enabled?: boolean;
 }
 
 interface MeetingRunRow {
@@ -85,6 +87,7 @@ interface MeetingRunRow {
   last_error_message: string | null;
   created_at_unix_ms: number;
   updated_at_unix_ms: number;
+  minutes_enabled: number | boolean;
   tags_json: string;
   options_json: string;
   paths_json: string;
@@ -224,6 +227,7 @@ export class AppDatabase {
         last_error_message TEXT,
         created_at_unix_ms INTEGER NOT NULL,
         updated_at_unix_ms INTEGER NOT NULL,
+        minutes_enabled INTEGER NOT NULL DEFAULT 0,
         tags_json TEXT NOT NULL,
         options_json TEXT NOT NULL,
         paths_json TEXT NOT NULL
@@ -402,6 +406,7 @@ export class AppDatabase {
     this.ensureColumn("chat_messages", "is_edited", "INTEGER");
     this.ensureColumn("chat_messages", "chat_type", "TEXT");
     this.ensureColumn("chat_messages", "details_json", "TEXT");
+    this.ensureColumn("meeting_runs", "minutes_enabled", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("minute_jobs", "prompt_template_id", "TEXT");
     this.ensureColumn("minute_jobs", "provider", "TEXT NOT NULL DEFAULT 'claude_tmux'");
     this.ensureColumn("minute_jobs", "claude_model", "TEXT");
@@ -477,10 +482,11 @@ export class AppDatabase {
           last_error_message,
           created_at_unix_ms,
           updated_at_unix_ms,
+          minutes_enabled,
           tags_json,
           options_json,
           paths_json
-        ) VALUES (?, ?, 'zoom', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 'zoom', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         input.meeting_run_id,
@@ -492,6 +498,7 @@ export class AppDatabase {
         input.data_dir,
         input.created_at_unix_ms,
         input.created_at_unix_ms,
+        input.minutes_enabled ? 1 : 0,
         JSON.stringify(input.tags),
         JSON.stringify(input.options),
         JSON.stringify(input.paths),
@@ -1242,6 +1249,7 @@ export class AppDatabase {
       ended_at: toIso(row.ended_at_unix_ms),
       created_at: toIso(row.created_at_unix_ms) ?? new Date(row.created_at_unix_ms).toISOString(),
       updated_at: toIso(row.updated_at_unix_ms) ?? new Date(row.updated_at_unix_ms).toISOString(),
+      minutes_enabled: Boolean(row.minutes_enabled),
       worker: this.buildWorkerSummary(row),
       paths: {
         data_dir: parsedPaths.data_dir as string,

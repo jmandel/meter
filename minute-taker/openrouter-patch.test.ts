@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   applyPatchResponse,
+  buildReplayFrontiersMs,
+  extractLastTranscriptCursor,
+  extractLastTranscriptOffsetMs,
+  formatTranscriptOffsetMs,
   parsePatchResponse,
+  parseTranscriptOffsetMs,
   splitTranscriptForMessages,
 } from "./openrouter-patch";
 
@@ -12,6 +17,24 @@ describe("OpenRouter minute patch helpers", () => {
     const blocks = splitTranscriptForMessages(transcript, 40);
     expect(blocks.length).toBeGreaterThan(1);
     expect(blocks.every((block) => block.includes("[00:0"))).toBe(true);
+  });
+
+  test("parses and formats visible transcript offsets", () => {
+    expect(parseTranscriptOffsetMs("00:30")).toBe(30_000);
+    expect(parseTranscriptOffsetMs("1:02:03")).toBe(3_723_000);
+    expect(formatTranscriptOffsetMs(30_000)).toBe("00:30");
+    expect(formatTranscriptOffsetMs(3_723_000)).toBe("1:02:03");
+  });
+
+  test("extracts the last visible transcript cursor and replay windows", () => {
+    const transcript = [
+      "[00:10 spk=\"A\"] hello",
+      "[00:20 joins] Bob",
+      "[01:05 chat id=1 from=A] done",
+    ].join("\n");
+    expect(extractLastTranscriptCursor(transcript)).toBe("01:05");
+    expect(extractLastTranscriptOffsetMs(transcript)).toBe(65_000);
+    expect(buildReplayFrontiersMs(65_000, 30_000)).toEqual([30_000, 60_000, 65_000]);
   });
 
   test("parses and applies targeted patch edits", () => {
