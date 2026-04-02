@@ -4,13 +4,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 
 import dashboard from "../ui/index.html";
-import minutesView from "../ui/minutes-view.html";
-import transcriptView from "../ui/transcript-view.html";
-
 import type {
   AttendeeSummaryRecord,
   AppendEventsBatchRequest,
   AppConfig,
+  AuthSessionResponse,
+  AuthSessionRole,
   ChatMessageRecord,
   CompleteMeetingRunRequest,
   CreateMeetingRunRequest,
@@ -37,12 +36,14 @@ import type {
   BrowserConsolePayload,
   MinuteJobRecord,
   MinutePromptConfig,
+  MinutePromptPresetRecord,
   MinuteVersionRecord,
-  RestartMinuteJobRequest,
   RecoverMinuteJobRequest,
+  RestartMinuteJobRequest,
   ResumeMeetingRunRequest,
   StartMinuteJobRequest,
   StopMinuteJobRequest,
+  UpsertMinutePromptPresetRequest,
   TranscriptionSegmentPayload,
   TranscriptionSessionStartedPayload,
   ZoomChatMessagePayload,
@@ -171,6 +172,15 @@ interface MinuteSubscriber {
 }
 
 type TranscriptIncludeKind = "speech" | "chat" | "joins";
+const RESUME_MEETING_RUN_WINDOW_MS = 2 * 60 * 60 * 1000;
+const AUTH_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+interface AuthSessionState {
+  role: AuthSessionRole;
+  csrf_token: string;
+  issued_at_unix_ms: number;
+  expires_at_unix_ms: number;
+}
 
 class EventBus {
   private subscribers = new Set<SseSubscriber>();
@@ -283,6 +293,7 @@ export class CoordinatorApp {
   private readonly minuteJobsByMinuteJobId = new Map<string, MinuteJobHandle>();
   private readonly simulationsByMeetingRunId = new Map<string, SimulationHandle>();
   private readonly rescueClaimsByMeetingRunId = new Map<string, RescueClaimState>();
+  private readonly authSessions = new Map<string, AuthSessionState>();
   private readonly automatedRescueAttemptsByMeetingRunId = new Map<string, AutomatedRescueAttempt>();
   private readonly automatedRescueAttemptCountsByMeetingRunId = new Map<string, number>();
   private readonly automatedRescueLastAttemptByMeetingRunId = new Map<string, number>();
@@ -325,8 +336,12 @@ export class CoordinatorApp {
       idleTimeout: 120,
       routes: {
         "/": dashboard,
-        "/minutes-view": minutesView,
-        "/transcript-view": transcriptView,
+        "/minutes-view": dashboard,
+        "/transcript-view": dashboard,
+        "/meeting-runs/:meetingRunId/minutes/view": dashboard,
+        "/meeting-runs/:meetingRunId/transcript/view": dashboard,
+        "/zoom-meetings/:meetingId/minutes/view": dashboard,
+        "/zoom-meetings/:meetingId/transcript/view": dashboard,
       },
       fetch: (request) => this.handleRequest(request),
     });
@@ -380,11 +395,35 @@ export class CoordinatorApp {
   private async handleRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
     try {
+      if (url.pathname === "/v1/auth/session" && request.method === "GET") {
+        return this.authSessionResponse(request);
+      }
+      if (url.pathname === "/v1/auth/session" && request.method === "POST") {
+        return await this.handleCreateAuthSession(request);
+      }
+      if (url.pathname === "/v1/auth/session" && request.method === "DELETE") {
+        return this.handleDeleteAuthSession(request);
+      }
+      if (this.isPublicReadRequest(request, url)) {
+        const authError = this.requirePublicReadAuth(request);
+        if (authError) {
+          return authError;
+        }
+      }
+      if (this.isPublicMutationRequest(request, url)) {
+        const authError = this.requirePublicMutationAuth(request);
+        if (authError) {
+          return authError;
+        }
+      }
       if (url.pathname === "/v1/health" && request.method === "GET") {
         return this.handleHealth(request);
       }
       if (url.pathname === "/v1/minute-prompt-templates" && request.method === "GET") {
         return this.handleListMinutePromptTemplates();
+      }
+      if (url.pathname === "/v1/minute-prompt-presets" && request.method === "POST") {
+        return await this.handleUpsertMinutePromptPreset(request);
       }
       if (url.pathname === "/v1/meeting-runs" && request.method === "POST") {
         return await this.handleCreateMeetingRun(request);
@@ -429,6 +468,10 @@ export class CoordinatorApp {
       match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/transcript\/view$/);
       if (match && request.method === "GET") {
         return this.handleZoomMeetingTranscriptView(request, url, match[1]);
+      }
+      match = url.pathname.match(/^\/v1\/minute-prompt-presets\/([^/]+)$/);
+      if (match && request.method === "DELETE") {
+        return this.handleDeleteMinutePromptPreset(match[1]);
       }
       match = url.pathname.match(/^\/v1\/zoom-meetings\/([^/]+)\/minutes$/);
       if (match && request.method === "GET") {
@@ -616,6 +659,242 @@ export class CoordinatorApp {
     return this.config.public_base_url || new URL(request.url).origin;
   }
 
+  private parseCookies(request: Request): Map<string, string> {
+    const raw = request.headers.get("cookie") ?? "";
+    const cookies = new Map<string, string>();
+    for (const entry of raw.split(";")) {
+      const [name, ...rest] = entry.trim().split("=");
+      if (!name) {
+        continue;
+      }
+      cookies.set(name, decodeURIComponent(rest.join("=")));
+    }
+    return cookies;
+  }
+
+  private isSecureRequest(request: Request): boolean {
+    const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+    if (forwardedProto === "https") {
+      return true;
+    }
+    return new URL(request.url).protocol === "https:";
+  }
+
+  private buildSessionCookie(request: Request, token: string | null, maxAgeSeconds: number): string {
+    const parts = [
+      `meter_auth_session=${encodeURIComponent(token ?? "")}`,
+      "Path=/",
+      "HttpOnly",
+      "SameSite=Lax",
+      `Max-Age=${maxAgeSeconds}`,
+    ];
+    if (this.isSecureRequest(request)) {
+      parts.push("Secure");
+    }
+    return parts.join("; ");
+  }
+
+  private pruneExpiredAuthSessions(now = nowUnixMs()): void {
+    for (const [token, session] of this.authSessions.entries()) {
+      if (session.expires_at_unix_ms <= now) {
+        this.authSessions.delete(token);
+      }
+    }
+  }
+
+  private getAuthSession(request: Request): { token: string; session: AuthSessionState } | null {
+    this.pruneExpiredAuthSessions();
+    const token = this.parseCookies(request).get("meter_auth_session");
+    if (!token) {
+      return null;
+    }
+    const session = this.authSessions.get(token);
+    if (!session) {
+      return null;
+    }
+    return { token, session };
+  }
+
+  private isAdminPasswordConfigured(): boolean {
+    return Boolean(process.env.METER_ADMIN_PASSWORD_HASH?.trim() || process.env.METER_ADMIN_PASSWORD?.trim());
+  }
+
+  private isViewerPasswordConfigured(): boolean {
+    return Boolean(process.env.METER_VIEWER_PASSWORD_HASH?.trim() || process.env.METER_VIEWER_PASSWORD?.trim());
+  }
+
+  private isReadAuthRequired(): boolean {
+    return parseBoolean(process.env.METER_REQUIRE_AUTH_FOR_READS, false);
+  }
+
+  private authSessionResponse(request: Request): Response {
+    const current = this.getAuthSession(request);
+    const passwordConfigured = this.isAdminPasswordConfigured();
+    const body: AuthSessionResponse = current
+      ? {
+          authenticated: true,
+          role: current.session.role,
+          csrf_token: current.session.csrf_token,
+          password_configured: passwordConfigured,
+          read_auth_required: this.isReadAuthRequired(),
+        }
+      : {
+          authenticated: false,
+          role: null,
+          csrf_token: null,
+          password_configured: passwordConfigured,
+          read_auth_required: this.isReadAuthRequired(),
+        };
+    return jsonResponse(body, {
+      headers: {
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  private async verifyPassword(password: string, role: AuthSessionRole): Promise<boolean> {
+    const configuredHash = role === "admin"
+      ? process.env.METER_ADMIN_PASSWORD_HASH?.trim()
+      : process.env.METER_VIEWER_PASSWORD_HASH?.trim();
+    if (configuredHash) {
+      try {
+        return await Bun.password.verify(password, configuredHash);
+      } catch {
+        return false;
+      }
+    }
+    const configuredPassword = role === "admin"
+      ? process.env.METER_ADMIN_PASSWORD?.trim()
+      : process.env.METER_VIEWER_PASSWORD?.trim();
+    if (!configuredPassword) {
+      return false;
+    }
+    return password === configuredPassword;
+  }
+
+  private async resolveAuthRole(password: string): Promise<AuthSessionRole | null> {
+    if (this.isAdminPasswordConfigured() && await this.verifyPassword(password, "admin")) {
+      return "admin";
+    }
+    if (this.isViewerPasswordConfigured() && await this.verifyPassword(password, "viewer")) {
+      return "viewer";
+    }
+    return null;
+  }
+
+  private async handleCreateAuthSession(request: Request): Promise<Response> {
+    const adminPasswordConfigured = this.isAdminPasswordConfigured();
+    const viewerPasswordConfigured = this.isViewerPasswordConfigured();
+    if (!adminPasswordConfigured && !viewerPasswordConfigured) {
+      return errorResponse(503, "auth_not_configured", "No authentication password is configured on the server");
+    }
+    const body = await parseJsonBody<{ password?: string | null }>(request).catch(() => ({}));
+    const password = body.password?.trim() ?? "";
+    const role = password ? await this.resolveAuthRole(password) : null;
+    if (!password || !role) {
+      return errorResponse(401, "unauthorized", "Invalid password");
+    }
+    const now = nowUnixMs();
+    const token = randomToken(32);
+    const session: AuthSessionState = {
+      role,
+      csrf_token: randomToken(24),
+      issued_at_unix_ms: now,
+      expires_at_unix_ms: now + AUTH_SESSION_TTL_MS,
+    };
+    this.authSessions.set(token, session);
+    return jsonResponse({
+      authenticated: true,
+      role: session.role,
+      csrf_token: session.csrf_token,
+      password_configured: adminPasswordConfigured,
+      read_auth_required: this.isReadAuthRequired(),
+    } satisfies AuthSessionResponse, {
+      headers: {
+        "set-cookie": this.buildSessionCookie(request, token, Math.floor(AUTH_SESSION_TTL_MS / 1000)),
+        "cache-control": "no-store",
+      },
+      status: 201,
+    });
+  }
+
+  private handleDeleteAuthSession(request: Request): Response {
+    const current = this.getAuthSession(request);
+    if (current) {
+      this.authSessions.delete(current.token);
+    }
+    return jsonResponse({
+      authenticated: false,
+      role: null,
+      csrf_token: null,
+      password_configured: this.isAdminPasswordConfigured(),
+      read_auth_required: this.isReadAuthRequired(),
+    } satisfies AuthSessionResponse, {
+      headers: {
+        "set-cookie": this.buildSessionCookie(request, null, 0),
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  private isPublicMutationRequest(request: Request, url: URL): boolean {
+    if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") {
+      return false;
+    }
+    if (url.pathname.startsWith("/internal/")) {
+      return false;
+    }
+    if (url.pathname === "/v1/auth/session") {
+      return false;
+    }
+    return url.pathname.startsWith("/v1/");
+  }
+
+  private isPublicReadRequest(request: Request, url: URL): boolean {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return false;
+    }
+    if (url.pathname.startsWith("/internal/")) {
+      return false;
+    }
+    if (!url.pathname.startsWith("/v1/")) {
+      return false;
+    }
+    if (url.pathname === "/v1/auth/session" || url.pathname === "/v1/health") {
+      return false;
+    }
+    return true;
+  }
+
+  private requirePublicReadAuth(request: Request): Response | null {
+    if (!this.isReadAuthRequired()) {
+      return null;
+    }
+    if (!this.isAdminPasswordConfigured() && !this.isViewerPasswordConfigured()) {
+      return errorResponse(503, "auth_not_configured", "Read authentication is required but no password is configured");
+    }
+    const current = this.getAuthSession(request);
+    if (!current) {
+      return errorResponse(401, "unauthorized", "Authentication required");
+    }
+    return null;
+  }
+
+  private requirePublicMutationAuth(request: Request): Response | null {
+    if (!this.isAdminPasswordConfigured()) {
+      return null;
+    }
+    const current = this.getAuthSession(request);
+    if (!current || current.session.role !== "admin") {
+      return errorResponse(401, "unauthorized", "Admin authentication required");
+    }
+    const csrfToken = request.headers.get("x-meter-csrf")?.trim() ?? "";
+    if (!csrfToken || csrfToken !== current.session.csrf_token) {
+      return errorResponse(403, "csrf_invalid", "Missing or invalid CSRF token");
+    }
+    return null;
+  }
+
   private async stopInternal(): Promise<void> {
     const activeHandles = Array.from(this.workersByMeetingRunId.values()).filter((handle) => !handle.completed);
     const activeMinuteHandles = Array.from(this.minuteJobsByMeetingRunId.values()).filter((handle) => !handle.completed);
@@ -798,17 +1077,17 @@ export class CoordinatorApp {
     meetingRun: MeetingRunRecord,
     promptConfig: MinutePromptConfig,
     restartedFromMinuteJobId: string | null,
-    options?: {
-      seed_minutes_markdown?: string | null;
+    options: {
       launch_mode?: MinuteJobLaunchMode;
-    },
+      seed_minutes_markdown?: string | null;
+    } = {},
   ): Promise<MinuteJobRecord> {
     const now = nowUnixMs();
     const minuteJobId = uuidv7(now);
     const workingDir = this.minuteRunDir(meetingRun.meeting_run_id);
     mkdirSync(workingDir, { recursive: true });
     const latestMinutesPath = path.join(workingDir, "minutes.md");
-    const seedMinutesMarkdown = options?.seed_minutes_markdown ?? null;
+    const seedMinutesMarkdown = options.seed_minutes_markdown ?? null;
     if (seedMinutesMarkdown !== null) {
       await Bun.write(latestMinutesPath, seedMinutesMarkdown);
     }
@@ -848,10 +1127,9 @@ export class CoordinatorApp {
         ...process.env,
         METER_MINUTE_TAKER_CONFIG_B64: encodeBase64Json({
           ...promptConfig,
-          reset_output: seedMinutesMarkdown === null,
+          reset_output: seedMinutesMarkdown === null && options.launch_mode !== "recover",
           resume_existing_minutes: seedMinutesMarkdown !== null,
           tmux_session: tmuxSessionName,
-          launch_mode: options?.launch_mode ?? "normal",
         }),
       },
     });
@@ -874,10 +1152,6 @@ export class CoordinatorApp {
     this.minuteJobsByMeetingRunId.set(meetingRun.meeting_run_id, handle);
     this.minuteJobsByMinuteJobId.set(minuteJobId, handle);
     this.watchMinuteJob(handle);
-    this.storage.patchMeetingRun(meetingRun.meeting_run_id, {
-      minutes_enabled: true,
-      updated_at_unix_ms: nowUnixMs(),
-    });
 
     this.storage.patchMinuteJob(minuteJobId, { state: "running" });
     const startTs = nowUnixMs();
@@ -992,7 +1266,9 @@ export class CoordinatorApp {
     return latestVersion?.content_markdown ?? null;
   }
 
-  private buildMinutePromptConfig(input: StartMinuteJobRequest | RestartMinuteJobRequest | null | undefined): MinutePromptConfig {
+  private buildMinutePromptConfig(
+    input: StartMinuteJobRequest | RestartMinuteJobRequest | UpsertMinutePromptPresetRequest | null | undefined,
+  ): MinutePromptConfig {
     const requestedTemplateId = input?.prompt_template_id?.trim() || DEFAULT_MINUTE_PROMPT_TEMPLATE_ID;
     const template = getMinutePromptTemplate(requestedTemplateId);
     const promptTemplateId = template?.template_id ?? DEFAULT_MINUTE_PROMPT_TEMPLATE_ID;
@@ -1274,7 +1550,6 @@ export class CoordinatorApp {
       tags: input.tags,
       options: input.options,
       paths: layout,
-      minutes_enabled: false,
     });
 
     const createdEvent = this.buildCoordinatorEvent(actualMeetingRunId, input.normalized.room_id, "system.meeting_run.created", {
@@ -1348,6 +1623,10 @@ export class CoordinatorApp {
     if (!["completed", "failed", "aborted"].includes(sourceRun.state)) {
       return errorResponse(409, "meeting_run_not_terminal", "Only terminal meeting runs can be resumed");
     }
+    const endedAtUnixMs = sourceRun.ended_at ? Date.parse(sourceRun.ended_at) : NaN;
+    if (!Number.isFinite(endedAtUnixMs) || nowUnixMs() - endedAtUnixMs > RESUME_MEETING_RUN_WINDOW_MS) {
+      return errorResponse(409, "meeting_run_resume_window_expired", "Only meeting runs ended within the last 2 hours can be resumed");
+    }
 
     const body = await parseJsonBody<ResumeMeetingRunRequest>(request).catch(() => ({} as ResumeMeetingRunRequest));
     const resumeRootMeetingRunId = this.getResumeRootMeetingRunId(sourceRun) ?? sourceRun.meeting_run_id;
@@ -1393,7 +1672,7 @@ export class CoordinatorApp {
       return errorResponse(500, "worker_spawn_failed", "Failed to start worker", { message });
     }
 
-    const shouldResumeMinutes = body.resume_minutes ?? sourceRun.minutes_enabled;
+    const shouldResumeMinutes = body.resume_minutes ?? Boolean(this.getLatestMinuteJob(sourceRun.meeting_run_id));
     if (shouldResumeMinutes) {
       const sourceMinuteJob = this.getLatestMinuteJob(sourceRun.meeting_run_id);
       const seedMinutesMarkdown = sourceMinuteJob
@@ -1408,7 +1687,6 @@ export class CoordinatorApp {
         null,
         {
           seed_minutes_markdown: seedMinutesMarkdown,
-          launch_mode: "normal",
         },
       );
     }
@@ -1646,7 +1924,44 @@ export class CoordinatorApp {
       default_claude_effort: process.env.METER_MINUTE_TAKER_EFFORT?.trim() || null,
       default_openrouter_model: process.env.METER_OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_MINUTE_MODEL,
       items: listMinutePromptTemplates(),
+      saved_presets: this.storage.listMinutePromptPresetRecords(),
     });
+  }
+
+  private buildMinutePromptPresetRecord(input: UpsertMinutePromptPresetRequest): MinutePromptPresetRecord {
+    const now = nowUnixMs();
+    const templateConfig = this.buildMinutePromptConfig(input);
+    return this.storage.upsertMinutePromptPreset({
+      preset_id: uuidv7(now),
+      name: input.name.trim(),
+      provider: templateConfig.provider,
+      prompt_template_id: templateConfig.prompt_template_id,
+      prompt_label: input.name.trim(),
+      user_prompt_body: templateConfig.user_prompt_body,
+      claude_model: templateConfig.claude_model,
+      claude_effort: templateConfig.claude_effort,
+      openrouter_model: templateConfig.openrouter_model,
+      created_at_unix_ms: now,
+      updated_at_unix_ms: now,
+    });
+  }
+
+  private async handleUpsertMinutePromptPreset(request: Request): Promise<Response> {
+    const body = await parseJsonBody<UpsertMinutePromptPresetRequest>(request).catch(() => ({} as UpsertMinutePromptPresetRequest));
+    const name = body.name?.trim() || "";
+    if (!name) {
+      return errorResponse(400, "invalid_request", "`name` is required");
+    }
+    const preset = this.buildMinutePromptPresetRecord(body);
+    return jsonResponse({ preset }, { status: 201 });
+  }
+
+  private handleDeleteMinutePromptPreset(encodedName: string): Response {
+    const name = decodeURIComponent(encodedName);
+    if (!this.storage.deleteMinutePromptPreset(name)) {
+      return errorResponse(404, "not_found", "Minute prompt preset not found");
+    }
+    return jsonResponse({ ok: true });
   }
 
   private handleGetMinutes(meetingRunId: string): Response {
@@ -1665,9 +1980,7 @@ export class CoordinatorApp {
 
   private handleZoomMeetingMinutes(url: URL, meetingId: string): Response {
     const explicitMeetingRunId = url.searchParams.get("meeting_run_id");
-    const meetingRun = explicitMeetingRunId
-      ? this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId)
-      : this.resolveMeetingRunWithMinutesForRoom(this.zoomRoomIdFromMeetingId(meetingId));
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
@@ -1791,10 +2104,6 @@ export class CoordinatorApp {
     this.storage.patchMinuteJob(current.minute_job_id, {
       state: "stopping",
     });
-    this.storage.patchMeetingRun(meetingRunId, {
-      minutes_enabled: false,
-      updated_at_unix_ms: nowUnixMs(),
-    });
     await this.terminateMinuteJob(current);
     return jsonResponse({ ok: true });
   }
@@ -1815,9 +2124,7 @@ export class CoordinatorApp {
 
   private handleZoomMeetingMinutesMarkdown(url: URL, meetingId: string, request: Request): Response {
     const explicitMeetingRunId = url.searchParams.get("meeting_run_id");
-    const meetingRun = explicitMeetingRunId
-      ? this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId)
-      : this.resolveMeetingRunWithMinutesForRoom(this.zoomRoomIdFromMeetingId(meetingId));
+    const meetingRun = this.resolveMeetingRunForZoomMeeting(meetingId, explicitMeetingRunId);
     if (!meetingRun) {
       return errorResponse(404, "not_found", "No meeting run found for this Zoom meeting id");
     }
@@ -2839,10 +3146,6 @@ export class CoordinatorApp {
     return meetingStartUnixMs + ((((hours * 60) + minutes) * 60 + seconds) * 1000) + millis;
   }
 
-  private parseTranscriptUntilValue(meetingRun: MeetingRunRecord, raw: string | null): number | null {
-    return this.parseTranscriptSinceValue(meetingRun, raw);
-  }
-
   private renderMarkdownTranscriptResponse(url: URL, meetingRun: MeetingRunRecord, meetingRuns?: MeetingRunRecord[]): Response {
     const includes = this.parseTranscriptIncludes(url);
     if (includes instanceof Response) {
@@ -2850,17 +3153,9 @@ export class CoordinatorApp {
     }
     const includeSet = new Set<TranscriptIncludeKind>(includes);
     const sinceParam = url.searchParams.get("since");
-    const untilParam = url.searchParams.get("until");
     const sinceUnixMs = this.parseTranscriptSinceValue(meetingRun, sinceParam);
-    const untilUnixMs = this.parseTranscriptUntilValue(meetingRun, untilParam);
     if (sinceParam && sinceUnixMs === null) {
       return errorResponse(400, "invalid_request", "`since` must be a parseable timestamp");
-    }
-    if (untilParam && untilUnixMs === null) {
-      return errorResponse(400, "invalid_request", "`until` must be a parseable timestamp");
-    }
-    if (sinceUnixMs !== null && untilUnixMs !== null && untilUnixMs < sinceUnixMs) {
-      return errorResponse(400, "invalid_request", "`until` must not be earlier than `since`");
     }
     const scopedMeetingRuns = meetingRuns && meetingRuns.length > 0 ? meetingRuns : [meetingRun];
     const speech = includeSet.has("speech")
@@ -2875,7 +3170,6 @@ export class CoordinatorApp {
     const markdown = this.renderMarkdownTranscript(meetingRun, speech, chat, attendeeEvents, {
       include: includes,
       since_unix_ms: sinceUnixMs,
-      until_unix_ms: untilUnixMs,
     });
     return new Response(markdown, {
       headers: {
@@ -2999,7 +3293,6 @@ export class CoordinatorApp {
     options?: {
       include?: TranscriptIncludeKind[];
       since_unix_ms?: number | null;
-      until_unix_ms?: number | null;
     },
   ): string {
     const includeSet = new Set<TranscriptIncludeKind>(options?.include ?? ["speech", "joins", "chat"]);
@@ -3007,7 +3300,6 @@ export class CoordinatorApp {
     const includeJoins = includeSet.has("joins");
     const includeChat = includeSet.has("chat");
     const sinceUnixMs = options?.since_unix_ms ?? null;
-    const untilUnixMs = options?.until_unix_ms ?? null;
     const heading = meetingRun.room_id.startsWith("zoom:") ? meetingRun.room_id.slice(5) : meetingRun.room_id;
     const startedAt = meetingRun.started_at ?? meetingRun.created_at;
     const meetingStartUnixMs = Date.parse(startedAt ?? "");
@@ -3135,16 +3427,9 @@ export class CoordinatorApp {
       return Date.parse(item.event.ts ?? "") || 0;
     };
 
-    const filteredTranscriptItems = transcriptItems.filter((item) => {
-      const displayUnixMs = transcriptItemDisplayUnixMs(item);
-      if (sinceUnixMs !== null && displayUnixMs < sinceUnixMs) {
-        return false;
-      }
-      if (untilUnixMs !== null && displayUnixMs > untilUnixMs) {
-        return false;
-      }
-      return true;
-    });
+    const filteredTranscriptItems = sinceUnixMs === null
+      ? transcriptItems
+      : transcriptItems.filter((item) => transcriptItemDisplayUnixMs(item) >= sinceUnixMs);
 
     const lines = sinceUnixMs === null
       ? [
@@ -3155,7 +3440,7 @@ export class CoordinatorApp {
           "## Transcript",
           "",
           `_Defaults to \`speech,joins,chat\`. Use \`?include=${[...includeSet].join(",")}\` or any comma-separated subset to narrow it._`,
-          "_Use `?since=<timestamp>` or `?until=<timestamp>` with a visible line timestamp like `00:30` to bound the transcript. Pagination returns complete rendered turns, so a boundary line may repeat text you already saw._",
+          "_Use `?since=<timestamp>` with a visible line timestamp like `00:30` to fetch from that point onward. Pagination returns complete rendered turns, so the first returned line may repeat text you already saw._",
           "",
         ]
       : [];
@@ -3539,7 +3824,7 @@ export class CoordinatorApp {
 
         const initialMeetingRun = filters.meeting_run_id
           ? this.getMeetingRun(filters.meeting_run_id)
-          : (filters.room_id ? this.resolveMeetingRunWithMinutesForRoom(filters.room_id) : null);
+          : (filters.room_id ? this.resolveMeetingRunForRoom(filters.room_id) : null);
         const initialMinuteJob = initialMeetingRun ? this.getLatestMinuteJob(initialMeetingRun.meeting_run_id) : null;
         const initialLatestVersion = initialMinuteJob
           ? this.storage.getLatestMinuteVersionForMinuteJob(initialMinuteJob.minute_job_id)

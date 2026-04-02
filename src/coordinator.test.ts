@@ -46,6 +46,41 @@ function buildTempConfig(tempDir: string): InternalConfig {
   };
 }
 
+interface AuthEnvSnapshot {
+  adminPassword: string | undefined;
+  adminPasswordHash: string | undefined;
+  viewerPassword: string | undefined;
+  viewerPasswordHash: string | undefined;
+  requireReadAuth: string | undefined;
+}
+
+function captureAuthEnv(): AuthEnvSnapshot {
+  return {
+    adminPassword: process.env.METER_ADMIN_PASSWORD,
+    adminPasswordHash: process.env.METER_ADMIN_PASSWORD_HASH,
+    viewerPassword: process.env.METER_VIEWER_PASSWORD,
+    viewerPasswordHash: process.env.METER_VIEWER_PASSWORD_HASH,
+    requireReadAuth: process.env.METER_REQUIRE_AUTH_FOR_READS,
+  };
+}
+
+function restoreAuthEnv(snapshot: AuthEnvSnapshot): void {
+  if (snapshot.adminPassword === undefined) delete process.env.METER_ADMIN_PASSWORD;
+  else process.env.METER_ADMIN_PASSWORD = snapshot.adminPassword;
+
+  if (snapshot.adminPasswordHash === undefined) delete process.env.METER_ADMIN_PASSWORD_HASH;
+  else process.env.METER_ADMIN_PASSWORD_HASH = snapshot.adminPasswordHash;
+
+  if (snapshot.viewerPassword === undefined) delete process.env.METER_VIEWER_PASSWORD;
+  else process.env.METER_VIEWER_PASSWORD = snapshot.viewerPassword;
+
+  if (snapshot.viewerPasswordHash === undefined) delete process.env.METER_VIEWER_PASSWORD_HASH;
+  else process.env.METER_VIEWER_PASSWORD_HASH = snapshot.viewerPasswordHash;
+
+  if (snapshot.requireReadAuth === undefined) delete process.env.METER_REQUIRE_AUTH_FOR_READS;
+  else process.env.METER_REQUIRE_AUTH_FOR_READS = snapshot.requireReadAuth;
+}
+
 function buildMeetingRun(overrides: Partial<MeetingRunRecord> = {}): MeetingRunRecord {
   return {
     meeting_run_id: "meeting-run-test",
@@ -60,7 +95,6 @@ function buildMeetingRun(overrides: Partial<MeetingRunRecord> = {}): MeetingRunR
     ended_at: null,
     created_at: "2026-03-12T06:48:00.000Z",
     updated_at: "2026-03-12T06:48:05.000Z",
-    minutes_enabled: false,
     worker: null,
     paths: {
       data_dir: "/tmp/meter-test",
@@ -471,32 +505,6 @@ test("renderMarkdownTranscript supports since with visible line timestamps and c
   expect(markdown).not.toContain("[cursor=");
 });
 
-test("renderMarkdownTranscript supports until with visible line timestamps", () => {
-  const app = new CoordinatorApp(buildConfig());
-  const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
-    meetingRun: MeetingRunRecord,
-    speech: SpeechSegmentRecord[],
-    chat?: ChatMessageRecord[],
-    attendeeEvents?: EventRecord<ZoomAttendeePresencePayload>[],
-    options?: {
-      include?: Array<"speech" | "joins" | "chat">;
-      since_unix_ms?: number | null;
-      until_unix_ms?: number | null;
-    },
-  ) => string;
-
-  const markdown = renderMarkdownTranscript(buildMeetingRun(), buildSpeechWithGrowingTurn(), buildChat(), buildAttendeeEvents(), {
-    include: ["speech", "joins", "chat"],
-    until_unix_ms: Date.parse("2026-03-12T06:48:21.000Z"),
-  });
-
-  expect(markdown).toContain("# 2193058682");
-  expect(markdown).toContain("[00:10 spk=\"Judge mobile\"] Opening remarks continued thought");
-  expect(markdown).toContain("[00:20 chat id=1 replies=1 from=\"Judge mobile\" to=Everyone] Ahoy");
-  expect(markdown).toContain("[00:21 chat id=2 reply-to=1 from=\"Josh Mandel\" to=Everyone] Reply text");
-  expect(markdown).not.toContain("[00:30 spk=\"Josh Mandel\"] Follow up");
-});
-
 test("renderMarkdownTranscript coalesces continuous unknown-speaker segments", () => {
   const app = new CoordinatorApp(buildConfig());
   const renderMarkdownTranscript = (app as any).renderMarkdownTranscript.bind(app) as (
@@ -855,11 +863,11 @@ test("patchMeetingRunFromEvents marks a run stopping when Zoom reports the meeti
 test("handleResumeMeetingRun creates a successor run and seeds resumed minutes", async () => {
   const app = new CoordinatorApp(buildConfig()) as any;
   const tempDir = mkdtempSync(path.join("/tmp", "meter-resume-test-"));
+  const originalNow = Date.now;
   const sourceRun = buildMeetingRun({
     meeting_run_id: "run-completed",
     state: "completed",
     ended_at: "2026-03-12T06:50:00.000Z",
-    minutes_enabled: true,
   });
   const resumedRun = buildMeetingRun({
     meeting_run_id: "run-resumed",
@@ -867,7 +875,7 @@ test("handleResumeMeetingRun creates a successor run and seeds resumed minutes",
     created_at: "2026-03-12T06:51:00.000Z",
     updated_at: "2026-03-12T06:51:00.000Z",
   });
-  const spawnedMinutes: Array<{ meetingRunId: string; seed: string | null }> = [];
+  const spawnedMinutes: Array<{ meetingRunId: string; seed: { seed_minutes_markdown?: string | null } | null }> = [];
 
   app.getMeetingRun = (meetingRunId: string) => (meetingRunId === "run-completed" ? sourceRun : resumedRun);
   app.initializeMeetingRun = async () => ({
@@ -879,9 +887,9 @@ test("handleResumeMeetingRun creates a successor run and seeds resumed minutes",
     meetingRun: MeetingRunRecord,
     _promptConfig: unknown,
     _restartedFrom: string | null,
-    options?: { seed_minutes_markdown?: string | null },
+    seed: { seed_minutes_markdown?: string | null } | null,
   ) => {
-    spawnedMinutes.push({ meetingRunId: meetingRun.meeting_run_id, seed: options?.seed_minutes_markdown ?? null });
+    spawnedMinutes.push({ meetingRunId: meetingRun.meeting_run_id, seed });
     return {
       minute_job_id: "minute-job-resumed",
       meeting_run_id: meetingRun.meeting_run_id,
@@ -932,198 +940,29 @@ test("handleResumeMeetingRun creates a successor run and seeds resumed minutes",
     listMeetingRunRecords: () => [resumedRun, sourceRun],
   };
 
-  const response = await app.handleResumeMeetingRun(
-    new Request("http://127.0.0.1:3100/v1/meeting-runs/run-completed/resume", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({}),
-    }),
-    "run-completed",
-  );
-  expect(response.status).toBe(201);
-  expect(spawnedMinutes).toEqual([
-    {
-      meetingRunId: "run-resumed",
-      seed: "# Minutes\n\nExisting notes",
-    },
-  ]);
-  rmSync(tempDir, { recursive: true, force: true });
-});
-
-test("handleResumeMeetingRun does not resume minutes when they were disabled on the source run", async () => {
-  const app = new CoordinatorApp(buildConfig()) as any;
-  const tempDir = mkdtempSync(path.join("/tmp", "meter-resume-test-"));
-  const sourceRun = buildMeetingRun({
-    meeting_run_id: "run-completed",
-    state: "completed",
-    ended_at: "2026-03-12T06:50:00.000Z",
-    minutes_enabled: false,
-  });
-  const resumedRun = buildMeetingRun({
-    meeting_run_id: "run-resumed",
-    state: "pending",
-    created_at: "2026-03-12T06:51:00.000Z",
-    updated_at: "2026-03-12T06:51:00.000Z",
-  });
-  const spawnedMinutes: Array<{ meetingRunId: string; seed: string | null }> = [];
-
-  app.getMeetingRun = (meetingRunId: string) => (meetingRunId === "run-completed" ? sourceRun : resumedRun);
-  app.initializeMeetingRun = async () => ({
-    meeting_run_id: "run-resumed",
-    layout: await createMeetingRunLayout(tempDir, "run-resumed", Date.parse("2026-03-12T06:51:00.000Z"), false),
-  });
-  app.spawnWorker = async () => undefined;
-  app.spawnMinuteJob = async (meetingRun: MeetingRunRecord, _promptConfig: unknown, _restartedFrom: string | null, options?: { seed_minutes_markdown?: string | null }) => {
-    spawnedMinutes.push({ meetingRunId: meetingRun.meeting_run_id, seed: options?.seed_minutes_markdown ?? null });
-    return {
-      minute_job_id: "minute-job-resumed",
-      meeting_run_id: meetingRun.meeting_run_id,
-    };
-  };
-  app.getLatestMinuteJob = () => ({
-    minute_job_id: "minute-job-source",
-    meeting_run_id: "run-completed",
-    room_id: "zoom:2193058682",
-    state: "completed",
-    provider: "openrouter_patch",
-    tmux_session_name: null,
-    command: null,
-    prompt_template_id: "default",
-    prompt_label: "Default",
-    prompt_hash: null,
-    user_prompt_body: "Keep concise minutes",
-    claude_model: null,
-    claude_effort: null,
-    openrouter_model: "openai/gpt-4.1-mini",
-    working_dir: "/tmp/meter-test",
-    latest_minutes_path: "/tmp/meter-test/minutes.md",
-    latest_content_sha256: null,
-    latest_version_seq: 1,
-    started_at: "2026-03-12T06:48:00.000Z",
-    ended_at: "2026-03-12T06:50:00.000Z",
-    last_update_at: "2026-03-12T06:50:00.000Z",
-    restarted_from_minute_job_id: null,
-    last_error: null,
-  });
-  app.storage = {
-    getMeetingRunRecord: (meetingRunId: string) => (meetingRunId === "run-resumed" ? resumedRun : sourceRun),
-    getLatestMinuteVersionForMinuteJob: () => ({
-      minute_version_id: "minute-version-source",
-      minute_job_id: "minute-job-source",
-      meeting_run_id: "run-completed",
-      room_id: "zoom:2193058682",
-      seq: 1,
-      status: "final",
-      content_markdown: "# Minutes\n\nExisting notes",
-      content_sha256: "sha",
-      created_at: "2026-03-12T06:50:00.000Z",
-    }),
-    listMeetingRunRecords: () => [resumedRun, sourceRun],
-  };
-
-  const response = await app.handleResumeMeetingRun(
-    new Request("http://127.0.0.1:3100/v1/meeting-runs/run-completed/resume", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({}),
-    }),
-    "run-completed",
-  );
-  expect(response.status).toBe(201);
-  expect(spawnedMinutes).toEqual([]);
-  rmSync(tempDir, { recursive: true, force: true });
-});
-
-test("handleRecoverMinutes seeds the latest minutes snapshot and uses recover mode", async () => {
-  const app = new CoordinatorApp(buildConfig()) as any;
-  const meetingRun = buildMeetingRun({
-    meeting_run_id: "run-live",
-    state: "capturing",
-    minutes_enabled: true,
-  });
-  const spawned: Array<{
-    meetingRunId: string;
-    restartedFrom: string | null;
-    seed: string | null;
-    launchMode: string | null;
-  }> = [];
-  const latestMinuteJob = {
-    minute_job_id: "minute-job-source",
-    meeting_run_id: "run-live",
-    room_id: "zoom:2193058682",
-    state: "failed",
-    provider: "openrouter_patch",
-    tmux_session_name: null,
-    command: null,
-    prompt_template_id: "default",
-    prompt_label: "Default",
-    prompt_hash: null,
-    user_prompt_body: "Keep concise minutes",
-    claude_model: null,
-    claude_effort: null,
-    openrouter_model: "openai/gpt-4.1-mini",
-    working_dir: "/tmp/meter-test",
-    latest_minutes_path: "/tmp/meter-test/minutes.md",
-    latest_content_sha256: null,
-    latest_version_seq: 1,
-    started_at: "2026-03-12T06:48:00.000Z",
-    ended_at: "2026-03-12T06:50:00.000Z",
-    last_update_at: "2026-03-12T06:50:00.000Z",
-    restarted_from_minute_job_id: null,
-    last_error: null,
-  };
-
-  app.getMeetingRun = () => meetingRun;
-  app.getLatestMinuteJob = () => latestMinuteJob;
-  app.spawnMinuteJob = async (
-    run: MeetingRunRecord,
-    _promptConfig: unknown,
-    restartedFrom: string | null,
-    options?: { seed_minutes_markdown?: string | null; launch_mode?: string | null },
-  ) => {
-    spawned.push({
-      meetingRunId: run.meeting_run_id,
-      restartedFrom,
-      seed: options?.seed_minutes_markdown ?? null,
-      launchMode: options?.launch_mode ?? null,
-    });
-    return {
-      minute_job_id: "minute-job-recovered",
-      meeting_run_id: run.meeting_run_id,
-    };
-  };
-  app.storage = {
-    getLatestMinuteVersionForMinuteJob: () => ({
-      minute_version_id: "minute-version-source",
-      minute_job_id: "minute-job-source",
-      meeting_run_id: "run-live",
-      room_id: "zoom:2193058682",
-      seq: 1,
-      status: "final",
-      content_markdown: "# Minutes\n\nRecovered notes",
-      content_sha256: "sha",
-      created_at: "2026-03-12T06:50:00.000Z",
-    }),
-  };
-
-  const response = await app.handleRecoverMinutes(
-    new Request("http://127.0.0.1:3100/v1/meeting-runs/run-live/minutes/recover", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({}),
-    }),
-    "run-live",
-  );
-
-  expect(response.status).toBe(201);
-  expect(spawned).toEqual([
-    {
-      meetingRunId: "run-live",
-      restartedFrom: "minute-job-source",
-      seed: "# Minutes\n\nRecovered notes",
-      launchMode: "recover",
-    },
-  ]);
+  try {
+    Date.now = () => Date.parse("2026-03-12T06:51:00.000Z");
+    const response = await app.handleResumeMeetingRun(
+      new Request("http://127.0.0.1:3100/v1/meeting-runs/run-completed/resume", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+      "run-completed",
+    );
+    expect(response.status).toBe(201);
+    expect(spawnedMinutes).toEqual([
+      {
+        meetingRunId: "run-resumed",
+        seed: {
+          seed_minutes_markdown: "# Minutes\n\nExisting notes",
+        },
+      },
+    ]);
+  } finally {
+    Date.now = originalNow;
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("renderAutomatedRescuePrompt injects meeting context into the prompt", async () => {
@@ -1225,6 +1064,218 @@ test("launchAutomatedRescue streams a self-contained prompt over stdin", async (
   }
 });
 
+test("minute prompt presets can be saved, listed with templates, and deleted", async () => {
+  const tempDir = mkdtempSync(path.join("/tmp", "meter-minute-presets-"));
+  const authEnv = captureAuthEnv();
+  process.env.METER_ADMIN_PASSWORD = "swordfish";
+  delete process.env.METER_ADMIN_PASSWORD_HASH;
+  delete process.env.METER_VIEWER_PASSWORD;
+  delete process.env.METER_VIEWER_PASSWORD_HASH;
+  delete process.env.METER_REQUIRE_AUTH_FOR_READS;
+  const app = new CoordinatorApp(buildTempConfig(tempDir));
+
+  try {
+    await app.start();
+    const port = (app as any).server.port as number;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const login = await fetch(`${baseUrl}/v1/auth/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "swordfish" }),
+    });
+    const auth = await login.json() as { csrf_token: string | null };
+    const cookie = login.headers.get("set-cookie") ?? "";
+
+    const saveResponse = await fetch(`${baseUrl}/v1/minute-prompt-presets`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie,
+        "x-meter-csrf": auth.csrf_token ?? "",
+      },
+      body: JSON.stringify({
+        name: "FHIR WG formal",
+        provider: "claude_tmux",
+        prompt_template_id: "decision-journal",
+        user_prompt_body: "Capture decisions and owners",
+        claude_model: "sonnet",
+        claude_effort: "high",
+      }),
+    });
+    expect(saveResponse.status).toBe(201);
+    const savedBody = await saveResponse.json() as { preset: { name: string; prompt_template_id: string | null; claude_effort: string | null } };
+    expect(savedBody.preset.name).toBe("FHIR WG formal");
+    expect(savedBody.preset.prompt_template_id).toBe("decision-journal");
+    expect(savedBody.preset.claude_effort).toBe("high");
+
+    const listResponse = await fetch(`${baseUrl}/v1/minute-prompt-templates`);
+    expect(listResponse.status).toBe(200);
+    const listBody = await listResponse.json() as { saved_presets?: Array<{ name: string; prompt_template_id: string | null }> };
+    expect(listBody.saved_presets?.some((preset) => preset.name === "FHIR WG formal" && preset.prompt_template_id === "decision-journal")).toBe(true);
+
+    const deleteResponse = await fetch(`${baseUrl}/v1/minute-prompt-presets/FHIR%20WG%20formal`, {
+      method: "DELETE",
+      headers: {
+        cookie,
+        "x-meter-csrf": auth.csrf_token ?? "",
+      },
+    });
+    expect(deleteResponse.status).toBe(200);
+
+    const listAfterDelete = await fetch(`${baseUrl}/v1/minute-prompt-templates`);
+    const deletedBody = await listAfterDelete.json() as { saved_presets?: Array<{ name: string }> };
+    expect(deletedBody.saved_presets?.some((preset) => preset.name === "FHIR WG formal")).toBe(false);
+  } finally {
+    restoreAuthEnv(authEnv);
+    await app.stop().catch(() => undefined);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("public mutations require an authenticated admin session", async () => {
+  const tempDir = mkdtempSync(path.join("/tmp", "meter-auth-session-"));
+  const authEnv = captureAuthEnv();
+  process.env.METER_ADMIN_PASSWORD = "swordfish";
+  delete process.env.METER_ADMIN_PASSWORD_HASH;
+  delete process.env.METER_VIEWER_PASSWORD;
+  delete process.env.METER_VIEWER_PASSWORD_HASH;
+  delete process.env.METER_REQUIRE_AUTH_FOR_READS;
+  const app = new CoordinatorApp(buildTempConfig(tempDir));
+
+  try {
+    await app.start();
+    const port = (app as any).server.port as number;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const denied = await fetch(`${baseUrl}/v1/meeting-runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ join_url: "https://zoom.us/j/123456789" }),
+    });
+    expect(denied.status).toBe(401);
+
+    const login = await fetch(`${baseUrl}/v1/auth/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "swordfish" }),
+    });
+    expect(login.status).toBe(201);
+    const auth = await login.json() as { authenticated: boolean; role: string | null; csrf_token: string | null };
+    expect(auth.authenticated).toBe(true);
+    expect(auth.role).toBe("admin");
+    expect(auth.csrf_token).toBeTruthy();
+    const cookie = login.headers.get("set-cookie");
+    expect(cookie).toContain("meter_auth_session=");
+
+    const allowed = await fetch(`${baseUrl}/v1/meeting-runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: cookie ?? "",
+        "x-meter-csrf": auth.csrf_token ?? "",
+      },
+      body: JSON.stringify({ join_url: "https://zoom.us/j/123456789" }),
+    });
+    expect(allowed.status).not.toBe(401);
+    expect(allowed.status).not.toBe(403);
+  } finally {
+    restoreAuthEnv(authEnv);
+    await app.stop().catch(() => undefined);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("public reads can require an authenticated viewer or admin session", async () => {
+  const tempDir = mkdtempSync(path.join("/tmp", "meter-read-auth-"));
+  const authEnv = captureAuthEnv();
+  process.env.METER_ADMIN_PASSWORD = "swordfish";
+  process.env.METER_VIEWER_PASSWORD = "viewonly";
+  process.env.METER_REQUIRE_AUTH_FOR_READS = "true";
+  delete process.env.METER_ADMIN_PASSWORD_HASH;
+  delete process.env.METER_VIEWER_PASSWORD_HASH;
+  const app = new CoordinatorApp(buildTempConfig(tempDir));
+
+  try {
+    await app.start();
+    const port = (app as any).server.port as number;
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const anonymousRead = await fetch(`${baseUrl}/v1/meeting-runs`);
+    expect(anonymousRead.status).toBe(401);
+
+    const viewerLogin = await fetch(`${baseUrl}/v1/auth/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "viewonly" }),
+    });
+    expect(viewerLogin.status).toBe(201);
+    const viewerAuth = await viewerLogin.json() as { authenticated: boolean; role: string | null; read_auth_required: boolean };
+    expect(viewerAuth.authenticated).toBe(true);
+    expect(viewerAuth.role).toBe("viewer");
+    expect(viewerAuth.read_auth_required).toBe(true);
+    const viewerCookie = viewerLogin.headers.get("set-cookie") ?? "";
+
+    const viewerRead = await fetch(`${baseUrl}/v1/meeting-runs`, {
+      headers: { cookie: viewerCookie },
+    });
+    expect(viewerRead.status).toBe(200);
+
+    const viewerMutation = await fetch(`${baseUrl}/v1/meeting-runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: viewerCookie,
+      },
+      body: JSON.stringify({ join_url: "https://zoom.us/j/123456789" }),
+    });
+    expect(viewerMutation.status).toBe(401);
+
+    const adminLogin = await fetch(`${baseUrl}/v1/auth/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "swordfish" }),
+    });
+    expect(adminLogin.status).toBe(201);
+    const adminCookie = adminLogin.headers.get("set-cookie") ?? "";
+
+    const adminRead = await fetch(`${baseUrl}/v1/meeting-runs`, {
+      headers: { cookie: adminCookie },
+    });
+    expect(adminRead.status).toBe(200);
+  } finally {
+    restoreAuthEnv(authEnv);
+    await app.stop().catch(() => undefined);
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("handleResumeMeetingRun rejects runs outside the 2 hour resume window", async () => {
+  const app = new CoordinatorApp(buildConfig()) as any;
+  app.getMeetingRun = () => buildMeetingRun({
+    meeting_run_id: "run-old",
+    state: "completed",
+    ended_at: "2026-03-12T04:00:00.000Z",
+  });
+
+  const originalNow = Date.now;
+  Date.now = () => Date.parse("2026-03-12T06:48:00.000Z");
+  try {
+    const response = await app.handleResumeMeetingRun(
+      new Request("http://127.0.0.1:3100/v1/meeting-runs/run-old/resume", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+      "run-old",
+    );
+    expect(response.status).toBe(409);
+    const body = await response.json() as { error: { code: string } };
+    expect(body.error.code).toBe("meeting_run_resume_window_expired");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("minute jobs can start, stream, restart, and stop without leaking old visible state", async () => {
   const tempDir = mkdtempSync(path.join("/tmp", "meter-minute-job-"));
   const fakeMinuteTakerPath = path.join(tempDir, "fake-minute-taker.ts");
@@ -1321,7 +1372,6 @@ process.on("SIGTERM", () => {
       tags: [],
       options: buildMeetingRun().options,
       paths: layout,
-      minutes_enabled: false,
     });
 
     const startResponse = await fetch(`${baseUrl}/v1/meeting-runs/${meetingRunId}/minutes/start`, {

@@ -1,105 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { TranscriptPage } from "./transcript-view";
+import { MinutesPage } from "./minutes-view";
+import { MinutePromptEditor } from "./minute-prompt-editor";
+import { AuthProvider, AuthStatusControl, useAuthSession } from "./auth";
+import {
+  deleteJson,
+  fetchJson,
+  postJson,
+  type EventRecord,
+  type HealthResponse,
+  type MeetingRunRecord,
+  type MinuteJobRecord,
+  type MinutePromptPresetRecord,
+  type MinutePromptTemplatesResponse,
+} from "./api";
 
 import {
   listMinutePromptTemplates,
   type MinutePromptTemplate,
 } from "../src/minute-prompts";
 import {
-  MINUTE_CLAUDE_EFFORT_OPTIONS,
-  MINUTE_CLAUDE_MODEL_SUGGESTIONS,
-  MINUTE_OPENROUTER_MODEL_SUGGESTIONS,
-  type MinuteDraftFields,
-  type MinutePresetSource,
-  type UiMinuteClaudeEffort,
   type UiMinuteProvider,
   minutePromptRequestBody,
   useMinutePresetDraftManager,
 } from "./minute-prompt-drafts";
 
 type ConnectionState = "connecting" | "live" | "reconnecting";
-
-interface WorkerSummary {
-  worker_id: string;
-  pid: number | null;
-  ingest_port: number | null;
-  cdp_port: number | null;
-  status: "online" | "offline";
-  last_heartbeat_at: string | null;
-}
-
-interface MeetingRunStats {
-  event_count: number;
-  speech_segment_count: number;
-  chat_message_count: number;
-  audio_object_count: number;
-  archive_audio_bytes: number;
-}
-
-interface ApiErrorBody {
-  code: string;
-  message: string;
-}
-
-interface MeetingRunRecord {
-  meeting_run_id: string;
-  room_id: string;
-  normalized_join_url: string;
-  bot_name: string;
-  requested_by: string | null;
-  state: string;
-  started_at: string | null;
-  ended_at: string | null;
-  created_at: string;
-  updated_at: string;
-  worker: WorkerSummary | null;
-  stats: MeetingRunStats;
-  minutes?: MinuteJobRecord | null;
-  last_error: ApiErrorBody | null;
-}
-
-interface MinuteJobRecord {
-  minute_job_id: string;
-  meeting_run_id: string;
-  room_id: string;
-  state: "idle" | "starting" | "running" | "stopping" | "restarting" | "completed" | "failed";
-  provider: UiMinuteProvider;
-  tmux_session_name: string | null;
-  prompt_template_id: string | null;
-  prompt_label: string | null;
-  prompt_hash: string | null;
-  user_prompt_body: string | null;
-  claude_model: string | null;
-  claude_effort: "low" | "medium" | "high" | "max" | null;
-  openrouter_model: string | null;
-  latest_version_seq: number;
-  started_at: string;
-  ended_at: string | null;
-  last_update_at: string | null;
-}
-
-interface MinutePromptTemplatesResponse {
-  default_provider?: UiMinuteProvider;
-  default_openrouter_model?: string | null;
-  items: MinutePromptTemplate[];
-}
-
-interface HealthResponse {
-  ok: boolean;
-  now: string;
-  mode: string;
-  workers: { active_count: number };
-}
-
-interface EventRecord {
-  event_id: number;
-  meeting_run_id: string;
-  room_id: string;
-  kind: string;
-  source: string;
-  ts: string;
-  payload: any;
-}
 
 const ACTIVE_STATES = new Set(["pending", "starting", "joining", "capturing", "stopping"]);
 const BUILTIN_MINUTE_PROMPT_TEMPLATES = listMinutePromptTemplates();
@@ -165,6 +92,30 @@ function formatRoomLabel(roomId: string): string {
   return roomId;
 }
 
+function extractZoomMeetingId(roomId: string): string | null {
+  const [provider, providerRoomKey] = roomId.split(":", 2);
+  if (provider === "zoom" && providerRoomKey) {
+    return providerRoomKey;
+  }
+  return null;
+}
+
+function buildTranscriptViewHref(run: MeetingRunRecord): string {
+  const zoomMeetingId = extractZoomMeetingId(run.room_id);
+  if (zoomMeetingId && isActiveRun(run)) {
+    return `/zoom-meetings/${encodeURIComponent(zoomMeetingId)}/transcript/view?meeting_run_id=${encodeURIComponent(run.meeting_run_id)}`;
+  }
+  return `/meeting-runs/${run.meeting_run_id}/transcript/view`;
+}
+
+function buildMinutesViewHref(run: MeetingRunRecord): string {
+  const zoomMeetingId = extractZoomMeetingId(run.room_id);
+  if (zoomMeetingId && isActiveRun(run)) {
+    return `/zoom-meetings/${encodeURIComponent(zoomMeetingId)}/minutes/view?meeting_run_id=${encodeURIComponent(run.meeting_run_id)}`;
+  }
+  return `/meeting-runs/${run.meeting_run_id}/minutes/view`;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -175,26 +126,14 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);
+function canResumeRun(run: MeetingRunRecord): boolean {
+  if (isActiveRun(run)) {
+    return false;
   }
-  return response.json();
-}
-
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.error?.message ?? `${response.status} ${response.statusText}`);
+  if (!run.ended_at) {
+    return false;
   }
-  return response.json();
+  return Date.now() - Date.parse(run.ended_at) <= 2 * 60 * 60 * 1000;
 }
 
 function StatusPill({
@@ -211,40 +150,6 @@ function StatusPill({
       <span className="status-label">{label}</span>
       <span className="status-value">{value}</span>
     </div>
-  );
-}
-
-function AutoGrowTextarea({
-  value,
-  onChange,
-  disabled,
-  className,
-}: {
-  value: string;
-  onChange: (nextValue: string) => void;
-  disabled?: boolean;
-  className?: string;
-}) {
-  const ref = useRef<HTMLTextAreaElement | null>(null);
-
-  useEffect(() => {
-    const element = ref.current;
-    if (!element) {
-      return;
-    }
-    element.style.height = "0px";
-    element.style.height = `${element.scrollHeight}px`;
-  }, [value]);
-
-  return (
-    <textarea
-      ref={ref}
-      className={className}
-      disabled={disabled}
-      rows={1}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-    />
   );
 }
 
@@ -283,13 +188,19 @@ function Screenshot({ meetingRunId }: { meetingRunId: string }) {
 function NewCapture({
   onCreated,
   minuteTemplates,
+  minutePresets,
   defaultMinuteProvider,
   defaultOpenRouterModel,
+  csrfToken,
+  isAdmin,
 }: {
   onCreated: (run: MeetingRunRecord) => void;
   minuteTemplates: MinutePromptTemplate[];
+  minutePresets: MinutePromptPresetRecord[];
   defaultMinuteProvider: UiMinuteProvider;
   defaultOpenRouterModel: string;
+  csrfToken: string | null;
+  isAdmin: boolean;
 }) {
   const enabledStorageKey = "meter:new-capture:minutes:enabled";
   const [joinUrl, setJoinUrl] = useState("");
@@ -299,11 +210,26 @@ function NewCapture({
   const [error, setError] = useState<string | null>(null);
   const minuteDraft = useMinutePresetDraftManager({
     templates: minuteTemplates,
+    savedPresets: minutePresets,
     runningFields: null,
     runningPromptLabel: null,
     preferRunningPreset: false,
     defaultProvider: defaultMinuteProvider,
     defaultOpenRouterModel,
+    onSavePreset: async ({ name, fields }) => {
+      const response = await postJson<{ preset: MinutePromptPresetRecord }>("/v1/minute-prompt-presets", {
+        name,
+        ...minutePromptRequestBody(minuteTemplates, fields, name, defaultMinuteProvider),
+      }, {
+        headers: { "x-meter-csrf": csrfToken ?? "" },
+      });
+      return response.preset;
+    },
+    onDeletePreset: async (name) => {
+      await deleteJson(`/v1/minute-prompt-presets/${encodeURIComponent(name)}`, {
+        headers: { "x-meter-csrf": csrfToken ?? "" },
+      });
+    },
   });
 
   useEffect(() => {
@@ -316,7 +242,7 @@ function NewCapture({
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!joinUrl.trim()) {
+    if (!joinUrl.trim() || !isAdmin) {
       return;
     }
     setSubmitting(true);
@@ -325,6 +251,8 @@ function NewCapture({
       const response = await postJson<{ meeting_run: MeetingRunRecord }>("/v1/meeting-runs", {
         join_url: joinUrl.trim(),
         bot_name: botName.trim() || undefined,
+      }, {
+        headers: { "x-meter-csrf": csrfToken ?? "" },
       });
       let createdRun = response.meeting_run;
       let minuteStartError: string | null = null;
@@ -333,6 +261,9 @@ function NewCapture({
           await postJson(
             `/v1/meeting-runs/${createdRun.meeting_run_id}/minutes/start`,
             minutePromptRequestBody(minuteTemplates, minuteDraft.currentFields, minuteDraft.promptLabel, defaultMinuteProvider),
+            {
+              headers: { "x-meter-csrf": csrfToken ?? "" },
+            },
           );
           const refreshed = await fetchJson<{ meeting_run: MeetingRunRecord }>(`/v1/meeting-runs/${createdRun.meeting_run_id}`);
           createdRun = refreshed.meeting_run;
@@ -366,7 +297,7 @@ function NewCapture({
             type="text"
             placeholder="2193058682 or https://zoom.us/j/123456789?pwd=..."
             value={joinUrl}
-            disabled={submitting}
+            disabled={submitting || !isAdmin}
             onChange={(inputEvent) => setJoinUrl(inputEvent.target.value)}
           />
         </label>
@@ -376,14 +307,14 @@ function NewCapture({
             type="text"
             placeholder="Meeting Bot"
             value={botName}
-            disabled={submitting}
+            disabled={submitting || !isAdmin}
             onChange={(inputEvent) => setBotName(inputEvent.target.value)}
           />
         </label>
         <label className="field-toggle">
           <input
             checked={minutesEnabled}
-            disabled={submitting}
+            disabled={submitting || !isAdmin}
             onChange={(inputEvent) => setMinutesEnabled(inputEvent.target.checked)}
             type="checkbox"
           />
@@ -391,125 +322,17 @@ function NewCapture({
         </label>
         {minutesEnabled ? (
           <>
-            <div className="minutes-preset-row">
-              <label className="field minutes-preset-picker">
-                <span>Prompt preset</span>
-                <select
-                  value={minuteDraft.selectedSource}
-                  disabled={submitting}
-                  onChange={(inputEvent) => minuteDraft.selectSource(inputEvent.target.value as MinutePresetSource)}
-                >
-                  {minuteTemplates.map((template) => (
-                    <option key={template.template_id} value={`template:${template.template_id}`}>
-                      {template.name}
-                    </option>
-                  ))}
-                  {minuteDraft.presets.map((preset) => (
-                    <option key={preset.name} value={`preset:${preset.name}`}>
-                      Local preset: {preset.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <span className={`minutes-draft ${minuteDraft.hasUnsavedChanges ? "minutes-draft-dirty" : "minutes-draft-clean"}`}>
-                {minuteDraft.hasUnsavedChanges ? "Unsaved local preset changes" : `Using ${minuteDraft.selectedLabel}`}
-              </span>
-              {minuteDraft.selectedPresetName && !minuteDraft.hasUnsavedChanges ? (
-                <button className="ghost-button" disabled={submitting} onClick={minuteDraft.deleteSelectedPreset} type="button">
-                  Delete preset
-                </button>
-              ) : null}
-            </div>
-            {minuteDraft.hasUnsavedChanges ? (
-              <div className="minutes-preset-save">
-                <label className="field minutes-preset-name">
-                  <span>Save local preset as</span>
-                  <input
-                    type="text"
-                    placeholder="Weekly FHIR WG"
-                    value={minuteDraft.presetNameDraft}
-                    disabled={submitting}
-                    onChange={(inputEvent) => minuteDraft.setPresetNameDraft(inputEvent.target.value)}
-                  />
-                </label>
-                <div className="minutes-preset-actions">
-                  <button className="secondary-button" disabled={submitting} onClick={minuteDraft.savePreset} type="button">
-                    Save preset
-                  </button>
-                  <button className="ghost-button" disabled={submitting} onClick={minuteDraft.resetDraftToSelected} type="button">
-                    Revert draft
-                  </button>
-                </div>
-                {minuteDraft.presetError ? <div className="inline-error">{minuteDraft.presetError}</div> : null}
-              </div>
-            ) : null}
-            {minuteDraft.selectedTemplate ? (
-              <p className="field-hint">{minuteDraft.selectedTemplate.description}</p>
-            ) : null}
-            <label className="field">
-              <span>Minute prompt</span>
-              <AutoGrowTextarea
-                className="auto-grow-textarea"
-                value={minuteDraft.promptBody}
-                disabled={submitting}
-                onChange={minuteDraft.setPromptBody}
-              />
-            </label>
-            {minuteDraft.provider === "claude_tmux" ? (
-              <div className="minutes-config-grid">
-                <label className="field">
-                  <span>Claude model</span>
-                  <select
-                    value={minuteDraft.claudeModel}
-                    disabled={submitting}
-                    onChange={(inputEvent) => minuteDraft.setClaudeModel(inputEvent.target.value)}
-                  >
-                    <option value="">Server default</option>
-                    {MINUTE_CLAUDE_MODEL_SUGGESTIONS.map((model) => (
-                      <option key={model} value={model}>
-                        {model}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Claude effort</span>
-                  <select
-                    value={minuteDraft.claudeEffort}
-                    disabled={submitting}
-                    onChange={(inputEvent) => minuteDraft.setClaudeEffort(inputEvent.target.value as UiMinuteClaudeEffort)}
-                  >
-                    <option value="">Server default</option>
-                    {MINUTE_CLAUDE_EFFORT_OPTIONS.filter((value) => value).map((value) => (
-                      <option key={value} value={value}>{value[0].toUpperCase()}{value.slice(1)}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            ) : (
-              <div className="minutes-config-grid">
-                <label className="field">
-                  <span>OpenRouter model</span>
-                  <select
-                    value={minuteDraft.openrouterModel}
-                    disabled={submitting}
-                    onChange={(inputEvent) => minuteDraft.setOpenRouterModel(inputEvent.target.value)}
-                  >
-                    <option value="">Server default</option>
-                    {MINUTE_OPENROUTER_MODEL_SUGGESTIONS.map((model) => (
-                      <option key={model} value={model}>
-                        {model}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            )}
+            <MinutePromptEditor
+              templates={minuteTemplates}
+              minuteDraft={minuteDraft}
+              disabled={submitting || !isAdmin}
+            />
           </>
         ) : null}
         <p className="field-hint">Starts immediately. Paste a Zoom link and choose the name shown in the meeting.</p>
+        {!isAdmin ? <div className="field-hint">Unlock admin mode to start or modify captures.</div> : null}
         {error ? <div className="inline-error">{error}</div> : null}
-        <button className="primary-button" disabled={submitting || !joinUrl.trim()} type="submit">
+        <button className="primary-button" disabled={submitting || !joinUrl.trim() || !isAdmin} type="submit">
           {submitting ? "Starting capture..." : "Start capture"}
         </button>
       </form>
@@ -564,15 +387,20 @@ function LiveRunCard({
   run,
   onStopped,
   onMinutesChanged,
+  isAdmin,
 }: {
   run: MeetingRunRecord;
   onStopped: () => Promise<void>;
   onMinutesChanged: () => void;
+  isAdmin: boolean;
 }) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleStop = async () => {
+    if (!isAdmin) {
+      return;
+    }
     setStopping(true);
     setError(null);
     try {
@@ -602,7 +430,7 @@ function LiveRunCard({
         </div>
         <button
           className="ghost-button ghost-danger"
-          disabled={stopping || run.state === "stopping"}
+          disabled={!isAdmin || stopping || run.state === "stopping"}
           onClick={handleStop}
           type="button"
         >
@@ -668,7 +496,7 @@ function LiveRunCard({
                 </div>
                 <a
                   className="action-link"
-                  href={`/v1/meeting-runs/${run.meeting_run_id}/transcript/view`}
+                  href={buildTranscriptViewHref(run)}
                   rel="noreferrer"
                   target="_blank"
                 >
@@ -687,7 +515,7 @@ function LiveRunCard({
                 <div className="record-link-actions">
                   <a
                     className="action-link"
-                    href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
+                    href={buildMinutesViewHref(run)}
                     rel="noreferrer"
                     target="_blank"
                   >
@@ -708,10 +536,12 @@ function LiveRuns({
   runs,
   onStopRun,
   onMinutesChanged,
+  isAdmin,
 }: {
   runs: MeetingRunRecord[];
   onStopRun: (meetingRunId: string) => Promise<void>;
   onMinutesChanged: (meetingRunId: string) => void;
+  isAdmin: boolean;
 }) {
   return (
     <section className="content-section">
@@ -735,6 +565,7 @@ function LiveRuns({
               run={run}
               onStopped={() => onStopRun(run.meeting_run_id)}
               onMinutesChanged={() => onMinutesChanged(run.meeting_run_id)}
+              isAdmin={isAdmin}
             />
           ))}
         </div>
@@ -746,10 +577,32 @@ function LiveRuns({
 function HistoryRow({
   run,
   onMinutesChanged: _onMinutesChanged,
+  onResumeRun,
+  isAdmin,
 }: {
   run: MeetingRunRecord;
   onMinutesChanged: (meetingRunId: string) => void;
+  onResumeRun: (meetingRunId: string) => Promise<void>;
+  isAdmin: boolean;
 }) {
+  const [resumeState, setResumeState] = useState<"idle" | "submitting">("idle");
+  const [resumeError, setResumeError] = useState<string | null>(null);
+
+  const handleResume = async () => {
+    if (!isAdmin) {
+      return;
+    }
+    setResumeState("submitting");
+    setResumeError(null);
+    try {
+      await onResumeRun(run.meeting_run_id);
+    } catch (error) {
+      setResumeError(error instanceof Error ? error.message : "Failed to resume capture");
+    } finally {
+      setResumeState("idle");
+    }
+  };
+
   return (
     <tr>
       <td>
@@ -759,7 +612,7 @@ function HistoryRow({
           <div className="history-actions">
             <a
               className="history-action"
-              href={`/v1/meeting-runs/${run.meeting_run_id}/transcript/view`}
+              href={buildTranscriptViewHref(run)}
               rel="noreferrer"
               target="_blank"
             >
@@ -767,17 +620,32 @@ function HistoryRow({
             </a>
             <a
               className="history-action"
-              href={`/v1/meeting-runs/${run.meeting_run_id}/minutes/view`}
+              href={buildMinutesViewHref(run)}
               rel="noreferrer"
               target="_blank"
             >
               {run.minutes ? "Open minute workspace" : "Start minutes"}
             </a>
           </div>
+          {resumeError ? <small>{resumeError}</small> : null}
         </div>
       </td>
       <td>{run.bot_name}</td>
-      <td><StateBadge state={run.state} /></td>
+      <td>
+        <div className="history-status-cell">
+          <StateBadge state={run.state} />
+          {canResumeRun(run) ? (
+            <button
+              className="history-action history-button"
+              disabled={!isAdmin || resumeState !== "idle"}
+              onClick={() => void handleResume()}
+              type="button"
+            >
+              {resumeState === "submitting" ? "Resuming..." : "Resume"}
+            </button>
+          ) : null}
+        </div>
+      </td>
       <td>{formatTime(run.started_at ?? run.created_at)}</td>
       <td>{formatDuration(run.started_at ?? run.created_at, run.ended_at)}</td>
       <td>{run.stats.speech_segment_count}</td>
@@ -790,9 +658,13 @@ function HistoryRow({
 function HistoryTable({
   runs,
   onMinutesChanged,
+  onResumeRun,
+  isAdmin,
 }: {
   runs: MeetingRunRecord[];
   onMinutesChanged: (meetingRunId: string) => void;
+  onResumeRun: (meetingRunId: string) => Promise<void>;
+  isAdmin: boolean;
 }) {
   return (
     <section className="content-section">
@@ -825,6 +697,8 @@ function HistoryTable({
                 <HistoryRow
                   key={run.meeting_run_id}
                   onMinutesChanged={onMinutesChanged}
+                  onResumeRun={onResumeRun}
+                  isAdmin={isAdmin}
                   run={run}
                 />
               ))}
@@ -836,10 +710,12 @@ function HistoryTable({
   );
 }
 
-function App() {
+function DashboardPage() {
+  const { isAdmin, csrfToken } = useAuthSession();
   const [runs, setRuns] = useState<MeetingRunRecord[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [minuteTemplates, setMinuteTemplates] = useState<MinutePromptTemplate[]>(BUILTIN_MINUTE_PROMPT_TEMPLATES);
+  const [minutePresets, setMinutePresets] = useState<MinutePromptPresetRecord[]>([]);
   const [defaultMinuteProvider, setDefaultMinuteProvider] = useState<UiMinuteProvider>("claude_tmux");
   const [defaultOpenRouterModel, setDefaultOpenRouterModel] = useState("");
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
@@ -876,6 +752,7 @@ function App() {
     setRuns(orderedRuns);
     setHealth(healthResponse);
     setMinuteTemplates(templatesResponse.items.length > 0 ? templatesResponse.items : BUILTIN_MINUTE_PROMPT_TEMPLATES);
+    setMinutePresets(templatesResponse.saved_presets ?? []);
     setDefaultMinuteProvider(templatesResponse.default_provider === "openrouter_patch" ? "openrouter_patch" : "claude_tmux");
     setDefaultOpenRouterModel(templatesResponse.default_openrouter_model?.trim() || "");
     setPageError(null);
@@ -953,8 +830,18 @@ function App() {
   };
 
   const handleStopRun = async (meetingRunId: string) => {
-    await postJson(`/v1/meeting-runs/${meetingRunId}/stop`, {});
+    await postJson(`/v1/meeting-runs/${meetingRunId}/stop`, {}, {
+      headers: { "x-meter-csrf": csrfToken ?? "" },
+    });
     queueRunRefresh(meetingRunId);
+  };
+
+  const handleResumeRun = async (meetingRunId: string) => {
+    const response = await postJson<{ meeting_run: MeetingRunRecord }>(`/v1/meeting-runs/${meetingRunId}/resume`, {}, {
+      headers: { "x-meter-csrf": csrfToken ?? "" },
+    });
+    setRuns((currentRuns) => mergeRun(currentRuns, response.meeting_run));
+    queueRunRefresh(response.meeting_run.meeting_run_id);
   };
 
   return (
@@ -967,6 +854,7 @@ function App() {
             Start Zoom captures, follow live status, and review transcript activity in one place.
           </p>
         </div>
+        <AuthStatusControl />
       </header>
 
       {pageError ? <div className="banner-error">{pageError}</div> : null}
@@ -975,8 +863,11 @@ function App() {
         <aside className="sidebar">
           <NewCapture
             minuteTemplates={minuteTemplates}
+            minutePresets={minutePresets}
             defaultMinuteProvider={defaultMinuteProvider}
             defaultOpenRouterModel={defaultOpenRouterModel}
+            csrfToken={csrfToken}
+            isAdmin={isAdmin}
             onCreated={handleCreated}
           />
           <OverviewPanel
@@ -992,12 +883,32 @@ function App() {
             runs={activeRuns}
             onStopRun={handleStopRun}
             onMinutesChanged={queueRunRefresh}
+            isAdmin={isAdmin}
           />
-          <HistoryTable runs={historyRuns} onMinutesChanged={queueRunRefresh} />
+          <HistoryTable runs={historyRuns} onMinutesChanged={queueRunRefresh} onResumeRun={handleResumeRun} isAdmin={isAdmin} />
         </section>
       </main>
     </div>
   );
+}
+
+function AppRouter() {
+  const pathname = window.location.pathname;
+  if (
+    pathname === "/transcript-view"
+    || /^\/meeting-runs\/[^/]+\/transcript\/view$/.test(pathname)
+    || /^\/zoom-meetings\/[^/]+\/transcript\/view$/.test(pathname)
+  ) {
+    return <TranscriptPage />;
+  }
+  if (
+    pathname === "/minutes-view"
+    || /^\/meeting-runs\/[^/]+\/minutes\/view$/.test(pathname)
+    || /^\/zoom-meetings\/[^/]+\/minutes\/view$/.test(pathname)
+  ) {
+    return <MinutesPage />;
+  }
+  return <DashboardPage />;
 }
 
 const rootElement = document.getElementById("root");
@@ -1005,4 +916,8 @@ if (!rootElement) {
   throw new Error("Missing #root element");
 }
 
-createRoot(rootElement).render(<App />);
+createRoot(rootElement).render(
+  <AuthProvider>
+    <AppRouter />
+  </AuthProvider>,
+);

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import {
@@ -13,12 +12,12 @@ import { buildSystemPrompt } from "./prompt";
 export interface OpenRouterMinuteConfig {
   meetingId: string;
   meetingRunId: string;
+  botName?: string | null;
   runDir: string;
   pollIntervalMs: number;
   promptTemplateId?: string | null;
   userPromptBody?: string | null;
   openrouterModel?: string | null;
-  launchMode?: "normal" | "restart_replay" | "recover";
 }
 
 export interface OpenRouterRuntimeOptions {
@@ -59,17 +58,6 @@ export interface ParsedPatchResponse {
   responseShape: "canonical" | "legacy_single_op";
 }
 
-interface OpenRouterCheckpoint {
-  last_processed_cursor: string | null;
-  last_processed_offset_ms: number | null;
-  last_full_transcript_sha256: string | null;
-  updated_at: string;
-}
-
-type TranscriptScope = "full_prefix" | "delta_since_checkpoint";
-
-const TRANSCRIPT_OFFSET_RE = /^\[(\d{1,2}:\d{2}(?::\d{2})?)\s/gm;
-
 export function splitTranscriptForMessages(text: string, maxChars = 12_000): string[] {
   const normalized = text.trim();
   if (!normalized) {
@@ -91,75 +79,6 @@ export function splitTranscriptForMessages(text: string, maxChars = 12_000): str
     blocks.push(current);
   }
   return blocks;
-}
-
-export function parseTranscriptOffsetMs(value: string): number | null {
-  const match = value.trim().match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
-  if (!match) {
-    return null;
-  }
-  const first = Number.parseInt(match[1], 10);
-  const second = Number.parseInt(match[2], 10);
-  const third = match[3] ? Number.parseInt(match[3], 10) : null;
-  const hours = third === null ? 0 : first;
-  const minutes = third === null ? first : second;
-  const seconds = third === null ? second : third;
-  if (minutes > 59 || seconds > 59) {
-    return null;
-  }
-  return ((((hours * 60) + minutes) * 60) + seconds) * 1000;
-}
-
-export function formatTranscriptOffsetMs(offsetMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(offsetMs / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
-    : `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-export function extractTranscriptOffsetsMs(text: string): number[] {
-  const offsets: number[] = [];
-  const pattern = new RegExp(TRANSCRIPT_OFFSET_RE);
-  for (const match of text.matchAll(pattern)) {
-    const value = parseTranscriptOffsetMs(match[1] ?? "");
-    if (value !== null) {
-      offsets.push(value);
-    }
-  }
-  return offsets;
-}
-
-export function extractLastTranscriptCursor(text: string): string | null {
-  let cursor: string | null = null;
-  const pattern = new RegExp(TRANSCRIPT_OFFSET_RE);
-  for (const match of text.matchAll(pattern)) {
-    cursor = match[1] ?? null;
-  }
-  return cursor;
-}
-
-export function extractLastTranscriptOffsetMs(text: string): number | null {
-  const offsets = extractTranscriptOffsetsMs(text);
-  return offsets.length > 0 ? offsets[offsets.length - 1] ?? null : null;
-}
-
-export function buildReplayFrontiersMs(frontierMs: number, windowMs: number): number[] {
-  if (!Number.isFinite(frontierMs) || frontierMs < 0) {
-    return [];
-  }
-  const safeWindowMs = Math.max(1_000, Math.floor(windowMs));
-  if (frontierMs === 0) {
-    return [0];
-  }
-  const frontiers: number[] = [];
-  for (let cursorMs = safeWindowMs; cursorMs < frontierMs; cursorMs += safeWindowMs) {
-    frontiers.push(cursorMs);
-  }
-  frontiers.push(frontierMs);
-  return frontiers;
 }
 
 export function parsePatchResponse(value: unknown): ParsedPatchResponse {
@@ -369,59 +288,12 @@ function readMinutes(runDir: string): string {
   }
 }
 
-function hashText(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
-function checkpointPath(runDir: string): string {
-  return `${runDir}/.openrouter-state.json`;
-}
-
-function readCheckpoint(runDir: string): OpenRouterCheckpoint | null {
-  try {
-    const raw = readFileSync(checkpointPath(runDir), "utf-8");
-    const parsed = JSON.parse(raw) as Partial<OpenRouterCheckpoint>;
-    return {
-      last_processed_cursor: typeof parsed.last_processed_cursor === "string" && parsed.last_processed_cursor.trim()
-        ? parsed.last_processed_cursor.trim()
-        : null,
-      last_processed_offset_ms: typeof parsed.last_processed_offset_ms === "number" && Number.isFinite(parsed.last_processed_offset_ms)
-        ? parsed.last_processed_offset_ms
-        : null,
-      last_full_transcript_sha256: typeof parsed.last_full_transcript_sha256 === "string" && parsed.last_full_transcript_sha256.trim()
-        ? parsed.last_full_transcript_sha256.trim()
-        : null,
-      updated_at: typeof parsed.updated_at === "string" && parsed.updated_at.trim()
-        ? parsed.updated_at
-        : new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function writeCheckpoint(runDir: string, checkpoint: OpenRouterCheckpoint): void {
-  writeDebugFile(checkpointPath(runDir), checkpoint);
-}
-
 function writeDebugFile(path: string, value: unknown): void {
   writeFileSync(path, `${typeof value === "string" ? value : JSON.stringify(value, null, 2)}\n`);
 }
 
 function writeApplyLog(runDir: string, value: unknown): void {
   writeDebugFile(`${runDir}/.openrouter-last-apply.json`, value);
-}
-
-function recordTranscriptChunk(runDir: string, tracker: CursorTracker, transcriptMarkdown: string): void {
-  const chunk = processResponse(tracker, transcriptMarkdown);
-  if (!chunk) {
-    return;
-  }
-  writeFileSync(
-    `${runDir}/chunks/${String(chunk.segmentIndex).padStart(4, "0")}.md`,
-    `${chunk.content}\n`,
-  );
-  console.log(`OpenRouter chunk ${chunk.segmentIndex}: ${chunk.content.split("\n").length} lines`);
 }
 
 async function callOpenRouter(
@@ -512,12 +384,12 @@ async function callOpenRouter(
 function buildPatchMessages(input: {
   meetingId: string;
   meetingRunId: string;
+  botName?: string | null;
   promptTemplateId?: string | null;
   userPromptBody?: string | null;
   transcriptMarkdown: string;
   currentMinutes: string;
   isFinal: boolean;
-  transcriptScope: TranscriptScope;
 }): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [
     {
@@ -525,6 +397,7 @@ function buildPatchMessages(input: {
       content: buildSystemPrompt({
         meetingId: input.meetingId,
         meetingRunId: input.meetingRunId,
+        botName: input.botName ?? null,
         promptTemplateId: input.promptTemplateId ?? null,
         userPromptBody: input.userPromptBody ?? null,
       }),
@@ -550,20 +423,17 @@ function buildPatchMessages(input: {
       ].join("\n"),
     },
   ];
-  const transcriptHeading = input.transcriptScope === "delta_since_checkpoint"
-    ? "New transcript since the last successful minutes update"
-    : "Transcript so far";
   const transcriptBlocks = splitTranscriptForMessages(input.transcriptMarkdown);
   if (transcriptBlocks.length === 0) {
     messages.push({
       role: "user",
-      content: `${transcriptHeading}:\n\n_No transcript content yet._`,
+      content: "Transcript so far:\n\n_No transcript content yet._",
     });
   } else {
     for (const [index, block] of transcriptBlocks.entries()) {
       messages.push({
         role: "user",
-        content: `${transcriptHeading} block ${index + 1}/${transcriptBlocks.length}:\n\n${block}`,
+        content: `Transcript block ${index + 1}/${transcriptBlocks.length}:\n\n${block}`,
       });
     }
   }
@@ -602,151 +472,54 @@ export async function runOpenRouterMinuteTaker(input: {
   let consecutiveErrors = 0;
   let pollCount = 0;
   let lastTranscript = "";
-  const checkpoint = readCheckpoint(input.config.runDir);
-  let lastProcessedCursor = checkpoint?.last_processed_cursor ?? null;
-  let lastProcessedOffsetMs = checkpoint?.last_processed_offset_ms ?? null;
-  let lastFullTranscriptSha = checkpoint?.last_full_transcript_sha256 ?? null;
   let finalized = false;
-  const launchMode = input.config.launchMode ?? "normal";
-  let transcriptScope: TranscriptScope = launchMode === "recover"
-    ? "delta_since_checkpoint"
-    : "full_prefix";
-  if (transcriptScope === "delta_since_checkpoint" && (!lastProcessedCursor || !lastFullTranscriptSha)) {
-    console.warn("OpenRouter recover requested without a complete saved checkpoint; falling back to full transcript mode.");
-    transcriptScope = "full_prefix";
-  }
-
-  const persistCheckpoint = (transcriptMarkdown: string, fullTranscriptSha: string | null): void => {
-    const nextCursor = extractLastTranscriptCursor(transcriptMarkdown);
-    const nextOffsetMs = extractLastTranscriptOffsetMs(transcriptMarkdown);
-    if (nextCursor !== null) {
-      lastProcessedCursor = nextCursor;
-    }
-    if (nextOffsetMs !== null) {
-      lastProcessedOffsetMs = nextOffsetMs;
-    }
-    if (fullTranscriptSha !== null) {
-      lastFullTranscriptSha = fullTranscriptSha;
-    }
-    writeCheckpoint(input.config.runDir, {
-      last_processed_cursor: lastProcessedCursor,
-      last_processed_offset_ms: lastProcessedOffsetMs,
-      last_full_transcript_sha256: lastFullTranscriptSha,
-      updated_at: new Date().toISOString(),
-    });
-  };
-
-  const applyTranscriptUpdate = async (
-    transcriptMarkdown: string,
-    fullTranscriptSha: string | null,
-    isFinal: boolean,
-    scope: TranscriptScope,
-  ): Promise<void> => {
-    if (transcriptMarkdown.trim()) {
-      recordTranscriptChunk(input.config.runDir, input.tracker, transcriptMarkdown);
-    }
-    const currentMinutes = readMinutes(input.config.runDir);
-    if (transcriptMarkdown.trim() || currentMinutes || isFinal) {
-      const messages = buildPatchMessages({
-        meetingId: input.config.meetingId,
-        meetingRunId: input.config.meetingRunId,
-        promptTemplateId: input.config.promptTemplateId ?? null,
-        userPromptBody: input.config.userPromptBody ?? null,
-        transcriptMarkdown,
-        currentMinutes,
-        isFinal,
-        transcriptScope: scope,
-      });
-      const patch = await callOpenRouter(runtime, messages, input.config.runDir);
-      const nextMinutes = applyPatchResponse(currentMinutes, patch);
-      writeApplyLog(input.config.runDir, {
-        stage: "applied",
-        at: new Date().toISOString(),
-        response_shape: patch.responseShape,
-        terminal: isFinal,
-        changed: nextMinutes !== currentMinutes,
-        previous_length: currentMinutes.length,
-        next_length: nextMinutes.length,
-        last_chunk_index: input.tracker.lastSegmentIndex,
-        transcript_scope: scope,
-      });
-      if (nextMinutes !== currentMinutes) {
-        writeFileSync(`${input.config.runDir}/minutes.md`, nextMinutes);
-      }
-    }
-    persistCheckpoint(transcriptMarkdown, fullTranscriptSha);
-  };
-
-  if (launchMode === "restart_replay") {
-    const replayBaseline = await fetchTranscriptMd(input.client, input.config.meetingRunId);
-    const replayFrontierMs = extractLastTranscriptOffsetMs(replayBaseline);
-    if (replayFrontierMs !== null) {
-      const replayWindowMs = Math.max(input.config.pollIntervalMs * 2, 1_000);
-      const replayFrontiers = buildReplayFrontiersMs(replayFrontierMs, replayWindowMs);
-      let replayedTranscript = "";
-      console.log(
-        `OpenRouter restart replay: ${replayFrontiers.length} window(s) of ${Math.round(replayWindowMs / 1000)}s up to ${formatTranscriptOffsetMs(replayFrontierMs)}`,
-      );
-      for (const frontierMs of replayFrontiers) {
-        const transcript = await fetchTranscriptMd(input.client, input.config.meetingRunId, {
-          until: formatTranscriptOffsetMs(frontierMs),
-        });
-        if (transcript === replayedTranscript) {
-          continue;
-        }
-        console.log(`OpenRouter replay frontier ${formatTranscriptOffsetMs(frontierMs)}...`);
-        await applyTranscriptUpdate(transcript, hashText(transcript), false, "full_prefix");
-        replayedTranscript = transcript;
-      }
-      lastTranscript = replayedTranscript;
-    } else {
-      lastTranscript = replayBaseline;
-      if (replayBaseline.trim()) {
-        lastFullTranscriptSha = hashText(replayBaseline);
-      }
-    }
-  }
 
   while (!finalized) {
     pollCount += 1;
     try {
       const meetingRun = await fetchMeetingRun(input.client, input.config.meetingRunId);
-      const terminal = ["completed", "failed", "aborted"].includes(meetingRun.state);
-      if (transcriptScope === "delta_since_checkpoint") {
-        const fullTranscript = await fetchTranscriptMd(input.client, input.config.meetingRunId);
-        const fullTranscriptSha = hashText(fullTranscript);
-        const transcriptChanged = fullTranscriptSha !== lastFullTranscriptSha;
-        if (!transcriptChanged && !terminal) {
-          console.log(`OpenRouter poll ${pollCount}: no transcript change`);
-          consecutiveErrors = 0;
-          await Bun.sleep(input.config.pollIntervalMs);
-          continue;
-        }
-        const transcript = transcriptChanged
-          ? lastProcessedCursor
-            ? await fetchTranscriptMd(input.client, input.config.meetingRunId, {
-                since: lastProcessedCursor,
-              })
-            : fullTranscript
-          : "";
-        if (transcriptChanged) {
-          console.log(
-            `OpenRouter poll ${pollCount}: transcript advanced beyond checkpoint ${lastProcessedCursor ?? "start"}`,
-          );
-        } else {
-          console.log(`OpenRouter poll ${pollCount}: transcript unchanged; running final cleanup`);
-        }
-        await applyTranscriptUpdate(transcript, fullTranscriptSha, terminal, "delta_since_checkpoint");
+      const transcript = await fetchTranscriptMd(input.client, input.config.meetingRunId);
+      const chunk = processResponse(input.tracker, transcript);
+      if (chunk) {
+        writeFileSync(
+          `${input.config.runDir}/chunks/${String(chunk.segmentIndex).padStart(4, "0")}.md`,
+          `${chunk.content}\n`,
+        );
+        console.log(`OpenRouter chunk ${chunk.segmentIndex}: ${chunk.content.split("\n").length} lines`);
       } else {
-        const transcript = await fetchTranscriptMd(input.client, input.config.meetingRunId);
-        const transcriptChanged = transcript !== lastTranscript;
-        if (!transcriptChanged && !terminal) {
-          console.log(`OpenRouter poll ${pollCount}: no transcript change`);
-          consecutiveErrors = 0;
-          await Bun.sleep(input.config.pollIntervalMs);
-          continue;
+        console.log(`OpenRouter poll ${pollCount}: no transcript change`);
+      }
+      const terminal = ["completed", "failed", "aborted"].includes(meetingRun.state);
+      const shouldGenerate = transcript !== lastTranscript || terminal;
+      if (shouldGenerate) {
+        const currentMinutes = readMinutes(input.config.runDir);
+        if (transcript.trim() || currentMinutes || terminal) {
+          const messages = buildPatchMessages({
+            meetingId: input.config.meetingId,
+            meetingRunId: input.config.meetingRunId,
+            botName: input.config.botName ?? null,
+            promptTemplateId: input.config.promptTemplateId ?? null,
+            userPromptBody: input.config.userPromptBody ?? null,
+            transcriptMarkdown: transcript,
+            currentMinutes,
+            isFinal: terminal,
+          });
+          const patch = await callOpenRouter(runtime, messages, input.config.runDir);
+          const nextMinutes = applyPatchResponse(currentMinutes, patch);
+          writeApplyLog(input.config.runDir, {
+            stage: "applied",
+            at: new Date().toISOString(),
+            response_shape: patch.responseShape,
+            terminal,
+            changed: nextMinutes !== currentMinutes,
+            previous_length: currentMinutes.length,
+            next_length: nextMinutes.length,
+            last_chunk_index: input.tracker.lastSegmentIndex,
+          });
+          if (nextMinutes !== currentMinutes) {
+            writeFileSync(`${input.config.runDir}/minutes.md`, nextMinutes);
+          }
         }
-        await applyTranscriptUpdate(transcript, hashText(transcript), terminal, "full_prefix");
         lastTranscript = transcript;
       }
       consecutiveErrors = 0;

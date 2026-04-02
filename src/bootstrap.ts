@@ -300,6 +300,8 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
 
         let currentSpeaker = null;
         let meetingExitReported = false;
+        let meetingExitCandidateReason = null;
+        let meetingExitCandidateCount = 0;
         function emitDomEvent(kind, payload, raw) {
           if (session.readyState !== WebSocket.OPEN) {
             return;
@@ -389,6 +391,57 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           return null;
         }
 
+        function getVisibleLabels() {
+          return Array.from(document.querySelectorAll("button,[role='button'],a"))
+            .flatMap((element) => {
+              if (!(element instanceof HTMLElement)) {
+                return [];
+              }
+              const rect = element.getBoundingClientRect();
+              if (!rect.width || !rect.height) {
+                return [];
+              }
+              const label = (element.getAttribute("aria-label") || element.textContent || "").trim().toLowerCase();
+              return label ? [label] : [];
+            });
+        }
+
+        function hasVisibleMeetingApp() {
+          const meetingApp = document.getElementById("meeting-app");
+          if (!(meetingApp instanceof HTMLElement)) {
+            return false;
+          }
+          const rect = meetingApp.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        }
+
+        function hasVisibleInMeetingLeaveButton() {
+          return getVisibleLabels().some((label) => /^leave$/.test(label));
+        }
+
+        function storeLooksLive() {
+          const store = resolveReduxStore();
+          if (!store) {
+            return false;
+          }
+          const stateSnapshot = store.getState?.() || {};
+          const attendees = stateSnapshot.attendeesList?.attendeesList;
+          if (Array.isArray(attendees) && attendees.length > 0) {
+            return true;
+          }
+          const renderedVideoLists = [
+            stateSnapshot.video?.currentSpeakerActiveVideo,
+            stateSnapshot.video?.currentMultiSpeakerActiveVideo,
+            stateSnapshot.video?.activeSpeakerList,
+            stateSnapshot.video?.currentRenderVideo,
+            stateSnapshot.video?.currentSuspensionAllVideos,
+          ];
+          if (renderedVideoLists.some((list) => Array.isArray(list) && list.length > 0)) {
+            return true;
+          }
+          return false;
+        }
+
         function getSpeakerCandidateFromStore() {
           const store = resolveReduxStore();
           if (!store) {
@@ -467,6 +520,9 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
           if (state.phase !== "streaming") {
             return null;
           }
+          if (hasVisibleInMeetingLeaveButton() || hasVisibleMeetingApp() || storeLooksLive()) {
+            return null;
+          }
           const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim().toLowerCase();
           const endedPhrases = [
             "this meeting has ended",
@@ -482,22 +538,7 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
               return phrase;
             }
           }
-          const hasMeetingApp = Boolean(document.getElementById("meeting-app"));
-          if (hasMeetingApp) {
-            return null;
-          }
-          const visibleLabels = Array.from(document.querySelectorAll("button,[role='button'],a"))
-            .flatMap((element) => {
-              if (!(element instanceof HTMLElement)) {
-                return [];
-              }
-              const rect = element.getBoundingClientRect();
-              if (!rect.width || !rect.height) {
-                return [];
-              }
-              const label = (element.getAttribute("aria-label") || element.textContent || "").trim().toLowerCase();
-              return label ? [label] : [];
-            });
+          const visibleLabels = getVisibleLabels();
           if (visibleLabels.some((label) => /leave meeting|return to home|ok|close/.test(label))
             && /(ended|left the meeting|removed)/.test(bodyText)) {
             return "post-meeting-shell";
@@ -914,7 +955,18 @@ export function renderBootstrapScript(options: BootstrapScriptOptions): string {
 
         const meetingExitPoll = setInterval(() => {
           const reason = detectMeetingEndedReason();
-          if (reason) {
+          if (!reason) {
+            meetingExitCandidateReason = null;
+            meetingExitCandidateCount = 0;
+            return;
+          }
+          if (meetingExitCandidateReason !== reason) {
+            meetingExitCandidateReason = reason;
+            meetingExitCandidateCount = 1;
+            return;
+          }
+          meetingExitCandidateCount += 1;
+          if (meetingExitCandidateCount >= 2) {
             reportMeetingExit(reason);
             clearInterval(meetingExitPoll);
           }

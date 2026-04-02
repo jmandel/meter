@@ -1,5 +1,4 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
 import { marked } from "marked";
 
 const styles = `
@@ -178,10 +177,22 @@ function resolvePaths(): TranscriptPaths {
   const title = search.get("title");
   if (!streamPath || !markdownPath) {
     const current = window.location.pathname;
-    if (current.endsWith("/view")) {
+    const currentSearch = window.location.search;
+    const zoomMeetingMatch = current.match(/^\/zoom-meetings\/([^/]+)\/transcript\/view$/);
+    if (zoomMeetingMatch) {
+      const meetingId = decodeURIComponent(zoomMeetingMatch[1] ?? "");
       return {
-        streamPath: current.replace(/\/view$/, "/stream"),
-        markdownPath: current.replace(/\/view$/, ".md"),
+        streamPath: `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/stream${currentSearch}`,
+        markdownPath: `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/transcript.md${currentSearch}`,
+        title: title || "Transcript",
+      };
+    }
+    const meetingRunMatch = current.match(/^\/meeting-runs\/([^/]+)\/transcript\/view$/);
+    if (meetingRunMatch) {
+      const meetingRunId = decodeURIComponent(meetingRunMatch[1] ?? "");
+      return {
+        streamPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/stream${currentSearch}`,
+        markdownPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/transcript.md${currentSearch}`,
         title: title || "Transcript",
       };
     }
@@ -260,7 +271,7 @@ function applyHighlights(container: HTMLElement, previousLeafTexts: string[]): s
   return nextLeafTexts;
 }
 
-function App() {
+export function TranscriptPage() {
   const paths = useMemo(() => resolvePaths(), []);
   const [content, setContent] = useState("");
   const [connectionState, setConnectionState] = useState<"connecting" | "live" | "error">("connecting");
@@ -299,7 +310,7 @@ function App() {
     reconcileRenderedMarkdown(container, rendered);
     previousLeafTextsRef.current = applyHighlights(container, previousLeafTextsRef.current);
     if (autoTailRef.current) {
-      requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" }));
+      requestAnimationFrame(() => window.scrollTo({ top: document.documentElement.scrollHeight }));
     }
   }, [content]);
 
@@ -367,6 +378,7 @@ function App() {
             </div>
           </div>
           <div className="actions">
+            <a className="action-link" href="/">Back to dashboard</a>
             <a className="action-link" href={paths.markdownPath} target="_blank" rel="noreferrer">Open raw markdown</a>
             <div className={`status ${connectionState === "live" ? "live" : ""}`}>
               <span className="status-dot" />
@@ -384,5 +396,3 @@ function App() {
     </>
   );
 }
-
-createRoot(document.getElementById("root")!).render(<App />);

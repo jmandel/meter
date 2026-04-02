@@ -10,6 +10,7 @@ import type {
   ErrorRaisedPayload,
   EventEnvelope,
   EventRecord,
+  MinutePromptPresetRecord,
   MinuteProvider,
   MinuteClaudeEffort,
   MinuteJobRecord,
@@ -51,7 +52,6 @@ interface MeetingRunInsertInput {
   tags: string[];
   options: MeetingRunOptions;
   paths: MeetingRunPaths;
-  minutes_enabled: boolean;
 }
 
 interface MeetingRunPatch {
@@ -65,7 +65,6 @@ interface MeetingRunPatch {
   updated_at_unix_ms?: number;
   last_error_code?: string | null;
   last_error_message?: string | null;
-  minutes_enabled?: boolean;
 }
 
 interface MeetingRunRow {
@@ -87,7 +86,6 @@ interface MeetingRunRow {
   last_error_message: string | null;
   created_at_unix_ms: number;
   updated_at_unix_ms: number;
-  minutes_enabled: number | boolean;
   tags_json: string;
   options_json: string;
   paths_json: string;
@@ -186,6 +184,34 @@ interface MinuteVersionRow {
   created_at_unix_ms: number;
 }
 
+interface MinutePromptPresetInsertInput {
+  preset_id: string;
+  name: string;
+  provider: MinuteProvider;
+  prompt_template_id: string | null;
+  prompt_label: string | null;
+  user_prompt_body: string | null;
+  claude_model: string | null;
+  claude_effort: MinuteClaudeEffort | null;
+  openrouter_model: string | null;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
+interface MinutePromptPresetRow {
+  preset_id: string;
+  name: string;
+  provider: MinuteProvider;
+  prompt_template_id: string | null;
+  prompt_label: string | null;
+  user_prompt_body: string | null;
+  claude_model: string | null;
+  claude_effort: MinuteClaudeEffort | null;
+  openrouter_model: string | null;
+  created_at_unix_ms: number;
+  updated_at_unix_ms: number;
+}
+
 export class AppDatabase {
   readonly db: Database;
 
@@ -227,7 +253,6 @@ export class AppDatabase {
         last_error_message TEXT,
         created_at_unix_ms INTEGER NOT NULL,
         updated_at_unix_ms INTEGER NOT NULL,
-        minutes_enabled INTEGER NOT NULL DEFAULT 0,
         tags_json TEXT NOT NULL,
         options_json TEXT NOT NULL,
         paths_json TEXT NOT NULL
@@ -383,6 +408,21 @@ export class AppDatabase {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_minute_versions_job_seq ON minute_versions(minute_job_id, seq);
       CREATE INDEX IF NOT EXISTS idx_minute_versions_meeting_created ON minute_versions(meeting_run_id, created_at_unix_ms DESC);
 
+      CREATE TABLE IF NOT EXISTS minute_prompt_presets (
+        preset_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        provider TEXT NOT NULL DEFAULT 'claude_tmux',
+        prompt_template_id TEXT,
+        prompt_label TEXT,
+        user_prompt_body TEXT,
+        claude_model TEXT,
+        claude_effort TEXT,
+        openrouter_model TEXT,
+        created_at_unix_ms INTEGER NOT NULL,
+        updated_at_unix_ms INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_minute_prompt_presets_updated ON minute_prompt_presets(updated_at_unix_ms DESC);
+
       CREATE VIRTUAL TABLE IF NOT EXISTS speech_segments_fts USING fts5(
         speech_segment_id UNINDEXED,
         meeting_run_id UNINDEXED,
@@ -406,7 +446,6 @@ export class AppDatabase {
     this.ensureColumn("chat_messages", "is_edited", "INTEGER");
     this.ensureColumn("chat_messages", "chat_type", "TEXT");
     this.ensureColumn("chat_messages", "details_json", "TEXT");
-    this.ensureColumn("meeting_runs", "minutes_enabled", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("minute_jobs", "prompt_template_id", "TEXT");
     this.ensureColumn("minute_jobs", "provider", "TEXT NOT NULL DEFAULT 'claude_tmux'");
     this.ensureColumn("minute_jobs", "claude_model", "TEXT");
@@ -482,11 +521,10 @@ export class AppDatabase {
           last_error_message,
           created_at_unix_ms,
           updated_at_unix_ms,
-          minutes_enabled,
           tags_json,
           options_json,
           paths_json
-        ) VALUES (?, ?, 'zoom', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 'zoom', ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, NULL, NULL, ?, ?, ?, ?, ?)
       `)
       .run(
         input.meeting_run_id,
@@ -498,7 +536,6 @@ export class AppDatabase {
         input.data_dir,
         input.created_at_unix_ms,
         input.created_at_unix_ms,
-        input.minutes_enabled ? 1 : 0,
         JSON.stringify(input.tags),
         JSON.stringify(input.options),
         JSON.stringify(input.paths),
@@ -1065,6 +1102,22 @@ export class AppDatabase {
     };
   }
 
+  private mapMinutePromptPresetRow(row: MinutePromptPresetRow): MinutePromptPresetRecord {
+    return {
+      preset_id: row.preset_id,
+      name: row.name,
+      provider: row.provider,
+      prompt_template_id: row.prompt_template_id,
+      prompt_label: row.prompt_label,
+      user_prompt_body: row.user_prompt_body,
+      claude_model: row.claude_model,
+      claude_effort: row.claude_effort,
+      openrouter_model: row.openrouter_model,
+      created_at: toIso(row.created_at_unix_ms) ?? new Date(row.created_at_unix_ms).toISOString(),
+      updated_at: toIso(row.updated_at_unix_ms) ?? new Date(row.updated_at_unix_ms).toISOString(),
+    };
+  }
+
   getLatestMinuteJobRecordForMeetingRun(meetingRunId: string): MinuteJobRecord | null {
     const row = this.db
       .query(`
@@ -1076,6 +1129,72 @@ export class AppDatabase {
       `)
       .get(meetingRunId) as MinuteJobRow | null;
     return row ? this.mapMinuteJobRow(row) : null;
+  }
+
+  listMinutePromptPresetRecords(): MinutePromptPresetRecord[] {
+    const rows = this.db
+      .query(`
+        SELECT *
+        FROM minute_prompt_presets
+        ORDER BY LOWER(name) ASC, created_at_unix_ms ASC
+      `)
+      .all() as MinutePromptPresetRow[];
+    return rows.map((row) => this.mapMinutePromptPresetRow(row));
+  }
+
+  upsertMinutePromptPreset(input: MinutePromptPresetInsertInput): MinutePromptPresetRecord {
+    this.db
+      .query(`
+        INSERT INTO minute_prompt_presets (
+          preset_id,
+          name,
+          provider,
+          prompt_template_id,
+          prompt_label,
+          user_prompt_body,
+          claude_model,
+          claude_effort,
+          openrouter_model,
+          created_at_unix_ms,
+          updated_at_unix_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+          provider = excluded.provider,
+          prompt_template_id = excluded.prompt_template_id,
+          prompt_label = excluded.prompt_label,
+          user_prompt_body = excluded.user_prompt_body,
+          claude_model = excluded.claude_model,
+          claude_effort = excluded.claude_effort,
+          openrouter_model = excluded.openrouter_model,
+          updated_at_unix_ms = excluded.updated_at_unix_ms
+      `)
+      .run(
+        input.preset_id,
+        input.name,
+        input.provider,
+        input.prompt_template_id,
+        input.prompt_label,
+        input.user_prompt_body,
+        input.claude_model,
+        input.claude_effort,
+        input.openrouter_model,
+        input.created_at_unix_ms,
+        input.updated_at_unix_ms,
+      );
+    const row = this.db
+      .query("SELECT * FROM minute_prompt_presets WHERE name = ?")
+      .get(input.name) as MinutePromptPresetRow | null;
+    if (!row) {
+      throw new Error(`Failed to persist minute prompt preset ${input.name}`);
+    }
+    return this.mapMinutePromptPresetRow(row);
+  }
+
+  deleteMinutePromptPreset(name: string): boolean {
+    const result = this.db
+      .query("DELETE FROM minute_prompt_presets WHERE name = ?")
+      .run(name);
+    return Number(result.changes ?? 0) > 0;
   }
 
   getMinuteJobRecord(minuteJobId: string): MinuteJobRecord | null {
@@ -1249,7 +1368,6 @@ export class AppDatabase {
       ended_at: toIso(row.ended_at_unix_ms),
       created_at: toIso(row.created_at_unix_ms) ?? new Date(row.created_at_unix_ms).toISOString(),
       updated_at: toIso(row.updated_at_unix_ms) ?? new Date(row.updated_at_unix_ms).toISOString(),
-      minutes_enabled: Boolean(row.minutes_enabled),
       worker: this.buildWorkerSummary(row),
       paths: {
         data_dir: parsedPaths.data_dir as string,

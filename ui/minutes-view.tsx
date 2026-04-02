@@ -1,15 +1,20 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
 import { marked } from "marked";
 
 import { listMinutePromptTemplates, type MinutePromptTemplate } from "../src/minute-prompts";
 import {
-  MINUTE_CLAUDE_EFFORT_OPTIONS,
-  MINUTE_CLAUDE_MODEL_SUGGESTIONS,
-  MINUTE_OPENROUTER_MODEL_SUGGESTIONS,
+  deleteJson,
+  postJson,
+  type MinuteDetailsResponse,
+  type MinuteJobRecord,
+  type MinutePromptPresetRecord,
+  type MinutePromptTemplatesResponse,
+  type MinuteVersionRecord,
+} from "./api";
+import { AuthStatusControl, useAuthSession } from "./auth";
+import { MinutePromptEditor } from "./minute-prompt-editor";
+import {
   type MinuteDraftFields,
-  type MinutePresetSource,
-  type UiMinuteClaudeEffort,
   type UiMinuteProvider,
   minutePromptRequestBody,
   useMinutePresetDraftManager,
@@ -89,6 +94,44 @@ const styles = `
     align-items: center;
     flex-wrap: wrap;
     justify-content: flex-end;
+  }
+
+  .admin-control {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+  }
+
+  .admin-pill {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .admin-pill-live {
+    background: rgba(31, 122, 77, 0.12);
+    color: var(--good);
+  }
+
+  .admin-pill-locked {
+    background: rgba(176, 96, 35, 0.14);
+    color: var(--warn);
+  }
+
+  .admin-login {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    justify-content: flex-end;
+  }
+
+  .admin-login input {
+    min-width: 220px;
   }
 
   .action-link {
@@ -320,6 +363,66 @@ const styles = `
     padding: 12px 14px;
   }
 
+  .minutes-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .minutes-preset-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .minutes-preset-picker {
+    min-width: min(280px, 100%);
+  }
+
+  .minutes-preset-save {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 10px;
+  }
+
+  .minutes-preset-name {
+    flex: 1 1 280px;
+  }
+
+  .minutes-preset-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .minutes-draft {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .minutes-draft-clean {
+    background: rgba(31, 122, 77, 0.12);
+    color: var(--good);
+  }
+
+  .minutes-draft-dirty {
+    background: rgba(211, 106, 46, 0.14);
+    color: var(--accent);
+  }
+
+  .minutes-config-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
   .viewer-shell {
     display: flex;
     flex-direction: column;
@@ -433,43 +536,6 @@ const styles = `
   }
 `;
 
-type MinuteJobState = "idle" | "starting" | "running" | "stopping" | "restarting" | "completed" | "failed";
-type MinuteClaudeEffort = "" | "low" | "medium" | "high" | "max";
-
-type MinuteJobRecord = {
-  minute_job_id: string;
-  state: MinuteJobState;
-  provider: "claude_tmux" | "openrouter_patch";
-  tmux_session_name: string | null;
-  prompt_template_id: string | null;
-  prompt_label: string | null;
-  user_prompt_body: string | null;
-  claude_model: string | null;
-  claude_effort: Exclude<MinuteClaudeEffort, ""> | null;
-  openrouter_model: string | null;
-  latest_version_seq: number;
-  last_update_at: string | null;
-};
-
-type MinuteVersionRecord = {
-  minute_version_id: string;
-  seq: number;
-  status: "live" | "final";
-  created_at: string;
-};
-
-type MinuteDetailsResponse = {
-  meeting_run_id: string;
-  minute_job: MinuteJobRecord | null;
-  latest_version: MinuteVersionRecord | null;
-};
-
-type MinutePromptTemplatesResponse = {
-  default_provider?: UiMinuteProvider;
-  default_openrouter_model?: string | null;
-  items: MinutePromptTemplate[];
-};
-
 const BUILTIN_MINUTE_PROMPT_TEMPLATES = listMinutePromptTemplates();
 
 type StreamPayload = {
@@ -490,18 +556,45 @@ type Paths = {
   title: string | null;
 };
 
-function injectStyles(): void {
-  const style = document.createElement("style");
-  style.textContent = styles;
-  document.head.appendChild(style);
-}
-
 function getPaths(): Paths {
   const search = new URLSearchParams(window.location.search);
   const streamPath = search.get("stream");
   const markdownPath = search.get("markdown");
   if (!streamPath || !markdownPath) {
-    const current = `${window.location.pathname}${window.location.search}`;
+    const currentPath = window.location.pathname;
+    const currentSearch = window.location.search;
+    const current = `${currentPath}${currentSearch}`;
+    const zoomMeetingMatch = currentPath.match(/^\/zoom-meetings\/([^/]+)\/minutes\/view$/);
+    if (zoomMeetingMatch) {
+      const meetingId = decodeURIComponent(zoomMeetingMatch[1] ?? "");
+      const meetingRunId = search.get("meeting_run_id");
+      return {
+        detailsPath: `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes${currentSearch}`,
+        startPath: meetingRunId ? `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/start` : null,
+        restartPath: meetingRunId ? `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/restart` : null,
+        recoverPath: meetingRunId ? `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/recover` : null,
+        stopPath: meetingRunId ? `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/stop` : null,
+        transcriptPath: `/zoom-meetings/${encodeURIComponent(meetingId)}/transcript/view${currentSearch}`,
+        streamPath: `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes/stream${currentSearch}`,
+        markdownPath: `/v1/zoom-meetings/${encodeURIComponent(meetingId)}/minutes.md${currentSearch}`,
+        title: search.get("title"),
+      };
+    }
+    const meetingRunMatch = currentPath.match(/^\/meeting-runs\/([^/]+)\/minutes\/view$/);
+    if (meetingRunMatch) {
+      const meetingRunId = decodeURIComponent(meetingRunMatch[1] ?? "");
+      return {
+        detailsPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes${currentSearch}`,
+        startPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/start`,
+        restartPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/restart`,
+        recoverPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/recover`,
+        stopPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/stop`,
+        transcriptPath: `/meeting-runs/${encodeURIComponent(meetingRunId)}/transcript/view${currentSearch}`,
+        streamPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes/stream${currentSearch}`,
+        markdownPath: `/v1/meeting-runs/${encodeURIComponent(meetingRunId)}/minutes.md${currentSearch}`,
+        title: search.get("title"),
+      };
+    }
     return {
       detailsPath: search.get("details"),
       startPath: search.get("start"),
@@ -540,11 +633,56 @@ function formatTime(value: string | null): string {
 
 function describeMinuteBackend(minuteJob: MinuteJobRecord): string {
   if (minuteJob.provider === "openrouter_patch") {
-    return minuteJob.openrouter_model ? `OpenRouter · ${minuteJob.openrouter_model}` : "OpenRouter";
+    return minuteJob.openrouter_model ? `Model ${minuteJob.openrouter_model}` : "Server default model";
   }
-  const model = minuteJob.claude_model ?? "server default model";
-  const effort = minuteJob.claude_effort ?? "server default effort";
-  return `${model} · ${effort}`;
+  const parts: string[] = [];
+  if (minuteJob.claude_model?.trim()) {
+    parts.push(`Model ${minuteJob.claude_model.trim()}`);
+  }
+  if (minuteJob.claude_effort?.trim()) {
+    parts.push(`Effort ${minuteJob.claude_effort.trim()}`);
+  }
+  return parts.join(" · ") || "Server default model";
+}
+
+function getMinuteUiState(minuteJob: MinuteJobRecord | null, version: MinuteVersionRecord | null): {
+  statusLabel: string;
+  title: string;
+} {
+  if (!minuteJob) {
+    return {
+      statusLabel: version ? "Completed" : "Idle",
+      title: version ? "Completed minutes" : "Minutes preview",
+    };
+  }
+  if (minuteJob.state === "completed") {
+    return {
+      statusLabel: "Completed",
+      title: "Completed minutes",
+    };
+  }
+  if (minuteJob.state === "failed") {
+    return {
+      statusLabel: "Failed",
+      title: "Minutes",
+    };
+  }
+  if (minuteJob.state === "stopping") {
+    return {
+      statusLabel: "Stopping",
+      title: "Minutes",
+    };
+  }
+  if (minuteJob.state === "starting" || minuteJob.state === "restarting") {
+    return {
+      statusLabel: minuteJob.state === "starting" ? "Starting" : "Restarting",
+      title: "Minutes",
+    };
+  }
+  return {
+    statusLabel: version?.status === "final" ? "Finalized" : "Live",
+    title: "Live minutes",
+  };
 }
 
 function getLeafNodes(container: Element): string[] {
@@ -923,48 +1061,21 @@ function scrollWindowToBottom(): void {
   });
 }
 
-function AutoGrowTextarea({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (next: string) => void;
-}) {
-  const ref = useRef<HTMLTextAreaElement | null>(null);
-
-  useEffect(() => {
-    const element = ref.current;
-    if (!element) {
-      return;
-    }
-    element.style.height = "0px";
-    element.style.height = `${element.scrollHeight}px`;
-  }, [value]);
-
-  return (
-    <textarea
-      ref={ref}
-      rows={1}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-    />
-  );
-}
-
-function App() {
+export function MinutesPage() {
+  const { isAdmin, csrfToken } = useAuthSession();
   const paths = useMemo(() => getPaths(), []);
   const [minuteJob, setMinuteJob] = useState<MinuteJobRecord | null>(null);
+  const [detailsMeetingRunId, setDetailsMeetingRunId] = useState<string | null>(null);
   const [version, setVersion] = useState<MinuteVersionRecord | null>(null);
   const [minuteTemplates, setMinuteTemplates] = useState<MinutePromptTemplate[]>(BUILTIN_MINUTE_PROMPT_TEMPLATES);
+  const [minutePresets, setMinutePresets] = useState<MinutePromptPresetRecord[]>([]);
   const [defaultMinuteProvider, setDefaultMinuteProvider] = useState<UiMinuteProvider>("claude_tmux");
   const [defaultOpenRouterModel, setDefaultOpenRouterModel] = useState("");
   const [content, setContent] = useState("");
   const [requestState, setRequestState] = useState<"idle" | "starting" | "restarting" | "recovering" | "stopping">("idle");
   const [streamState, setStreamState] = useState<"connecting" | "live" | "reconnecting">("connecting");
-  const [statusLabel, setStatusLabel] = useState("Connecting");
   const [error, setError] = useState<string | null>(null);
   const [updatedLabel, setUpdatedLabel] = useState("Waiting for first minute snapshot…");
-  const [copyNotice, setCopyNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const markdownRootRef = useRef<HTMLDivElement | null>(null);
   const previousLeafTextsRef = useRef(new Set<string>());
@@ -995,11 +1106,31 @@ function App() {
   ]);
   const minuteDraft = useMinutePresetDraftManager({
     templates: minuteTemplates,
+    savedPresets: minutePresets,
     runningFields,
     runningPromptLabel: minuteJob?.prompt_label ?? null,
     preferRunningPreset: Boolean(minuteJob),
     defaultProvider: defaultMinuteProvider,
     defaultOpenRouterModel,
+    onSavePreset: async ({ name, fields }) => {
+      const response = await postJson<{ preset: MinutePromptPresetRecord }>("/v1/minute-prompt-presets", {
+        name,
+        ...minutePromptRequestBody(minuteTemplates, fields, name, defaultMinuteProvider),
+      }, {
+        headers: { "x-meter-csrf": csrfToken ?? "" },
+      });
+      setMinutePresets((current) => {
+        const next = current.filter((preset) => preset.name.toLowerCase() !== response.preset.name.toLowerCase());
+        return [...next, response.preset];
+      });
+      return response.preset;
+    },
+    onDeletePreset: async (name) => {
+      await deleteJson(`/v1/minute-prompt-presets/${encodeURIComponent(name)}`, {
+        headers: { "x-meter-csrf": csrfToken ?? "" },
+      });
+      setMinutePresets((current) => current.filter((preset) => preset.name !== name));
+    },
   });
 
   const renderedContent = useMemo(() => renderMinutesMarkdown(content), [content]);
@@ -1026,9 +1157,10 @@ function App() {
     if (!response.ok) {
       throw new Error(`Failed to load minute details (${response.status})`);
     }
-    const payload = await response.json() as MinuteDetailsResponse;
-    setMinuteJob(payload.minute_job);
-    setVersion(payload.latest_version);
+      const payload = await response.json() as MinuteDetailsResponse;
+      setDetailsMeetingRunId(payload.meeting_run_id);
+      setMinuteJob(payload.minute_job);
+      setVersion(payload.latest_version);
     if (forceDraftReset) {
       setSettingsOpen(!payload.minute_job);
     }
@@ -1044,6 +1176,7 @@ function App() {
       if (payload.items.length > 0) {
         setMinuteTemplates(payload.items);
       }
+      setMinutePresets(payload.saved_presets ?? []);
       setDefaultMinuteProvider(payload.default_provider === "openrouter_patch" ? "openrouter_patch" : "claude_tmux");
       setDefaultOpenRouterModel(payload.default_openrouter_model?.trim() || "");
     } catch {
@@ -1071,7 +1204,6 @@ function App() {
   };
 
   useEffect(() => {
-    injectStyles();
     if (paths.title) {
       document.title = `${paths.title} Minutes`;
     }
@@ -1117,22 +1249,18 @@ function App() {
     const eventSource = new EventSource(paths.streamPath);
     eventSource.onopen = () => {
       setStreamState("live");
-      setStatusLabel("Live");
     };
     eventSource.onerror = () => {
       setStreamState("reconnecting");
-      setStatusLabel("Reconnecting");
     };
     eventSource.addEventListener("heartbeat", () => {
       setStreamState("live");
-      setStatusLabel("Live");
     });
     eventSource.addEventListener("minutes", (event) => {
       const payload = JSON.parse((event as MessageEvent).data) as StreamPayload;
       setMinuteJob(payload.minute_job);
       setVersion(payload.version);
       setStreamState("live");
-      setStatusLabel(payload.version.status === "final" ? "Finalized" : "Live");
       if (payload.content_markdown !== lastMarkdownRef.current) {
         applyIncomingMarkdown(
           payload.content_markdown,
@@ -1150,14 +1278,26 @@ function App() {
   }, [paths.streamPath]);
 
   const submit = async (action: "start" | "restart" | "recover" | "stop") => {
-    const endpoint = action === "start"
-      ? paths.startPath
-      : action === "restart"
-        ? paths.restartPath
-        : action === "recover"
-          ? paths.recoverPath
-          : paths.stopPath;
-    if (!endpoint) {
+    const fallbackMeetingRunId = minuteJob?.meeting_run_id ?? detailsMeetingRunId;
+    const fallbackEndpoint = fallbackMeetingRunId
+      ? action === "start"
+        ? `/v1/meeting-runs/${fallbackMeetingRunId}/minutes/start`
+        : action === "restart"
+          ? `/v1/meeting-runs/${fallbackMeetingRunId}/minutes/restart`
+          : action === "recover"
+            ? `/v1/meeting-runs/${fallbackMeetingRunId}/minutes/recover`
+          : `/v1/meeting-runs/${fallbackMeetingRunId}/minutes/stop`
+      : null;
+    const endpoint = (
+      action === "start"
+        ? paths.startPath
+        : action === "restart"
+          ? paths.restartPath
+          : action === "recover"
+            ? paths.recoverPath
+            : paths.stopPath
+    ) ?? fallbackEndpoint;
+    if (!endpoint || !isAdmin) {
       return;
     }
     setError(null);
@@ -1173,7 +1313,11 @@ function App() {
     try {
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "x-meter-csrf": csrfToken ?? "",
+        },
+        credentials: "include",
         body: JSON.stringify(action === "stop"
           ? {}
           : action === "recover"
@@ -1203,13 +1347,6 @@ function App() {
         } else {
           setUpdatedLabel("Recovering from the latest saved minutes…");
         }
-        setStatusLabel(
-          action === "start"
-            ? "Starting"
-            : action === "restart"
-              ? "Restarting"
-              : "Recovering",
-        );
         setStreamState("connecting");
         setSettingsOpen(false);
         await loadDetails(false).catch(() => undefined);
@@ -1224,22 +1361,8 @@ function App() {
     }
   };
 
-  const copyTmuxCommand = async () => {
-    if (!minuteJob?.tmux_session_name) {
-      return;
-    }
-    const command = `tmux attach -t ${minuteJob.tmux_session_name}`;
-    try {
-      await navigator.clipboard.writeText(command);
-      setCopyNotice("Copied tmux attach command");
-      window.setTimeout(() => setCopyNotice(null), 1800);
-    } catch {
-      setCopyNotice("Clipboard copy failed");
-      window.setTimeout(() => setCopyNotice(null), 1800);
-    }
-  };
-
   const currentState = minuteJob?.state ?? "idle";
+  const minuteUiState = getMinuteUiState(minuteJob, version);
   const canRecover = Boolean(
     minuteJob
     && paths.recoverPath
@@ -1255,36 +1378,37 @@ function App() {
   const settingsToggleLabel = settingsOpen ? "Hide settings" : minuteJob ? "Minute settings" : "Configure minutes";
 
   return (
-    <main className="shell">
-      <header className="head">
-        <div>
-          <p className="eyebrow">Minutes Workspace</p>
-          <h1>{paths.title ?? "Meter Minutes"}</h1>
-          <div className="meta">
-            <span>Minute state: <span className={`pill pill-${currentState}`}>{currentState}</span></span>
-            <span>{version ? `Version ${version.seq}` : "No rendered version yet"}</span>
-            <span>{minuteJob?.last_update_at ? `Last update ${formatTime(minuteJob.last_update_at)}` : "No updates yet"}</span>
+    <>
+      <style>{styles}</style>
+      <main className="shell">
+        <header className="head">
+          <div>
+            <p className="eyebrow">Minutes Workspace</p>
+            <h1>{paths.title ?? "Meter Minutes"}</h1>
+            <div className="meta">
+              <span>Minute state: <span className={`pill pill-${currentState}`}>{currentState}</span></span>
+              <span>{version ? `Version ${version.seq}` : "No rendered version yet"}</span>
+              <span>{minuteJob?.last_update_at ? `Last update ${formatTime(minuteJob.last_update_at)}` : "No updates yet"}</span>
+            </div>
           </div>
-        </div>
-        <div className="actions">
-          {paths.transcriptPath ? (
-            <a className="action-link" href={paths.transcriptPath} target="_blank" rel="noreferrer">Open transcript</a>
-          ) : null}
-          <a className="action-link" href={paths.markdownPath} target="_blank" rel="noreferrer">Open raw markdown</a>
-          <button className="ghost-button" onClick={() => setSettingsOpen((open) => !open)} type="button">
-            {settingsToggleLabel}
-          </button>
-          <button className="ghost-button" disabled={!minuteJob?.tmux_session_name} onClick={() => void copyTmuxCommand()} type="button">
-            Copy tmux attach
-          </button>
-          <div className="status" ref={(node) => setStatusClass(node, streamState)}>
-            <span className="status-dot"></span>
-            <span>{statusLabel}</span>
+          <div className="actions">
+            <AuthStatusControl />
+            <a className="action-link" href="/">Back to dashboard</a>
+            {paths.transcriptPath ? (
+              <a className="action-link" href={paths.transcriptPath}>Open transcript</a>
+            ) : null}
+            <a className="action-link" href={paths.markdownPath} target="_blank" rel="noreferrer">Open raw markdown</a>
+            <button className="ghost-button" onClick={() => setSettingsOpen((open) => !open)} type="button">
+              {settingsToggleLabel}
+            </button>
+            <div className="status" ref={(node) => setStatusClass(node, streamState)}>
+              <span className="status-dot"></span>
+              <span>{streamState === "reconnecting" ? "Reconnecting" : minuteUiState.statusLabel}</span>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      <section className={workspaceClassName}>
+        <section className={workspaceClassName}>
         {settingsOpen ? (
         <aside className="panel controls">
           <div className="controls-head">
@@ -1293,142 +1417,40 @@ function App() {
               Hide
             </button>
           </div>
-          <label className="field">
-            <span>Prompt preset</span>
-            <select
-              value={minuteDraft.selectedSource}
-              onChange={(event) => minuteDraft.selectSource(event.target.value as MinutePresetSource)}
-            >
-              {minuteJob ? <option value="run">This run's saved settings</option> : null}
-              {minuteTemplates.map((template) => (
-                <option key={template.template_id} value={`template:${template.template_id}`}>
-                  {template.name}
-                </option>
-              ))}
-              {minuteDraft.presets.map((preset) => (
-                <option key={preset.name} value={`preset:${preset.name}`}>
-                  Local preset: {preset.name}
-                </option>
-              ))}
-            </select>
-          </label>
           <div className="meta-row">
             <span className={`pill pill-${currentState}`}>{currentState}</span>
-            <span>{minuteDraft.hasUnsavedChanges ? "Unsaved local preset changes" : `Using ${minuteDraft.selectedLabel}`}</span>
-            {minuteDraft.selectedPresetName && !minuteDraft.hasUnsavedChanges ? (
-              <button className="ghost-button" onClick={minuteDraft.deleteSelectedPreset} type="button">
-                Delete preset
-              </button>
-            ) : null}
           </div>
-          {minuteDraft.hasUnsavedChanges ? (
-            <div className="field">
-              <span>Save local preset as</span>
-              <div className="button-row">
-                <input
-                  type="text"
-                  placeholder="FHIR WG formal"
-                  value={minuteDraft.presetNameDraft}
-                  onChange={(event) => minuteDraft.setPresetNameDraft(event.target.value)}
-                />
-                <button className="secondary-button" onClick={minuteDraft.savePreset} type="button">
-                  Save preset
-                </button>
-                <button className="ghost-button" onClick={minuteDraft.resetDraftToSelected} type="button">
-                  Revert draft
-                </button>
-              </div>
-              {minuteDraft.presetError ? <div className="inline-error">{minuteDraft.presetError}</div> : null}
-            </div>
-          ) : null}
-          {minuteDraft.selectedTemplate ? (
-            <div className="meta-row">
-              <span>{minuteDraft.selectedTemplate.description}</span>
-            </div>
-          ) : null}
-          <label className="field">
-            <span>Minute prompt</span>
-            <AutoGrowTextarea value={minuteDraft.promptBody} onChange={minuteDraft.setPromptBody} />
-          </label>
-          {minuteDraft.provider === "claude_tmux" ? (
-            <div className="field-grid">
-              <label className="field">
-                <span>Claude model</span>
-                <select
-                  value={minuteDraft.claudeModel}
-                  onChange={(event) => minuteDraft.setClaudeModel(event.target.value)}
-                >
-                  <option value="">Server default</option>
-                  {MINUTE_CLAUDE_MODEL_SUGGESTIONS.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Claude effort</span>
-                <select value={minuteDraft.claudeEffort} onChange={(event) => minuteDraft.setClaudeEffort(event.target.value as UiMinuteClaudeEffort)}>
-                  <option value="">Server default</option>
-                  {MINUTE_CLAUDE_EFFORT_OPTIONS.filter((value) => value).map((value) => (
-                    <option key={value} value={value}>{value[0].toUpperCase()}{value.slice(1)}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          ) : (
-            <div className="field-grid">
-              <label className="field">
-                <span>OpenRouter model</span>
-                <select
-                  value={minuteDraft.openrouterModel}
-                  onChange={(event) => minuteDraft.setOpenRouterModel(event.target.value)}
-                >
-                  <option value="">Server default</option>
-                  {MINUTE_OPENROUTER_MODEL_SUGGESTIONS.map((model) => (
-                    <option key={model} value={model}>
-                      {model}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          )}
+          <MinutePromptEditor
+            templates={minuteTemplates}
+            minuteDraft={minuteDraft}
+            disabled={requestState !== "idle" || !isAdmin}
+            includeRunSource={Boolean(minuteJob)}
+          />
           <div className="button-row">
-            <button className="primary-button" disabled={requestState !== "idle"} onClick={() => void submit(primaryAction)} type="button">
+            <button className="primary-button" disabled={requestState !== "idle" || !isAdmin} onClick={() => void submit(primaryAction)} type="button">
               {requestState === (
                 primaryAction === "start"
                   ? "starting"
-                  : primaryAction === "restart"
-                    ? "restarting"
-                    : "recovering"
+                  : primaryAction === "recover"
+                    ? "recovering"
+                    : "restarting"
               )
                 ? primaryAction === "start"
                   ? "Starting…"
-                  : primaryAction === "restart"
-                    ? "Restarting…"
-                    : "Recovering…"
+                  : primaryAction === "recover"
+                    ? "Recovering…"
+                    : "Restarting…"
                 : primaryLabel}
             </button>
-            {canRecover ? (
-              <button className="secondary-button" disabled={requestState !== "idle"} onClick={() => void submit("restart")} type="button">
-                Restart from scratch
-              </button>
-            ) : null}
-            <button className="ghost-button" disabled={requestState !== "idle" || !minuteJob || !["starting", "running", "restarting", "stopping"].includes(currentState)} onClick={() => void submit("stop")} type="button">
+            <button className="ghost-button" disabled={requestState !== "idle" || !isAdmin || !minuteJob || !["starting", "running", "restarting", "stopping"].includes(currentState)} onClick={() => void submit("stop")} type="button">
               {requestState === "stopping" ? "Stopping…" : "Stop minutes"}
             </button>
           </div>
+          {!isAdmin ? <div className="inline-error">Admin unlock required for minute controls.</div> : null}
           {minuteJob ? (
             <div className="meta-row">
-              <span>{minuteJob.provider === "openrouter_patch" ? "OpenRouter patch backend" : "Claude Code tmux backend"}</span>
+              <span>{minuteJob.provider === "openrouter_patch" ? "OpenRouter backend" : "Claude backend"}</span>
               <span>{describeMinuteBackend(minuteJob)}</span>
-            </div>
-          ) : null}
-          {minuteJob?.tmux_session_name || copyNotice ? (
-            <div className="copy-row">
-              {minuteJob?.tmux_session_name ? <span>TMUX: {minuteJob.tmux_session_name}</span> : null}
-              {copyNotice ? <span>{copyNotice}</span> : null}
             </div>
           ) : null}
           {error ? <div className="inline-error">{error}</div> : null}
@@ -1439,7 +1461,7 @@ function App() {
           <div className="viewer-head">
             <div>
               <p className="eyebrow">Rendered minutes</p>
-              <h2>{minuteJob ? "Live minutes" : "Minutes preview"}</h2>
+              <h2>{minuteUiState.title}</h2>
             </div>
             <div className="viewer-meta">
               <span>{updatedLabel}</span>
@@ -1453,16 +1475,8 @@ function App() {
             )}
           </div>
         </section>
-      </section>
-    </main>
+        </section>
+      </main>
+    </>
   );
 }
-
-injectStyles();
-
-const rootElement = document.getElementById("root");
-if (!rootElement) {
-  throw new Error("Missing #root");
-}
-
-createRoot(rootElement).render(<App />);

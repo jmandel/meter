@@ -5,9 +5,12 @@ test("minute taker prompts rely on transcript joins instead of attendees.md", ()
   const systemPrompt = buildSystemPrompt({
     meetingId: "999001",
     meetingRunId: "run-123",
+    botName: "Meeting Bot",
   });
 
   expect(systemPrompt).toContain("Use the transcript's join/leave lines as the attendee source.");
+  expect(systemPrompt).toContain("configured recorder bot name for this run is `Meeting Bot`");
+  expect(systemPrompt).toContain("Treat `Meeting Bot` as the Meter bot");
   expect(systemPrompt).toContain("One attendee per bullet.");
   expect(systemPrompt).toContain("[FHIR-34735](https://jira.hl7.org/browse/FHIR-34735)");
   expect(systemPrompt).toContain("For tracker-heavy sections");
@@ -29,9 +32,11 @@ test("system prompt uses the requested template guidance when no custom prompt i
   const systemPrompt = buildSystemPrompt({
     meetingId: "999001",
     meetingRunId: "run-123",
+    botName: "Recorder Alice",
     promptTemplateId: "decision-journal",
   });
 
+  expect(systemPrompt).toContain("configured recorder bot name for this run is `Recorder Alice`");
   expect(systemPrompt).toContain("Write the minutes as a decision journal.");
   expect(systemPrompt).toContain("Capture each substantive decision or tentative consensus as its own record.");
 });

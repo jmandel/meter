@@ -57,6 +57,7 @@ interface RunMetadata {
   meeting_run_id: string;
   room_id: string;
   base_url: string;
+  bot_name?: string | null;
   provider?: "claude_tmux" | "openrouter_patch";
   prompt_template_id?: string | null;
   prompt_label?: string | null;
@@ -64,8 +65,6 @@ interface RunMetadata {
   claude_effort?: "low" | "medium" | "high" | "max" | null;
   openrouter_model?: string | null;
 }
-
-type MinuteTakerLaunchMode = "normal" | "restart_replay" | "recover";
 
 interface InjectedMinuteTakerConfig {
   provider?: "claude_tmux" | "openrouter_patch";
@@ -78,7 +77,6 @@ interface InjectedMinuteTakerConfig {
   reset_output?: boolean;
   resume_existing_minutes?: boolean;
   tmux_session?: string | null;
-  launch_mode?: MinuteTakerLaunchMode;
 }
 
 function readInjectedConfig(): InjectedMinuteTakerConfig {
@@ -253,9 +251,7 @@ async function runPollingLoop(
       if (["completed", "failed", "aborted"].includes(run.state)) {
         console.log(`Meeting ended (state: ${run.state}). Sending final nudge...`);
         const baselineSnapshot = readMinutesSnapshot(runDir);
-        const response = await fetchTranscriptMd(client, runId, {
-          since: tracker.cursor ?? undefined,
-        });
+        const response = await fetchTranscriptMd(client, runId, tracker.cursor ?? undefined);
         const chunk = processResponse(tracker, response);
         if (chunk) {
           await writeChunk(runDir, chunk.segmentIndex, chunk.content);
@@ -282,9 +278,7 @@ async function runPollingLoop(
         // Fetch transcript since last cursor
         const sinceParam = tracker.cursor ?? undefined;
         console.log(`Poll ${pollCount}: fetching transcript (since=${sinceParam ?? "start"})...`);
-        const response = await fetchTranscriptMd(client, runId, {
-          since: sinceParam,
-        });
+        const response = await fetchTranscriptMd(client, runId, sinceParam);
         console.log(`  Response: ${response.length} bytes`);
         const chunk = processResponse(tracker, response);
 
@@ -373,6 +367,7 @@ async function runClaudeTmuxMinuteTaker(
   const systemPrompt = buildSystemPrompt({
     meetingId,
     meetingRunId: runId,
+    botName: metadata.bot_name ?? null,
     promptTemplateId: injectedConfig.prompt_template_id ?? null,
     userPromptBody: injectedConfig.user_prompt_body ?? null,
   });
@@ -415,6 +410,7 @@ async function main() {
     meeting_run_id: runId,
     room_id: meetingRun.room_id,
     base_url: config.baseUrl,
+    bot_name: meetingRun.bot_name ?? null,
     provider: injectedConfig.provider?.trim() === "openrouter_patch" ? "openrouter_patch" : config.provider,
     prompt_template_id: injectedConfig.prompt_template_id ?? null,
     prompt_label: injectedConfig.prompt_label ?? null,
@@ -437,7 +433,6 @@ async function main() {
     rmSync(`${runDir}/.openrouter-last-request.json`, { force: true });
     rmSync(`${runDir}/.openrouter-last-response.json`, { force: true });
     rmSync(`${runDir}/.openrouter-last-apply.json`, { force: true });
-    rmSync(`${runDir}/.openrouter-state.json`, { force: true });
     mkdirSync(`${runDir}/chunks`, { recursive: true });
   }
   await Bun.write(`${runDir}/run.json`, `${JSON.stringify(metadata, null, 2)}\n`);
@@ -451,12 +446,12 @@ async function main() {
       config: {
         meetingId,
         meetingRunId: runId,
+        botName: metadata.bot_name ?? null,
         runDir,
         pollIntervalMs: config.pollIntervalMs,
         promptTemplateId: injectedConfig.prompt_template_id ?? null,
         userPromptBody: injectedConfig.user_prompt_body ?? null,
         openrouterModel: metadata.openrouter_model ?? null,
-        launchMode: injectedConfig.launch_mode ?? "normal",
       },
     });
     console.log("OpenRouter minute-taker finished.");

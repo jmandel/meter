@@ -166,7 +166,6 @@ export interface MeetingRunRecord {
   ended_at: string | null;
   created_at: string;
   updated_at: string;
-  minutes_enabled: boolean;
   worker: WorkerSummary | null;
   paths: MeetingRunPaths;
   options: MeetingRunOptions;
@@ -196,6 +195,31 @@ export interface MinutePromptConfig {
   claude_model: string | null;
   claude_effort: MinuteClaudeEffort | null;
   openrouter_model: string | null;
+}
+
+export interface MinutePromptPresetRecord {
+  preset_id: string;
+  name: string;
+  provider: MinuteProvider;
+  prompt_template_id: string | null;
+  prompt_label: string | null;
+  user_prompt_body: string | null;
+  claude_model: string | null;
+  claude_effort: MinuteClaudeEffort | null;
+  openrouter_model: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpsertMinutePromptPresetRequest {
+  name: string;
+  provider?: MinuteProvider | null;
+  prompt_template_id?: string | null;
+  prompt_label?: string | null;
+  user_prompt_body?: string | null;
+  claude_model?: string | null;
+  claude_effort?: MinuteClaudeEffort | null;
+  openrouter_model?: string | null;
 }
 
 export interface MinuteJobRecord {
@@ -382,6 +406,16 @@ export interface HealthResponse {
   workers: {
     active_count: number;
   };
+}
+
+export type AuthSessionRole = "viewer" | "admin";
+
+export interface AuthSessionResponse {
+  authenticated: boolean;
+  role: AuthSessionRole | null;
+  csrf_token: string | null;
+  password_configured: boolean;
+  read_auth_required: boolean;
 }
 
 export interface SearchHit {

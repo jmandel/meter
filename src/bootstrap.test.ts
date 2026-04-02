@@ -55,4 +55,8 @@ test("renderBootstrapScript includes explicit meeting-exit detection fallbacks",
   expect(script).toContain("removed you from the meeting");
   expect(script).toContain("post-meeting-shell");
   expect(script).toContain("audio-track-ended");
+  expect(script).toContain("hasVisibleInMeetingLeaveButton");
+  expect(script).toContain("hasVisibleMeetingApp");
+  expect(script).toContain("storeLooksLive");
+  expect(script).toContain("meetingExitCandidateCount >= 2");
 });

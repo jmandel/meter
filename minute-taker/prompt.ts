@@ -16,10 +16,14 @@ function loadPrompt(name: string, vars: Record<string, string> = {}): string {
 export function buildSystemPrompt(config: {
   meetingId: string;
   meetingRunId: string;
+  botName?: string | null;
   promptTemplateId?: string | null;
   userPromptBody?: string | null;
 }): string {
-  const base = loadPrompt("system.md", config);
+  const base = loadPrompt("system.md", {
+    ...config,
+    botName: config.botName?.trim() || "Meeting Bot",
+  });
   const templatePromptBody = getMinutePromptTemplate(config.promptTemplateId)?.prompt_body ?? DEFAULT_MINUTE_PROMPT_BODY;
   const userPromptBody = config.userPromptBody?.trim() || templatePromptBody;
   return `${base}\n\n## Minutes Guidance\n\n${userPromptBody}`;
